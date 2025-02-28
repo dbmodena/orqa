@@ -1,1 +1,1 @@
-# orqa
+# <img src="static/images/clipart58856.png" alt="Image Alt Text" style="width: 50px; vertical-align: middle;">OrQA
