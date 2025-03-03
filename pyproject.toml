@@ -15,6 +15,12 @@ flaml = "^2.3.4"
 groq = "^0.18.0"
 graphviz = "^0.20.3"
 sqlalchemy = "^2.0.38"
+datasketch = "^1.6.5"
+nltk = "^3.9.1"
+pyautogen = "^0.7.6"
+dotenv = "^0.9.9"
+jsonlines = "^4.0.0"
+pyarrow = "^19.0.1"
 
 
 [tool.poetry.group.dev.dependencies]

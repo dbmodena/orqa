@@ -1,4 +1,16 @@
 *.zip
 *.db
 *.txt
+.venv
+data/tmp
+data/outputs
 data/lakebench
+data/lakebench_gt
+data/datasets/metadata
+clusters
+schema
+
+**.jsonl
+*.lock
+
+__pycache__
