@@ -21,6 +21,7 @@ pyautogen = "^0.7.6"
 dotenv = "^0.9.9"
 jsonlines = "^4.0.0"
 pyarrow = "^19.0.1"
+selenium = "^4.29.0"
 
 
 [tool.poetry.group.dev.dependencies]

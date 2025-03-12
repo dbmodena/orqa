@@ -6,7 +6,7 @@ data/tmp
 data/outputs
 data/lakebench
 data/lakebench_gt
-data/datasets/metadata
+data/datasets
 clusters
 schema
 

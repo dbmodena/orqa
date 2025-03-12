@@ -1,212 +1,350 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
 import os
-import json
 import time
+import queue
+import shutil
+import logging
+import urllib3
+import zipfile
 import warnings
-import requests
+from io import BytesIO
 import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from logging.handlers import QueueHandler, RotatingFileHandler, QueueListener
 
-import polars as pl
+import tqdm
+import tqdm.asyncio
+import jsonlines
 import pandas as pd
-from tqdm import tqdm
+from selenium import webdriver
 
 warnings.filterwarnings('ignore')
 
 
+def init_logger(log_directory):
+    root = logging.getLogger(f'crawlerLogger_{os.getpid()}')
+    root.setLevel(logging.DEBUG)
+    que = queue.Queue(-1)
+    queue_handler = QueueHandler(que)
+    if root.hasHandlers():
+        root.handlers.clear()
 
-import zipfile
-import threading
-
-
-def fetch_schema(i, ckan_url, formats):
-    csv_files = []
-    package_list_url = f'{ckan_url}package_search?rows=1000&start={i}'
-    try:
-        # start_request = time.time()
-        response = requests.get(package_list_url)
-        # end_request = time.time()
-        
-        data = response.json()
-        packages = data['result']['results']
-        
-        for dataset in packages:
-            dataset_id = dataset['id']
-            resources = dataset['resources']    
-
-            for resource in resources:
-                if resource['format'].upper() in formats:
-                    csv_files.append({
-                        'dataset_id'    : dataset_id,
-                        'resource_id'   : resource['id'],
-                        'title'         : resource['name'],
-                        'url'           : resource['url'],
-                        'date_modified' : resource['last_modified'],
-                        'tags'          : resource['tag']
-                    })
-    except Exception as e:
-        print(i, e)
-
-
-def foo(ckan_url):
-    package_list_url = ckan_url + 'package_search?rows=1000&start=0'
-    csv_files = []
+    if not root.hasHandlers():
+        handler = RotatingFileHandler(f"{log_directory}/{os.getpid()}.log", mode="a", maxBytes=1024 ** 3)
+        log_formatter = logging.Formatter("%(asctime)s,[%(process)d],[%(threadName)s],[%(levelname)s],%(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        handler.setFormatter(log_formatter)
+        root.addHandler(queue_handler)
     
-    start_request = time.time()
-    response = requests.get(package_list_url)
-    end_request = time.time()
-    print(f'Total time for initial request: {round(end_request - start_request, 3)}')
-
-    if response.status_code == 200:
-        n_datasets = response.json()['result']['count']
-        print(f"Found {n_datasets} datasets.")
-    else:
-        print(f"Error fetching dataset list: {response.status_code}")
-        return
-
-    # Use ThreadPoolExecutor to process CSVs concurrently with tqdm for progress tracking
-    with ThreadPoolExecutor(max_workers=100) as executor:
-        futures = {
-            executor.submit(fetch_schema, i): i for i in range(n_datasets)
-        }
-        
-        # Initialize tqdm for tracking progress
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing CSVs"):
-            csv_md = future.result()
+    listener = QueueListener(que, handler)
+    return root, listener
 
 
-# function to get datasets that have CSV resources
-def get_metadata_information(ckan_url, formats=['CSV']):
-    # get the list of dataset IDs
-    package_list_url = ckan_url + 'package_search?rows=1000&start=0'
-    csv_files = []
+def download_resource_csv(http: urllib3.PoolManager, 
+                          rsc_url: str, 
+                          rsc_name: str, 
+                          download_directory: str, 
+                          tmp_directory: str, 
+                          output_format: str = 'parquet',
+                          max_content_length: int = 2 ** 29,
+                          logger: logging.Logger|None=None):
     
-    start_request = time.time()
-    response = requests.get(package_list_url)
-    end_request = time.time()
-    print(f'Total time for initial request: {round(end_request - start_request, 3)}')
-
-    if response.status_code == 200:
-        data = response.json()
-        n_datasets = data['result']['count']
-        packages = data['result']['results']
-        print(f"Found {n_datasets} datasets.")
-    else:
-        print(f"Error fetching dataset list: {response.status_code}")
-        return
-
-    for i in tqdm(range(0, n_datasets, 1000)):
-        package_list_url = f'{ckan_url}package_search?rows=1000&start={i}'
+    def csv_base():
+        # sometimes the data are encoded, sometimes not
+        # and we do not want to start reading zip files here
+        assert not rsc_url.endswith('.zip')
+        assert 'DOCTYPE' not in response.data[:100].decode('latin-1')
         try:
-            start_request = time.time()
-            response = requests.get(package_list_url)
-            end_request = time.time()
+            pd.read_csv(response.data, **pd_read_csv_kwargs).to_parquet(f'{download_directory}/{rsc_name}.parquet', **pd_to_parquet_kwargs)
+        except:            
+            pd.read_csv(BytesIO(response.data), **pd_read_csv_kwargs).to_parquet(f'{download_directory}/{rsc_name}.parquet', **pd_to_parquet_kwargs)
             
-            data = response.json()
-            packages = data['result']['results']
+    def zip():        
+        # open the donwloaded ZIP
+        with zipfile.ZipFile(BytesIO(response.data), 'r') as z:
+            file_names = list(filter(lambda fname: 'metadata' not in fname.lower() and 'fr' not in fname.lower(), z.namelist()))
+            for i, fname in enumerate(file_names):
+                pd \
+                    .read_csv(z.open(fname), **pd_read_csv_kwargs) \
+                    .to_parquet(f'{download_directory}/{rsc_name}{"" if len(file_names) == 1 else f"_{i}"}.parquet', 
+                                **pd_to_parquet_kwargs)
+                    
+    def nested_link():
+        try:
+            # initialize the WebDriver
+            # with Firefox I encountered issues
+            options = webdriver.ChromeOptions()
+            options.add_argument("--headless")
             
-            for dataset in packages:
-                dataset_id = dataset['id']
-                resources = dataset['resources']    
-
-                for resource in resources:
-                    if resource['format'].upper() in formats:
-                        csv_files.append({
-                            'dataset_id'    : dataset_id,
-                            'resource_id'   : resource['id'],
-                            'title'         : resource['name'],
-                            'url'           : resource['url'],
-                            'date_modified' : resource['last_modified']
-                        })
-        except Exception as e:
-            print(i, e)
-            continue
+            prefs = {
+                "security.default_personal_cert": "Select Automatically",
+                "webdriver_accept_untrusted_certs": True,
+                "download.default_directory": os.path.abspath(tmp_directory),
+            }
+            options.add_experimental_option("prefs", prefs)
+            driver = webdriver.Chrome(options=options)
+            
+            driver.get(rsc_url)
+            time.sleep(5)
+        except:
+            url_csv_name = rsc_url.split('/')[-1]
+            if url_csv_name in os.listdir(tmp_directory):
+                pd \
+                    .read_csv(f'{tmp_directory}/{url_csv_name}', **pd_read_csv_kwargs) \
+                    .to_parquet(f'{download_directory}/{rsc_name}.parquet', **pd_to_parquet_kwargs)
+            elif re.search(r'href="(https?://[^\"]+\.csv)"', driver.page_source):
+                response = http.request('GET', re.search(r'href="(https?://[^\"]+\.csv)"', driver.page_source).group(1))
+                pd \
+                    .read_csv(response.data, **pd_read_csv_kwargs) \
+                    .to_parquet(f'{download_directory}/{rsc_name}.parquet', **pd_to_parquet_kwargs)
+        finally:
+            driver.quit()
     
-    print(f'Obtained {len(csv_files)} resource metadata')
-    return csv_files
+    # try to get the size of the file
+    response = http.request('GET', rsc_url, preload_content=False)
+    content_bytes = response.headers.get("Content-Length")
 
+    # Accept files with at most 500MB
+    if content_bytes and int(content_bytes) > max_content_length:
+        if logger: logger.warning(f'Large content-length for {rsc_url=}')
+        return False
 
-def downloader(csv_md):
-    global csv_folder
-    try:
-        url = csv_md['url']
-        csv_id = csv_md['resource_id']
-        if url.endswith('.csv'):
-            pd.read_csv(url, encoding_errors='ignore', low_memory=True).to_csv(f'{csv_folder}/{csv_id}.csv', index=False)
-        elif url.endswith('.xlsx'):
-            raise Exception('XLSX endoding')
-        #     pd.read_excel(url, encoding_errors='ignore' ).write_csv(f'{csv_folder}/{csv_id}.csv')
-        return ()
-    except Exception as exception:
-        return (str(exception).replace('\n', ' '), url)
+    pd_read_csv_kwargs = {'sep': None, 'encoding': 'latin-1', 'encoding_errors': 'ignore', 'on_bad_lines': 'skip', 'engine': 'python'}
+    pd_to_parquet_kwargs = {'index': False, 'compression': 'gzip'}            
+
+    # download all the resource data at once
+    response = http.request('GET', rsc_url)
+
+    # try each method to get the data
+    success = False
+    for method in [csv_base, zip]:
+        try:             
+            method()
+            success = True
+            break
+        except:
+            continue
         
-
-def initializer(_csv_folder):
-    global csv_folder
-    csv_folder = _csv_folder
+    return success
 
 
+def thread_task(
+        http: urllib3.PoolManager,
+        resource: dict,             
+        download_directory: str,
+        temporary_directory: str,       
+        logger: logging.Logger|None = None):
+    
+    rsc_format = resource['format']
+    rsc_url = resource['url']
+    rsc_id = resource['id']
 
-def download_csv_files_from_metadata(metadata: list, csv_folder: str):
-    with mp.Pool(initializer=initializer, initargs=(csv_folder, )) as pool:
-        errors = list(filter(bool, pool.map(downloader, metadata)))
-    return errors
+    if logger: logger.debug(f'Thread downloading {rsc_url=}...')
 
+    success = download_resource_csv(http, rsc_url, rsc_id, download_directory, temporary_directory, logger=logger)
+    
+    if logger: 
+        if success:
+            logger.debug(f'Thread successfully completed download.')
+        else:
+            logger.warning(f'Thread failed to download resource {rsc_url=}.')
+            
+    return success
+
+
+def process_task(
+        package_search_url: str,
+        download_directory: str,
+        temporary_directory: str,
+        log_directory: str,
+        start: int,
+        n_workers: int = 10,
+        tables_per_worker:int = 1_000,
+        accepted_formats: list = ['CSV'],
+        keep_logging: bool = True):
+    
+    if keep_logging:
+        logger, listener = init_logger(log_directory)
+        listener.start()
+    else:
+        logger = None
+
+    # create the HTTP manager for this process (shared among its threads)
+    http = urllib3.PoolManager(
+        # num_pools=n_workers,
+        maxsize=n_workers,
+        retries=False,
+        timeout=urllib3.Timeout(connect=5.0, read=5.0),
+        headers={
+            'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0'
+        }
+    )
+
+    try:
+        # get the URL
+        pkg_url = f'{package_search_url}?start={start}&rows={tables_per_worker - 1}'
+
+        # create a process-specific tmp directory 
+        # (which will be removed at the end of current job)
+        temporary_directory = f'{temporary_directory}/{os.getpid()}'
+        os.makedirs(temporary_directory, exist_ok=True)
+
+        # get the packages metadata
+        response = http.request('GET', pkg_url)
+        if response.status != 200:
+            if logger: logger.warning(f'Invalid response for {pkg_url=}: {response.status=}.')
+            return start, []
+        
+        packages_metadata = response.json()['result']['results']
+        
+        # get all the resources metadata
+        resources = [
+            rsc 
+            for pkg in packages_metadata 
+            for rsc in pkg['resources'] 
+            if (rsc['format'] in accepted_formats and 'en' in rsc['language'])
+        ]
+        res_urls = [rsc['url'] for rsc in resources]
+
+        # Does this duplicates any package downloads?
+        if logger: logger.info(f'Downloaded packages metadata, from {start=} to {start + len(packages_metadata)}, total resources: {len(res_urls)} (urls={res_urls})')
+
+        # run a thread pool to download the resources
+        with ThreadPoolExecutor(max_workers=n_workers) as thread_executor:
+            futures = [
+                thread_executor.submit(thread_task, http, resource, download_directory, temporary_directory, logger)
+                for resource in resources
+            ]
+            success = 0
+            for future in tqdm.asyncio.tqdm(as_completed(futures), total=len(futures), position=os.getpid() % n_workers + 1, leave=False, desc=f"Process {os.getpid()} status:"):
+                if future.result(timeout=120.0):
+                    success += 1
+    except Exception as e:
+        if logger: logger.error(f'Proccess failed with error {e}')
+    finally:
+        if logger: logger.info(f'Process completed current task. {success}/{len(resources)} ({round((success * 100 / len(resources)) if resources else 100, 3)}%) success resource downloads.')
+        if keep_logging: listener.stop()
+        http.clear()
+        if logger: logger.debug(f'Process released resources')
+        
+    shutil.rmtree(temporary_directory, ignore_errors=True)
+    return start, packages_metadata
+
+
+
+def download_tables(url_basepoint: str, 
+                    download_directory: str,
+                    temporary_directory: str,
+                    log_directory: str,
+                    metadata_jsonl: str,
+                    accepted_formats: list = ['CSV'],
+                    logger: logging.Logger|None = None,                    
+                    n_workers: int = 10, 
+                    packages_per_worker:int = 1_000,
+                    keep_logging: bool = True):
+    """
+    Download all the available resources from the given Open Data URL basepoint.
+
+    It spawns a pool of n_workers processes, and each worker spawns a pool of n_worker threads.
+
+    All the downloaded data are saved to the given download directory.
+
+    Some corner-cases may not be covered by the download logic.
+    """
+    
+    # instantiate a single connection manager, it should keep 
+    # a single pool for each thread, since they access different hosts
+    
+    if keep_logging:
+        logger, listener = init_logger(log_directory)        
+        listener.start()
+    else:
+        logger = None
+
+    # the basepoint available for all the relevant Open Data 
+    # portals is "package_search"
+    package_search_url = f'{url_basepoint}/package_search'
+
+    try:
+        # get initial response, to check whether the API 
+        # provides the "package_list" action or not (see US case...)
+        if logger:
+            http = urllib3.PoolManager()    
+            response = http.request('GET', f'{package_search_url}?start=0&rows=1000')
+            if response.status != 200:
+                logger.warning(f'Impossible to get initial response for {package_search_url=}?start=0&rows=1000')
+            else:
+                response = response.json()                
+                n_total_packages = response['result']['count']
+                n_valid_resources = sum(1 for pkg in response['result']['results'] for rsc in pkg['resources'] if rsc['format'] in accepted_formats)    
+                logger.info(f'{n_total_packages=} for current Open Data portal')
+                logger.info(f'{n_valid_resources=} in first 1000 packages ({round(n_valid_resources / 1000, 1)} on average)')
+            http.clear()
+        n_total_packages = 50
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context('spawn')) as executor:
+            if logger: logger.info(f'Submitting download tasks for {n_total_packages=}...')                
+            futures = [
+                executor.submit(
+                    process_task, package_search_url, download_directory, temporary_directory, log_directory, i, n_workers, packages_per_worker, accepted_formats, keep_logging)
+                    for i in range(0, n_total_packages, packages_per_worker)
+                ]
+            
+            packages_metadata = []
+            for future in tqdm.asyncio.tqdm(as_completed(futures), total=len(futures), desc="Global Processing Status:"):
+                start, metadata = future.result()
+                if logger: logger.debug(f'Step completed: [{start},{start + packages_per_worker-1}]')
+                for md in metadata:
+                    packages_metadata.append(md)
+            
+        if logger: logger.info('Done')    
+        
+        if logger: logger.info('Saving packages metadata to JSON Lines...')
+        with jsonlines.open(metadata_jsonl, 'w') as w:
+            w.write_all(packages_metadata)
+        if logger: logger.info('Done')
+    
+    except Exception as e:
+        if logger: logger.error(e)
+    finally:
+        if keep_logging: listener.stop()
 
 
 def main():
-    data_path = f'{os.path.dirname(__file__)}/../data'
-    metadata_folder = f'{data_path}/datasets/metadata'
-    
-    download_metadata = False
-    download_csv = True
+    data_path       = f'{os.path.dirname(__file__)}/../data'
+    tmp_dir         = f'{data_path}/tmp'
+    log_dir         = f'{data_path}/log/crawling'
+    metadata_dir    = f'{data_path}/datasets/metadata'
 
-    if not os.path.isdir(metadata_folder):
-        os.makedirs(metadata_folder)
+    # clean and create directories
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    os.makedirs(tmp_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(metadata_dir, exist_ok=True)
 
     open_data_portals = {
-        'UK'    : 'https://data.gov.uk/api/action/',
-        'US'    : 'https://catalog.data.gov/api/3/action/',
-        'CAN'   : 'https://open.canada.ca/data/api/action/',
-        'AFR'   : 'https://open.africa/api/action/',
+        'CAN'   : 'https://open.canada.ca/data/api/action',
+        # 'US'    : 'https://catalog.data.gov/api/3/action',
+        # 'UK'    : 'https://data.gov.uk/api/action',
+        # 'AFR'   : 'https://open.africa/api/action',
+        # 'SG'    : '???'
     }
 
-    if download_metadata:
-        print('Download metadata...')
-        for country_tag, country_ckan_base_url in open_data_portals.items():
-            print(f' {country_tag} '.center(50, '#'))
-            # get the metadata for the CSV files
-            csv_metadata = get_metadata_information(country_ckan_base_url)
+    for country_tag, country_ckan_base_url in open_data_portals.items():
+        download_dir    = f'{data_path}/datasets/{country_tag}'
+        metadata_jsonl  = f'{metadata_dir}/{country_tag}.jsonl'
+        shutil.rmtree(download_dir, ignore_errors=True)
+        os.makedirs(download_dir, exist_ok=True)
+        download_tables(
+            country_ckan_base_url, 
+            download_dir, tmp_dir, log_dir, 
+            metadata_jsonl, 
+            ['CSV'], 
+            n_workers=10,
+            packages_per_worker=10,
+            keep_logging=True)
 
-            # save the metadata
-            metadata_path = f'{metadata_folder}/metadata_{country_tag}.json'
-            with open(metadata_path, 'w') as fw:
-                json.dump(csv_metadata, fw)
-
-    if download_csv:
-        for country_tag, country_ckan_base_url in open_data_portals.items():
-            print(f' {country_tag} '.center(50, '#'))
-    
-            print('Load metadata...')
-            metadata_path = f'{metadata_folder}/metadata_{country_tag}.json'
-            with open(metadata_path, 'r') as fr:
-                csv_metadata = json.load(fr)
-
-            csv_metadata = csv_metadata[:1_000]
-            
-            print('Download files...')
-            dataset_path = f'{data_path}/datasets/{country_tag}'
-            if not os.path.isdir(dataset_path):
-                os.makedirs(dataset_path)
-
-            errors = download_csv_files_from_metadata(csv_metadata, dataset_path)
-            perr = len(errors) * 100 / len(csv_metadata)
-            print(f'{perr=}%')
-            with open(f'{metadata_folder}/errors_{country_tag}.csv', 'w') as fw:
-                for e, u in errors:
-                    fw.write(f'{e},{u}\n')
-
-            
-        
+    # remove the temporary directory
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    shutil.move(log_dir, f"{log_dir}_{time.strftime('H-%M-%S_%y%m%y')}")
 
 if __name__ == '__main__':
     main()
