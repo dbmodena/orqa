@@ -7,6 +7,7 @@ data/outputs
 data/lakebench
 data/lakebench_gt
 data/datasets
+data/log
 clusters
 schema
 

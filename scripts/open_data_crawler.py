@@ -4,6 +4,7 @@ import time
 import queue
 import shutil
 import logging
+import tqdm.auto
 import urllib3
 import zipfile
 import warnings
@@ -19,6 +20,10 @@ import pandas as pd
 from selenium import webdriver
 
 warnings.filterwarnings('ignore')
+
+
+MAX_THREADS_NUM = 10
+MAX_PROC_NUM = 20
 
 
 def init_logger(log_directory):
@@ -58,16 +63,16 @@ def download_resource_csv(http: urllib3.PoolManager,
         except:            
             pd.read_csv(BytesIO(response.data), **pd_read_csv_kwargs).to_parquet(f'{download_directory}/{rsc_name}.parquet', **pd_to_parquet_kwargs)
             
-    def zip():        
+    def zip():
         # open the donwloaded ZIP
         with zipfile.ZipFile(BytesIO(response.data), 'r') as z:
-            file_names = list(filter(lambda fname: 'metadata' not in fname.lower() and 'fr' not in fname.lower(), z.namelist()))
+            file_names = list(filter(lambda fname: 'metadata' not in fname.lower() and 'fr' not in fname.lower() and fname.endswith('.csv'), z.namelist()))
             for i, fname in enumerate(file_names):
                 pd \
                     .read_csv(z.open(fname), **pd_read_csv_kwargs) \
                     .to_parquet(f'{download_directory}/{rsc_name}{"" if len(file_names) == 1 else f"_{i}"}.parquet', 
                                 **pd_to_parquet_kwargs)
-                    
+                            
     def nested_link():
         try:
             # initialize the WebDriver
@@ -99,20 +104,23 @@ def download_resource_csv(http: urllib3.PoolManager,
         finally:
             driver.quit()
     
-    # try to get the size of the file
-    response = http.request('GET', rsc_url, preload_content=False)
-    content_bytes = response.headers.get("Content-Length")
+    try:
+        # try to get the size of the file
+        response = http.request('GET', rsc_url, preload_content=False)
+        content_bytes = response.headers.get("Content-Length")
 
-    # Accept files with at most 500MB
-    if content_bytes and int(content_bytes) > max_content_length:
-        if logger: logger.warning(f'Large content-length for {rsc_url=}')
+        # Accept files with at most 500MB
+        if content_bytes and int(content_bytes) > max_content_length:
+            if logger: logger.warning(f'Large content-length for {rsc_url=}')
+            return False
+
+        pd_read_csv_kwargs = {'sep': None, 'encoding': 'latin-1', 'encoding_errors': 'ignore', 'on_bad_lines': 'skip', 'engine': 'python'}
+        pd_to_parquet_kwargs = {'index': False, 'compression': 'gzip'}            
+
+        # download all the resource data at once
+        response = http.request('GET', rsc_url)
+    except urllib3.exceptions.TimeoutError:
         return False
-
-    pd_read_csv_kwargs = {'sep': None, 'encoding': 'latin-1', 'encoding_errors': 'ignore', 'on_bad_lines': 'skip', 'engine': 'python'}
-    pd_to_parquet_kwargs = {'index': False, 'compression': 'gzip'}            
-
-    # download all the resource data at once
-    response = http.request('GET', rsc_url)
 
     # try each method to get the data
     success = False
@@ -158,7 +166,7 @@ def process_task(
         log_directory: str,
         start: int,
         n_workers: int = 10,
-        tables_per_worker:int = 1_000,
+        packages_per_worker:int = 1_000,
         accepted_formats: list = ['CSV'],
         keep_logging: bool = True):
     
@@ -167,13 +175,15 @@ def process_task(
         listener.start()
     else:
         logger = None
-
+    
+    start_ptask = time.time()
+    
     # create the HTTP manager for this process (shared among its threads)
     http = urllib3.PoolManager(
         # num_pools=n_workers,
         maxsize=n_workers,
         retries=False,
-        timeout=urllib3.Timeout(connect=5.0, read=5.0),
+        timeout=urllib3.Timeout(connect=7.0, read=5.0),
         headers={
             'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0'
         }
@@ -181,7 +191,7 @@ def process_task(
 
     try:
         # get the URL
-        pkg_url = f'{package_search_url}?start={start}&rows={tables_per_worker - 1}'
+        pkg_url = f'{package_search_url}?start={start}&rows={packages_per_worker - 1}'
 
         # create a process-specific tmp directory 
         # (which will be removed at the end of current job)
@@ -192,7 +202,7 @@ def process_task(
         response = http.request('GET', pkg_url)
         if response.status != 200:
             if logger: logger.warning(f'Invalid response for {pkg_url=}: {response.status=}.')
-            return start, []
+            return start, os.getpid(), round(time.time() - start_ptask), []
         
         packages_metadata = response.json()['result']['results']
         
@@ -209,17 +219,22 @@ def process_task(
         if logger: logger.info(f'Downloaded packages metadata, from {start=} to {start + len(packages_metadata)}, total resources: {len(res_urls)} (urls={res_urls})')
 
         # run a thread pool to download the resources
-        with ThreadPoolExecutor(max_workers=n_workers) as thread_executor:
+        with ThreadPoolExecutor(max_workers=min(n_workers, MAX_THREADS_NUM)) as thread_executor:
             futures = [
                 thread_executor.submit(thread_task, http, resource, download_directory, temporary_directory, logger)
                 for resource in resources
             ]
+
             success = 0
-            for future in tqdm.asyncio.tqdm(as_completed(futures), total=len(futures), position=os.getpid() % n_workers + 1, leave=False, desc=f"Process {os.getpid()} status:"):
-                if future.result(timeout=120.0):
-                    success += 1
+            for future in tqdm.tqdm(as_completed(futures, timeout=120), total=len(futures), position=os.getpid() % n_workers + 1, leave=False, desc=f"Process {os.getpid()} status:"):
+                try:
+                    if future.result():
+                        success += 1
+                    del future
+                except:
+                    pass
     except Exception as e:
-        if logger: logger.error(f'Proccess failed with error {e}')
+        if logger: logger.error(f'Proccess pool failure: {e}')
     finally:
         if logger: logger.info(f'Process completed current task. {success}/{len(resources)} ({round((success * 100 / len(resources)) if resources else 100, 3)}%) success resource downloads.')
         if keep_logging: listener.stop()
@@ -227,7 +242,7 @@ def process_task(
         if logger: logger.debug(f'Process released resources')
         
     shutil.rmtree(temporary_directory, ignore_errors=True)
-    return start, packages_metadata
+    return start, os.getpid(), round(time.time() - start_ptask), packages_metadata
 
 
 
@@ -240,6 +255,7 @@ def download_tables(url_basepoint: str,
                     logger: logging.Logger|None = None,                    
                     n_workers: int = 10, 
                     packages_per_worker:int = 1_000,
+                    limit_packages:int|None = 10_000,
                     keep_logging: bool = True):
     """
     Download all the available resources from the given Open Data URL basepoint.
@@ -267,39 +283,46 @@ def download_tables(url_basepoint: str,
     try:
         # get initial response, to check whether the API 
         # provides the "package_list" action or not (see US case...)
+        http = urllib3.PoolManager()    
+        response = http.request('GET', f'{package_search_url}?start=0&rows=1000')
+        if response.status != 200:
+            if logger: logger.warning(f'Impossible to get initial response for {package_search_url=}?start=0&rows=1000')
+            return
+        
+        response = response.json()                
+        n_total_packages = response['result']['count']
         if logger:
-            http = urllib3.PoolManager()    
-            response = http.request('GET', f'{package_search_url}?start=0&rows=1000')
-            if response.status != 200:
-                logger.warning(f'Impossible to get initial response for {package_search_url=}?start=0&rows=1000')
-            else:
-                response = response.json()                
-                n_total_packages = response['result']['count']
-                n_valid_resources = sum(1 for pkg in response['result']['results'] for rsc in pkg['resources'] if rsc['format'] in accepted_formats)    
-                logger.info(f'{n_total_packages=} for current Open Data portal')
-                logger.info(f'{n_valid_resources=} in first 1000 packages ({round(n_valid_resources / 1000, 1)} on average)')
-            http.clear()
-        n_total_packages = 50
-        with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context('spawn')) as executor:
-            if logger: logger.info(f'Submitting download tasks for {n_total_packages=}...')                
+            n_valid_resources = sum(1 for pkg in response['result']['results'] for rsc in pkg['resources'] if rsc['format'] in accepted_formats)    
+            logger.info(f'{n_total_packages=} for current Open Data portal')
+            logger.info(f'{n_valid_resources=} in first 1000 packages ({round(n_valid_resources / 1000, 1)} on average)')
+        http.clear()
+        
+        n_total_packages = min(n_total_packages, limit_packages) if limit_packages else n_total_packages
+
+        # start the process pool
+        with ProcessPoolExecutor(max_workers=min(n_workers, MAX_PROC_NUM), mp_context=mp.get_context('spawn')) as executor:
+            if logger: logger.info(f'Submitting download tasks for {n_total_packages=}...')
             futures = [
                 executor.submit(
                     process_task, package_search_url, download_directory, temporary_directory, log_directory, i, n_workers, packages_per_worker, accepted_formats, keep_logging)
-                    for i in range(0, n_total_packages, packages_per_worker)
+                    for i in range(0, min(n_total_packages, limit_packages), packages_per_worker)
                 ]
             
             packages_metadata = []
-            for future in tqdm.asyncio.tqdm(as_completed(futures), total=len(futures), desc="Global Processing Status:"):
-                start, metadata = future.result()
-                if logger: logger.debug(f'Step completed: [{start},{start + packages_per_worker-1}]')
-                for md in metadata:
-                    packages_metadata.append(md)
+            with jsonlines.open(metadata_jsonl, 'a') as w:
+                for future in tqdm.auto.tqdm(as_completed(futures), total=len(futures), desc="Global Processing Status:"):
+                    start, pid, ptime, metadata = future.result()
+                    if logger: logger.debug(f'[PID:{pid}],[PROC_TIME:{ptime}],Step completed: [{start},{start + packages_per_worker-1}]')
+                    # once a step is completed, write the collected metadata and release these resources
+                    for md in metadata:
+                        packages_metadata.append(md)
+                    w.write_all(packages_metadata)
+                    packages_metadata = []
+                    del future
             
         if logger: logger.info('Done')    
         
         if logger: logger.info('Saving packages metadata to JSON Lines...')
-        with jsonlines.open(metadata_jsonl, 'w') as w:
-            w.write_all(packages_metadata)
         if logger: logger.info('Done')
     
     except Exception as e:
@@ -329,7 +352,7 @@ def main():
     }
 
     for country_tag, country_ckan_base_url in open_data_portals.items():
-        download_dir    = f'{data_path}/datasets/{country_tag}'
+        download_dir    = f'{data_path}/datasets/{country_tag}/tables'
         metadata_jsonl  = f'{metadata_dir}/{country_tag}.jsonl'
         shutil.rmtree(download_dir, ignore_errors=True)
         os.makedirs(download_dir, exist_ok=True)
@@ -338,13 +361,13 @@ def main():
             download_dir, tmp_dir, log_dir, 
             metadata_jsonl, 
             ['CSV'], 
-            n_workers=10,
-            packages_per_worker=10,
+            n_workers=20,
+            packages_per_worker=50,
             keep_logging=True)
 
     # remove the temporary directory
     shutil.rmtree(tmp_dir, ignore_errors=True)
-    shutil.move(log_dir, f"{log_dir}_{time.strftime('H-%M-%S_%y%m%y')}")
+    shutil.move(log_dir, f"{log_dir}_{time.strftime('%H_%M_%S_%y%m%d')}")
 
 if __name__ == '__main__':
     main()
