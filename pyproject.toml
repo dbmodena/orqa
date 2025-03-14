@@ -26,6 +26,9 @@ pyspark = "^3.5.5"
 bidict = "^0.23.1"
 mmh3 = "^5.1.0"
 inflection = "^0.5.1"
+duckdb = "^1.2.1"
+polars = "^1.24.0"
+wrapt-timeout-decorator = "^1.5.1"
 
 
 [tool.poetry.group.dev.dependencies]

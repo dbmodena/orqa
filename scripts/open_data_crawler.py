@@ -189,6 +189,11 @@ def process_task(
         }
     )
 
+    # the success ratio of tables correctly downloaded
+    success = 0
+    resources = []
+    packages_metadata = []
+
     try:
         # get the URL
         pkg_url = f'{package_search_url}?start={start}&rows={packages_per_worker - 1}'
@@ -225,8 +230,9 @@ def process_task(
                 for resource in resources
             ]
 
-            success = 0
-            for future in tqdm.tqdm(as_completed(futures, timeout=120), total=len(futures), position=os.getpid() % n_workers + 1, leave=False, desc=f"Process {os.getpid()} status:"):
+            # With multiple processes, this isn't really clear, 
+            # due to how they use the stdout
+            for future in tqdm.tqdm(as_completed(futures, timeout=120), total=len(futures), disable=True, position=os.getpid() % n_workers + 1, leave=False, desc=f"Process {os.getpid()} status:"):
                 try:
                     if future.result():
                         success += 1
@@ -234,7 +240,7 @@ def process_task(
                 except:
                     pass
     except Exception as e:
-        if logger: logger.error(f'Proccess pool failure: {e}')
+        if logger: logger.error(f'Proccess failure: {e}')
     finally:
         if logger: logger.info(f'Process completed current task. {success}/{len(resources)} ({round((success * 100 / len(resources)) if resources else 100, 3)}%) success resource downloads.')
         if keep_logging: listener.stop()
@@ -242,7 +248,7 @@ def process_task(
         if logger: logger.debug(f'Process released resources')
         
     shutil.rmtree(temporary_directory, ignore_errors=True)
-    return start, os.getpid(), round(time.time() - start_ptask), packages_metadata
+    return start, os.getpid(), round(time.time() - start_ptask, 3), packages_metadata
 
 
 
@@ -250,12 +256,12 @@ def download_tables(url_basepoint: str,
                     download_directory: str,
                     temporary_directory: str,
                     log_directory: str,
-                    metadata_jsonl: str,
                     accepted_formats: list = ['CSV'],
                     logger: logging.Logger|None = None,                    
                     n_workers: int = 10, 
                     packages_per_worker:int = 1_000,
-                    limit_packages:int|None = 10_000,
+                    from_n_package:int|None = None,
+                    to_n_package:int|None = None,
                     keep_logging: bool = True):
     """
     Download all the available resources from the given Open Data URL basepoint.
@@ -269,7 +275,9 @@ def download_tables(url_basepoint: str,
     
     # instantiate a single connection manager, it should keep 
     # a single pool for each thread, since they access different hosts
-    
+    assert to_n_package > from_n_package
+
+
     if keep_logging:
         logger, listener = init_logger(log_directory)        
         listener.start()
@@ -297,22 +305,39 @@ def download_tables(url_basepoint: str,
             logger.info(f'{n_valid_resources=} in first 1000 packages ({round(n_valid_resources / 1000, 1)} on average)')
         http.clear()
         
-        n_total_packages = min(n_total_packages, limit_packages) if limit_packages else n_total_packages
+        from_n_package      = max(from_n_package, 0) if from_n_package else 0
+        to_n_package        = min(n_total_packages, to_n_package) if to_n_package else n_total_packages
+        n_total_packages    = to_n_package - from_n_package
+
+        metadata_jsonl      = f'{download_directory}/metadata/metadata_from{from_n_package}_to{to_n_package}'
+        download_directory  = f'{download_directory}/tables/tables_from{from_n_package}_to{to_n_package}'
+        
+        # remove old existent data
+        shutil.rmtree(download_directory, ignore_errors=True)
+        if os.path.exists(metadata_jsonl):
+            os.remove(metadata_jsonl)
+
+        # create the directories
+        os.makedirs(os.path.dirname(metadata_jsonl), exist_ok=True)
+        os.makedirs(download_directory, exist_ok=True)
+        
+        if logger: logger.info(f'Downloading tables into {download_directory}')
+        if logger: logger.info(f'Submitting download tasks for {n_total_packages=}, from {from_n_package} to {to_n_package}...')
 
         # start the process pool
         with ProcessPoolExecutor(max_workers=min(n_workers, MAX_PROC_NUM), mp_context=mp.get_context('spawn')) as executor:
-            if logger: logger.info(f'Submitting download tasks for {n_total_packages=}...')
             futures = [
                 executor.submit(
                     process_task, package_search_url, download_directory, temporary_directory, log_directory, i, n_workers, packages_per_worker, accepted_formats, keep_logging)
-                    for i in range(0, min(n_total_packages, limit_packages), packages_per_worker)
+                    for i in range(from_n_package, to_n_package, packages_per_worker)
                 ]
-            
+            if logger: logger.debug(f'Total work steps: {len(range(from_n_package, to_n_package, packages_per_worker))}')
+
             packages_metadata = []
             with jsonlines.open(metadata_jsonl, 'a') as w:
                 for future in tqdm.auto.tqdm(as_completed(futures), total=len(futures), desc="Global Processing Status:"):
                     start, pid, ptime, metadata = future.result()
-                    if logger: logger.debug(f'[PID:{pid}],[PROC_TIME:{ptime}],Step completed: [{start},{start + packages_per_worker-1}]')
+                    if logger: logger.debug(f'[PID:{pid}],[PROC_TIME:{ptime}s],Step completed: [{start},{start + packages_per_worker-1}]')
                     # once a step is completed, write the collected metadata and release these resources
                     for md in metadata:
                         packages_metadata.append(md)
@@ -332,16 +357,18 @@ def download_tables(url_basepoint: str,
 
 
 def main():
+
+    from_   = 10_000
+    to_     = 15_000
+
     data_path       = f'{os.path.dirname(__file__)}/../data'
     tmp_dir         = f'{data_path}/tmp'
     log_dir         = f'{data_path}/log/crawling'
-    metadata_dir    = f'{data_path}/datasets/metadata'
 
     # clean and create directories
     shutil.rmtree(tmp_dir, ignore_errors=True)
     os.makedirs(tmp_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(metadata_dir, exist_ok=True)
 
     open_data_portals = {
         'CAN'   : 'https://open.canada.ca/data/api/action',
@@ -352,22 +379,22 @@ def main():
     }
 
     for country_tag, country_ckan_base_url in open_data_portals.items():
-        download_dir    = f'{data_path}/datasets/{country_tag}/tables'
-        metadata_jsonl  = f'{metadata_dir}/{country_tag}.jsonl'
+        download_dir = f'{data_path}/datasets/{country_tag}'
         shutil.rmtree(download_dir, ignore_errors=True)
         os.makedirs(download_dir, exist_ok=True)
         download_tables(
             country_ckan_base_url, 
             download_dir, tmp_dir, log_dir, 
-            metadata_jsonl, 
             ['CSV'], 
             n_workers=20,
             packages_per_worker=50,
+            from_n_package=from_,
+            to_n_package=to_,
             keep_logging=True)
 
     # remove the temporary directory
     shutil.rmtree(tmp_dir, ignore_errors=True)
-    shutil.move(log_dir, f"{log_dir}_{time.strftime('%H_%M_%S_%y%m%d')}")
+    shutil.move(log_dir, f"{log_dir}_{time.strftime('%y%m%d_%H_%M_%S')}")
 
 if __name__ == '__main__':
     main()
