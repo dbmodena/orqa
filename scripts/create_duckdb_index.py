@@ -1,5 +1,7 @@
+from logging.handlers import RotatingFileHandler
 import os
 import pickle
+import logging
 from itertools import chain
 
 import tqdm
@@ -12,20 +14,34 @@ from wrapt_timeout_decorator import timeout
 from orqa.utils import sanitize_string
 
 
-tables_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/tables/tables_from10000_to15000'
-metadata_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/metadata/metadata_from10000_to15000'
+tables_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/tables/tables_from0_to10000'
+metadata_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/metadata/metadata_from0_to10000'
 db_path         = f'{os.path.dirname(__file__)}/../data/datasets/CAN/database/CAN.db'
 values_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/database/values_dict.pickle'
 failures_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/database/failures.txt'
+log_path        = f'{os.path.dirname(__file__)}/../data/log/CAN_indexing.log'
+
+
+os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+logger = logging.getLogger(f'indexerLogger')
+logger.setLevel(logging.DEBUG)
+
+handler = RotatingFileHandler(log_path, mode="a", maxBytes=1024 ** 3)
+log_formatter = logging.Formatter("%(asctime)s,[%(process)d],[%(levelname)s],%(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+handler.setFormatter(log_formatter)
+logger.addHandler(handler)
 
 if os.path.exists(db_path): os.remove(db_path)
 os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
 # take the table IDs in alphabetical order
-table_ids = list(sorted(os.listdir(tables_path), reverse=True))[:100]
+table_ids = list(sorted(os.listdir(tables_path), reverse=True))
+
 
 # init the duckdb database
 con = duckdb.connect(db_path)
+logger.info('Connected to DuckDB')
 
 con.execute(f"""
     CREATE OR REPLACE TABLE AllTables (
@@ -36,10 +52,10 @@ con.execute(f"""
        );
     """
 )
+logger.info('Index table created')
 
 values = {}
-
-n = CHECKPOINT = 100    
+CHECKPOINT = 100    
 records = []
 
 
@@ -62,9 +78,11 @@ def get_table_values(table_id):
             )
         )
     )
+
+
 i = 0
 if not os.path.exists(values_path):
-    print('Create values dictionary')
+    logger.info('Create values dictionary')
     
     for table_id in tqdm.tqdm(table_ids):
         try:
@@ -74,20 +92,28 @@ if not os.path.exists(values_path):
                 i += 1
         except TimeoutError:
             continue
-    
+
+    logger.info('Create bidict from values')
     values = bidict.bidict(values)
 
+    logger.info('Save values bidict')
     with open(values_path, 'wb') as fw:
         pickle.dump(values, fw, protocol=pickle.HIGHEST_PROTOCOL)
 else:
-    print('Load values dictionary')
+    logger.info('Load values dictionary')
     with open(values_path, 'rb') as fr:
         values = pickle.load(fr)
 
-print(f'{len(values)=}')
+logger.info(f'{len(values)=}')
 
 
-@timeout(5)
+def is_num(x):
+    try: float(x)
+    except: return False
+    return True
+
+
+@timeout(20)
 def collect_table_records(table_idx, table_id):
     df = pl.read_parquet(f'{tables_path}/{table_id}')
 
@@ -96,31 +122,37 @@ def collect_table_records(table_idx, table_id):
         for col_idx, col in enumerate(df.columns)
         if not df.get_column(col).null_count() == df.height
         for row_idx, cell in enumerate(df.select(col).get_column(col).to_list())        
-        if not pd.isna(cell)
+        if not pd.isna(cell) and not is_num(cell)
     ]
 
-
+n = 0
+logger.info('Start insert values into duckdb')
 for table_idx, table_id in tqdm.tqdm(enumerate(table_ids), total=len(table_ids)):
     try:
         records += collect_table_records(table_idx, table_id)
-        n -= 1
+        n += 1
     except TimeoutError:
         continue
     except KeyError:
         continue
     
-    if n == 0:
+    if n % CHECKPOINT == 0 and n > 0:
         rec_df = pl.DataFrame(records, schema=['TableId', 'ColumnId', 'RowId', 'CellValue'], orient='row')
         con.execute("INSERT INTO AllTables SELECT * FROM rec_df")
         con.commit()
-        n = CHECKPOINT
         records = []
+        logger.debug(f'Inserted tables [{n - CHECKPOINT}, {n}]')
 
 rec_df = pl.DataFrame(records, schema=['TableId', 'ColumnId', 'RowId', 'CellValue'], orient='row')
 con.execute("INSERT INTO AllTables SELECT * FROM rec_df")
 con.commit()
-        
+logger.debug(f'Inserted tables [{n - CHECKPOINT}, {n}]')
+logger.info('Done')        
+
+logger.info('Creating indexes')
 con.execute("CREATE INDEX IF NOT EXISTS TableId_idx   ON AllTables (TableId);")
 con.execute("CREATE INDEX IF NOT EXISTS ColumnId_idx  ON AllTables (ColumnId);")
 con.execute("CREATE INDEX IF NOT EXISTS RowId_idx     ON AllTables (RowId);")
 con.execute("CREATE INDEX IF NOT EXISTS CellValue_idx ON AllTables (CellValue);")
+logger.info('Done')        
+
