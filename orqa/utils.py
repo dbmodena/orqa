@@ -1,12 +1,20 @@
 # import zipfile
 # from typing import Literal
 
+from functools import lru_cache
 import inflection
 import unicodedata
 # import polars as pl
 
 
 
+def is_num(x):
+    try: float(x)
+    except: return False
+    return True
+
+
+@lru_cache(maxsize=int(1e7))
 def sanitize_string(s):
     """
     Replaces problematic characters in column names with underscores,

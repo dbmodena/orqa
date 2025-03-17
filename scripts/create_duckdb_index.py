@@ -1,21 +1,22 @@
-from logging.handlers import RotatingFileHandler
 import os
 import pickle
 import logging
 from itertools import chain
+from logging.handlers import RotatingFileHandler
 
 import tqdm
 import bidict
 import duckdb
-import pandas as pd
 import polars as pl
 from wrapt_timeout_decorator import timeout
 
-from orqa.utils import sanitize_string
+from orqa.utils import sanitize_string, is_num
 
 
-tables_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/tables/tables_from0_to10000'
-metadata_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/metadata/metadata_from0_to10000'
+# tables_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/tables/tables_from0_to10000'
+# metadata_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/metadata/metadata_from0_to10000'
+tables_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/tables/tables_from10000_to15000'
+metadata_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/metadata/metadata_from10000_to15000'
 db_path         = f'{os.path.dirname(__file__)}/../data/datasets/CAN/database/CAN.db'
 values_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/database/values_dict.pickle'
 failures_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/database/failures.txt'
@@ -38,6 +39,7 @@ os.makedirs(os.path.dirname(db_path), exist_ok=True)
 # take the table IDs in alphabetical order
 table_ids = list(sorted(os.listdir(tables_path), reverse=True))
 
+logger.info(' Start new run '.center(50, '#'))
 
 # init the duckdb database
 con = duckdb.connect(db_path)
@@ -59,6 +61,7 @@ CHECKPOINT = 100
 records = []
 
 
+
 # setting this timeout we will prob have some keyerror next
 # @timeout(20)
 def get_table_values(table_id):
@@ -67,7 +70,7 @@ def get_table_values(table_id):
 
     return set(
         filter(
-            lambda v: v not in values, 
+            lambda v: v not in values and not is_num(v), 
             map(
                 lambda s: sanitize_string(str(s)), 
                 chain(*(
@@ -84,7 +87,7 @@ i = 0
 if not os.path.exists(values_path):
     logger.info('Create values dictionary')
     
-    for table_id in tqdm.tqdm(table_ids):
+    for table_id in tqdm.tqdm(table_ids, desc="Creating values dictionary:"):
         try:
             unique_vals = get_table_values(table_id)
             for v in unique_vals:
@@ -107,12 +110,6 @@ else:
 logger.info(f'{len(values)=}')
 
 
-def is_num(x):
-    try: float(x)
-    except: return False
-    return True
-
-
 @timeout(20)
 def collect_table_records(table_idx, table_id):
     df = pl.read_parquet(f'{tables_path}/{table_id}')
@@ -122,12 +119,12 @@ def collect_table_records(table_idx, table_id):
         for col_idx, col in enumerate(df.columns)
         if not df.get_column(col).null_count() == df.height
         for row_idx, cell in enumerate(df.select(col).get_column(col).to_list())        
-        if not pd.isna(cell) and not is_num(cell)
+        if sanitize_string(str(cell)) in values
     ]
 
 n = 0
 logger.info('Start insert values into duckdb')
-for table_idx, table_id in tqdm.tqdm(enumerate(table_ids), total=len(table_ids)):
+for table_idx, table_id in tqdm.tqdm(enumerate(table_ids), total=len(table_ids), desc="Inserting values:"):
     try:
         records += collect_table_records(table_idx, table_id)
         n += 1

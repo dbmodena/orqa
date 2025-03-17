@@ -1,0 +1,188 @@
+import os
+import csv
+import pickle
+
+import duckdb
+import jsonlines
+import polars as pl
+from tqdm import tqdm
+
+from orqa.utils import sanitize_string
+
+
+data_path       = f'{os.path.dirname(__file__)}/../data'
+tables_path     = f'{data_path}/datasets/CAN/tables/tables_from10000_to15000'
+metadata_path   = f'{data_path}/datasets/CAN/metadata/metadata_from10000_to15000'
+
+db_path         = f'{data_path}/datasets/CAN/database/CAN.db'
+valdict_path    = f'{data_path}/datasets/CAN/database/values_dict.pickle'
+
+candidates_path = f'{data_path}/outputs/candidate_joins.csv'
+
+print(candidates_path)
+# max number of results we want during search
+K               = 10 
+
+# the minimum number of distinct values a column must have
+MIN_NUM_VALUES  = 2
+
+# maximum number of null values (ratio) allowed in
+# one column to be accepted as candidate, i.e. drop
+# columns with a lot of nulls
+MAX_NULL_RATIO  = 0.5
+
+# minimum threshold for these metrics
+MIN_JACCARD     = 0.1
+MIN_OVERLAP     = 0.1
+
+N_BATCH_APPEND  = 100
+
+# tokens that we don't want to see in headers
+# because they may lead to fuzzy joins
+bad_columns_tokens = {'id', 'date', 'unnamed'}
+
+
+# the output list where candidates are stored
+# during search
+candidates      = []
+
+# load the table IDs 
+table_ids = list(sorted(os.listdir(tables_path), reverse=True))
+
+# load the resources metadata
+with jsonlines.open(metadata_path) as fr:
+    metadata = {rsc['id']: md for md in fr.iter() for rsc in md['resources'] if rsc['format'] == 'CSV'}
+
+# load the values bidictionary
+with open(valdict_path, 'rb') as fr:
+    values = pickle.load(fr)
+
+# create the output directory if necessary
+os.makedirs(os.path.dirname(candidates_path), exist_ok=True)
+
+# connect to the duckdb where the AllTables index is stored
+con = duckdb.connect(db_path, read_only=True)
+
+# to check that the same tables-column pair
+# is not duplicated into the final output
+already_used = set()
+
+
+with open(candidates_path, 'w') as file:
+    wr = csv.writer(file)
+    wr.writerow([
+                    'r_tab_id'    , 's_tab_id',
+                    'r_col_id'    , 's_col_id',
+                    'r_col_name'  , 's_col_name',
+                    'size_r_col'  , 'size_s_col',
+                    
+                    'size_intersection', 
+                    'size_union', 
+                    'jaccard', 
+                    'overlap'
+                ])
+
+# for r_tab_id in tqdm(range(len(table_ids))):
+for r_tab_id in tqdm(range(10)):
+    # read the relative table from disk
+    r_df = pl.read_parquet(f"{tables_path}/{table_ids[r_tab_id]}")
+
+    # for each col, if it is not supposed to be an ID
+    # or a date column, query the index to find potentially 
+    # joinable tables
+    for r_col_id in range(len(r_df.columns)):
+        if any(tok in r_df.columns[r_col_id].lower() for tok in bad_columns_tokens):
+            continue
+
+        if r_df.to_series(r_col_id).is_null().sum() / r_df.shape[0] >= MAX_NULL_RATIO:
+            continue
+        
+        r_col_name = r_df.columns[r_col_id]
+        
+        r_col = set(
+            filter(lambda v: v in values, 
+                   map(lambda v: sanitize_string(str(v)), r_df.to_series(r_col_id))
+            )
+        )
+
+        if len(r_col) < MIN_NUM_VALUES:
+            continue
+
+        r_col_int = list(map(lambda v: str(values[v]), filter(lambda v: v in values, r_col)))
+        if not r_col: continue
+        res = con.sql(f"""
+                SELECT TableId, ColumnId, COUNT(DISTINCT CellValue) AS intersec FROM AllTables
+                WHERE CellValue IN ({','.join(r_col_int)})
+                AND TableId <> {r_tab_id}
+                GROUP BY TableId, ColumnId
+                ORDER BY COUNT(DISTINCT CellValue) DESC
+                LIMIT {K};
+        """).fetchall()
+        
+        # for each tuple, check if this is a potentially valid join candidate
+        # if the overlap is over some kind of threshold, then the pair is
+        # meaningful (this has to be refined, maybe with an agent?)
+        for s_tab_id, s_col_id, intersection in res:
+            
+            if candidate_id := (
+                r_tab_id if r_tab_id <= s_tab_id else s_tab_id, 
+                s_col_id if r_tab_id <= s_tab_id else r_tab_id,
+                r_col_id if r_tab_id <= s_tab_id else s_col_id,
+                s_col_id if r_tab_id <= s_tab_id else r_col_id,
+                ) in already_used:
+                continue
+            already_used.add(candidate_id)
+            
+            s_df = pl.scan_parquet(f"{tables_path}/{table_ids[s_tab_id]}")
+        
+            s_col_series = s_df.select(pl.nth(s_col_id)).collect().to_series(0)
+            if s_col_series.is_null().sum() / s_col_series.shape[0] >= MAX_NULL_RATIO:
+                continue
+        
+            s_col = set(
+                filter(lambda v: v in values, 
+                       map(lambda v: sanitize_string(str(v)), 
+                           s_col_series
+                        )
+                    )
+                )
+            
+            s_col_name = s_df.collect_schema().names()[s_col_id]
+            
+            intersection    = r_col & s_col
+            union           = r_col | s_col
+            jaccard         = round(len(intersection) / len(union), 3)
+            overlap         = round(len(intersection) / min(len(r_col), len(s_col)), 3)
+
+            # do not consider this pair if:
+            #   - one of the two columns has only few value
+            #   - both jaccard and min-overlap are lower than a threshold
+            if len(s_col) < MIN_NUM_VALUES or jaccard < MIN_JACCARD or overlap < MIN_OVERLAP:
+                continue
+
+            candidates.append(
+                [
+                    r_tab_id    , s_tab_id,
+                    r_col_id    , s_col_id,
+                    r_col_name  , s_col_name,
+                    len(r_col)  , len(s_col),
+                    
+                    len(intersection), 
+                    len(union), 
+                    jaccard, 
+                    overlap
+                ]
+            )
+
+    if r_tab_id % N_BATCH_APPEND == 0 and r_tab_id > 0:
+        with open(candidates_path, 'a') as file:
+            wr = csv.writer(file)
+            wr.writerows(candidates)
+        candidates = []
+
+
+with open(candidates_path, 'a') as file:
+    wr = csv.writer(file)
+    wr.writerows(candidates)
+
+
