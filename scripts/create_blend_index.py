@@ -14,9 +14,9 @@ from orqa.utils import sanitize_string, is_num
 
 
 # tables_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/tables/tables_from0_to10000'
-# metadata_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/metadata/metadata_from0_to10000'
+# metadata_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/metadata/metadata_from0_to10000.jsonl'
 tables_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/tables/tables_from10000_to15000'
-metadata_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/metadata/metadata_from10000_to15000'
+metadata_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/metadata/metadata_from10000_to15000.jsonl'
 db_path         = f'{os.path.dirname(__file__)}/../data/datasets/CAN/database/CAN.db'
 values_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/database/values_dict.pickle'
 failures_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/database/failures.txt'

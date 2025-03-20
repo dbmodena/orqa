@@ -1,0 +1,21 @@
+model_list: 
+  - model_name: llama3.3-latest
+    litellm_params:
+      - model: ollama/llama3.3:latest
+      - api_base: http://localhost:11434
+  - model_name: llama3.1-8b
+    litellm_params:
+      - model: ollama/llama3.1:8b
+      - api_base: http://localhost:11434
+  - model_name: mistral-7b
+    litellm_params:
+      - model: mistral:7b
+      - api_base: http://localhost:11434
+  - model_name: qwen2.5-14b
+    litellm_params:
+      - model: qwen2.5:14b
+      - api_base: http://localhost:11434
+  - model_name: deepseek-r1-14b
+    litellm_params:
+      - model: deepseek-r1:14b
+      - api_base: http://localhost:11434

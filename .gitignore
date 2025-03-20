@@ -1,7 +1,12 @@
 *.zip
 *.db
 *.txt
+*.o
+*.e
+*_job.sh
 .venv
+
+*.ipynb_checkpoints
 data/tmp
 data/outputs
 data/lakebench
