@@ -39,7 +39,7 @@ print("Started Job")
 logger.info("Started Job")
 
 # max number of results we want during search
-K               = 20
+K               = 50
 
 # the minimum number of distinct values a column must have
 MIN_NUM_VALUES  = 7
@@ -59,6 +59,7 @@ N_BATCH_APPEND  = 10
 # because they may lead to fuzzy joins
 bad_columns_tokens = {'id', 'date', 'unnamed'}
 
+file_pattern    = re.compile(r'(_\d+)?.parquet$')
 
 # the output list where candidates are stored
 # during search
@@ -121,7 +122,7 @@ for r_tab_id in range(len(table_ids)):
             continue
         
         r_col_name = r_df.columns[r_col_id]
-        r_pkg_id = metadata[re.sub(r'(_\d+)?.parquet$', '', table_ids[r_tab_id])]['id']
+        r_pkg_id = metadata[re.sub(file_pattern, '', table_ids[r_tab_id])]['id']
         
         r_col = set(
             filter(lambda v: v in values, 
@@ -147,7 +148,7 @@ for r_tab_id in range(len(table_ids)):
         # if the overlap is over some kind of threshold, then the pair is
         # meaningful (this has to be refined, maybe with an agent?)
         for s_tab_id, s_col_id, intersection in res:
-            s_pkg_id = metadata[re.sub(r'(_\d+)?.parquet$', '', table_ids[s_tab_id])]['id']
+            s_pkg_id = metadata[re.sub(file_pattern, '', table_ids[s_tab_id])]['id']
             
             # if they belong to the same package, drop the pair
             if r_pkg_id == s_pkg_id:

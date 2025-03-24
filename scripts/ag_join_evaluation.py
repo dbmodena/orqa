@@ -5,135 +5,21 @@ import csv
 import time
 import asyncio
 import logging
-from typing import List
-from typing_extensions import Annotated
 from logging.handlers import TimedRotatingFileHandler
 
 import jsonlines
 import polars as pl
 
 import asyncio
-import json
-from dataclasses import dataclass
-from typing import List
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.messages import TextMessage
-from autogen_core import (
-    AgentId,
-    FunctionCall,
-    MessageContext,
-    RoutedAgent,
-    SingleThreadedAgentRuntime,
-    message_handler,
-    CancellationToken
-)
-from autogen_core.models import (
-    ChatCompletionClient,
-    LLMMessage,
-    AssistantMessage,
-    SystemMessage,
-    UserMessage,
-    FunctionExecutionResult, 
-    FunctionExecutionResultMessage,
-    ModelFamily
-)
-from autogen_core.tools import FunctionTool, Tool
-from autogen_ext.models.ollama import OllamaChatCompletionClient
+from autogen_core import CancellationToken
+from autogen_core.models import ModelFamily
+
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 from orqa.utils import sanitize_string
-
-
-# @dataclass
-# class Message:
-#     content: str
-
-""" 
-class ToolUseAgent(RoutedAgent):
-    def __init__(self, model_client: OpenAIChatCompletionClient|OllamaChatCompletionClient, system_message: str, tool_schema: List[Tool]) -> None:
-        super().__init__("JOIN Assistant with Tool")
-        self._system_messages: List[LLMMessage] = [
-            SystemMessage(content=system_message)
-        ]
-        self._model_client = model_client
-        self._tools = tool_schema
-
-    @message_handler
-    async def handle_user_message(self, message: Message, ctx: MessageContext) -> Message:
-        # Create a session of messages.
-        session: List[LLMMessage] = self._system_messages + [UserMessage(content=message.content, source="user")]
-
-        # Run the chat completion with the tools.
-        create_result = await self._model_client.create(
-            messages=session,
-            tools=self._tools,
-            cancellation_token=ctx.cancellation_token,
-        )
-
-        # If there are no tool calls, return the result.
-        if isinstance(create_result.content, str):
-            return Message(content=create_result.content)
-        assert isinstance(create_result.content, list) and all(
-            isinstance(call, FunctionCall) for call in create_result.content
-        )
-
-        # Add the first model create result to the session.
-        session.append(AssistantMessage(content=create_result.content, source="assistant"))
-
-        # Execute the tool calls.
-        results = await asyncio.gather(
-            *[self._execute_tool_call(call, ctx.cancellation_token) for call in create_result.content]
-        )
-
-        # Add the function execution results to the session.
-        session.append(FunctionExecutionResultMessage(content=results))
-
-        # Run the chat completion again to reflect on the history and function execution results.
-        create_result = await self._model_client.create(
-            messages=session,
-            cancellation_token=ctx.cancellation_token,
-        )
-        assert isinstance(create_result.content, str)
-
-        # Return the result as a message.
-        return Message(content=create_result.content)
-
-    async def _execute_tool_call(
-        self, call: FunctionCall, cancellation_token: CancellationToken
-    ) -> FunctionExecutionResult:
-        # Find the tool by name.
-        tool = next((tool for tool in self._tools if tool.name == call.name), None)
-        assert tool is not None
-        # Run the tool and capture the result.
-        try:
-            arguments = json.loads(call.arguments)
-            result = await tool.run_json(arguments, cancellation_token)
-            return FunctionExecutionResult(
-                call_id=call.id, content=tool.return_value_as_string(result), is_error=False, name=tool.name
-            )
-        except Exception as e:
-            return FunctionExecutionResult(call_id=call.id, content=str(e), is_error=True, name=tool.name)
-
- """
-
-results = []
-
-# in this case prob is not necessary to equip the assistant agent with this tool
-# we can simply call it with agent.create()
-async def save_join_score(agent_score: Annotated[int, 
-                                                 # TODO integer score 
-                          """A score of the JOIN between 0 and 3 where:
-                              0 is CASUAL;
-                              1 is SUPERFICIAL;
-                              2 is ENGAGED;
-                              3 is MEANINGFUL;"""
-                          ],
-                         agent_explanation: Annotated[str, "A clear, short and concise explanation of the given score"]):
-    global score, explanation
-    score = agent_score
-    explanation = agent_explanation
-    return agent_score, agent_explanation
 
 
 async def create_agent(
@@ -161,10 +47,6 @@ async def create_agent(
         **kwargs,
     )
 
-    # system_message = """
-    #     You are a smart AI assistant.
-    #     Do not write code. Do not respond. Only use the provided tool "save_join_score".
-    # """
     system_message = """
         You are a smart AI assistant. 
         Your task is to evaluate if two candidate columns which have common values 
@@ -182,7 +64,7 @@ async def create_agent(
         model_client=model_client,
         system_message=system_message
     )
-    # return runtime
+    
     return agent
 
 
@@ -248,12 +130,6 @@ async def amain():
     logger.info(f"{type(agent)=}, {agent.name=}, {agent._system_messages=}")
     await agent.on_reset(cancellation_token=CancellationToken())
     logger.info(f"After reset: {type(agent)=}, {agent.name=}, {agent._system_messages=}")
-
-    # runtime = await create_agent(model=model)
-
-    # logger.debug("Starting Agent Runtime")
-    # runtime.start()
-    # tool_use_agent = AgentId(f"tool_use_agent_{model}", "default")
 
     logger.info("Reading Table IDs")
     table_ids = list(sorted(os.listdir(tables_path), reverse=True))

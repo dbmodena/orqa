@@ -20,11 +20,9 @@ def sanitize_string(s):
     Replaces problematic characters in column names with underscores,
     normalizes accents, and strips spaces.
     """
-    if not isinstance(s, str):
-        return s
 
     # inflection
-    s = inflection.underscore(s).lower()
+    s = inflection.underscore(str(s)).lower()
     # normalize accents (e.g., é -> e)
     s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('utf-8')
     # replace problematic characters with underscores

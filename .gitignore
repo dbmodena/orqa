@@ -3,7 +3,7 @@
 *.txt
 *.o
 *.e
-*_job.sh
+job*.sh
 .venv
 
 *.ipynb_checkpoints

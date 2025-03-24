@@ -1,21 +1,41 @@
 model_list: 
-  - model_name: llama3.3-latest
+  - model_name: llama3.3
     litellm_params:
-      - model: ollama/llama3.3:latest
-      - api_base: http://localhost:11434
+      model: ollama/llama3.3:latest
+      api_base: http://localhost:11434
+  
   - model_name: llama3.1-8b
     litellm_params:
-      - model: ollama/llama3.1:8b
-      - api_base: http://localhost:11434
+      model: ollama/llama3.1:8b
+      api_base: http://localhost:11434
+  
   - model_name: mistral-7b
     litellm_params:
-      - model: mistral:7b
-      - api_base: http://localhost:11434
+      model: ollama/mistral:latest
+      api_base: http://localhost:11434
+  
   - model_name: qwen2.5-14b
     litellm_params:
-      - model: qwen2.5:14b
-      - api_base: http://localhost:11434
+      model: ollama/qwen2.5:14b
+      api_base: http://localhost:11434
+  
   - model_name: deepseek-r1-14b
     litellm_params:
-      - model: deepseek-r1:14b
-      - api_base: http://localhost:11434
+      model: ollama/deepseek-r1:14b
+      api_base: http://localhost:11434
+      keep_alive: '1h'
+      num_ctx: 8192
+
+  - model_name: deepseek-r1-70b
+    litellm_params:
+      model: ollama/deepseek-r1:70b
+      api_base: http://localhost:11434
+      keepalive: '1h'
+      num_ctx: 8192
+    model_info:
+      supports_function_calling: true
+
+
+litellm_settings:
+  host: "localhost"
+
