@@ -13,14 +13,17 @@ from wrapt_timeout_decorator import timeout
 from orqa.utils import sanitize_string, is_num
 
 
-# tables_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/tables/tables_from0_to10000'
-# metadata_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/metadata/metadata_from0_to10000.jsonl'
-tables_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/tables/tables_from10000_to15000'
-metadata_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/metadata/metadata_from10000_to15000.jsonl'
-db_path         = f'{os.path.dirname(__file__)}/../data/datasets/CAN/database/CAN.db'
-values_path     = f'{os.path.dirname(__file__)}/../data/datasets/CAN/database/values_dict.pickle'
-failures_path   = f'{os.path.dirname(__file__)}/../data/datasets/CAN/database/failures.txt'
-log_path        = f'{os.path.dirname(__file__)}/../data/log/CAN_indexing.log'
+tag             = 'NHSUK'
+from_           = 0
+to_             = 1809
+
+data_path       = f'{os.path.dirname(__file__)}/../data'
+tables_path     = f'{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}'
+metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
+db_path         = f'{data_path}/datasets/{tag}/database/blend.db'
+values_path     = f'{data_path}/datasets/{tag}/database/values_dict.pickle'
+failures_path   = f'{data_path}/datasets/{tag}/database/failures.txt'
+log_path        = f'{data_path}/log/{tag}_BlendIndexing.log'
 
 
 os.makedirs(os.path.dirname(log_path), exist_ok=True)

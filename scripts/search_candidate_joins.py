@@ -13,21 +13,24 @@ import polars as pl
 from orqa.utils import sanitize_string
 
 
+
+tag             = 'NHSUK'
+from_           = 0
+to_             = 1809
+
 data_path       = f'{os.path.dirname(__file__)}/../data'
-# tables_path     = f'{data_path}/datasets/CAN/tables/tables_from10000_to15000'
-# metadata_path   = f'{data_path}/datasets/CAN/metadata/metadata_from10000_to15000'
-tables_path     = f'{data_path}/datasets/CAN/tables/tables_from0_to10000'
-metadata_path   = f'{data_path}/datasets/CAN/metadata/metadata_from0_to10000'
+tables_path     = f'{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}'
+metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
+db_path         = f'{data_path}/datasets/{tag}/database/blend.db'
+valdict_path    = f'{data_path}/datasets/{tag}/database/values_dict.pickle'
+log_path        = f'{data_path}/log/{tag}_JoinSearch.log'
 
-db_path         = f'{data_path}/datasets/CAN/database/CAN.db'
-valdict_path    = f'{data_path}/datasets/CAN/database/values_dict.pickle'
-log_path        = f'{os.path.dirname(__file__)}/../data/log/CAN_joinsearch.log'
+candidates_path = f'{data_path}/outputs/{tag}_candidate_joins.csv'
 
-candidates_path = f'{data_path}/outputs/candidate_joins.csv'
 
 os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
-logger = logging.getLogger(f'indexerLogger')
+logger = logging.getLogger('JoinSearchLogger')
 logger.setLevel(logging.DEBUG)
 
 handler = RotatingFileHandler(log_path, mode="a", maxBytes=1024 ** 3)
@@ -106,7 +109,6 @@ with open(candidates_path, 'w') as file:
 start_batch_t = time.time()
 
 for r_tab_id in range(len(table_ids)):
-# for r_tab_id in range(5):
     # read the relative table from disk
     r_df = pl.read_parquet(f"{tables_path}/{table_ids[r_tab_id]}")
 
@@ -119,6 +121,10 @@ for r_tab_id in range(len(table_ids)):
 
         col_size = r_df.shape[0]
         if not col_size or r_df.to_series(r_col_id).is_null().sum() / col_size >= MAX_NULL_RATIO:
+            continue
+        
+        # perhaps due to error in crawling and saving metadata?
+        if not re.sub(file_pattern, '', table_ids[r_tab_id]) in metadata:
             continue
         
         r_col_name = r_df.columns[r_col_id]
@@ -148,6 +154,11 @@ for r_tab_id in range(len(table_ids)):
         # if the overlap is over some kind of threshold, then the pair is
         # meaningful (this has to be refined, maybe with an agent?)
         for s_tab_id, s_col_id, intersection in res:
+            
+            # perhaps due to error in crawling and saving metadata?
+            if not re.sub(file_pattern, '', table_ids[s_tab_id]) in metadata:
+                continue
+            
             s_pkg_id = metadata[re.sub(file_pattern, '', table_ids[s_tab_id])]['id']
             
             # if they belong to the same package, drop the pair

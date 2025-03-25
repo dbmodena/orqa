@@ -309,7 +309,7 @@ def download_tables(url_basepoint: str,
         to_n_package        = min(n_total_packages, to_n_package) if to_n_package else n_total_packages
         n_total_packages    = to_n_package - from_n_package
 
-        metadata_jsonl      = f'{download_directory}/metadata/metadata_from{from_n_package}_to{to_n_package}'
+        metadata_jsonl      = f'{download_directory}/metadata/metadata_from{from_n_package}_to{to_n_package}.jsonl'
         download_directory  = f'{download_directory}/tables/tables_from{from_n_package}_to{to_n_package}'
         
         # remove old existent data

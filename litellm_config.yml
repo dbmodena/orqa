@@ -30,7 +30,7 @@ model_list:
     litellm_params:
       model: ollama/deepseek-r1:70b
       api_base: http://localhost:11434
-      keepalive: '1h'
+      keep_alive: '1h'
       num_ctx: 8192
     model_info:
       supports_function_calling: true

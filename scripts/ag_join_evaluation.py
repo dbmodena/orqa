@@ -82,27 +82,29 @@ def get_resource_metadata(rsc_id, table_ids, metadata):
 
 
 async def amain():
-    data_path       = f'{os.path.dirname(__file__)}/../data'
-    # tables_path     = f'{data_path}/datasets/CAN/tables/tables_from10000_to15000'
-    # metadata_path   = f'{data_path}/datasets/CAN/metadata/metadata_from10000_to15000.jsonl'
-    tables_path     = f'{data_path}/datasets/CAN/tables/tables_from0_to10000'
-    metadata_path   = f'{data_path}/datasets/CAN/metadata/metadata_from0_to10000.jsonl'
-    log_path        = f'{data_path}/log/CAN_JoinEval.log'
-    
-    candidates_path = f'{data_path}/outputs/candidate_joins.csv'
-    evaluated_path  = f'{data_path}/outputs/evaluated_joins.csv'
+    tag             = 'NHSUK'
+    from_           = 0
+    to_             = 1809
 
-    add_header          = False
+    data_path       = f'{os.path.dirname(__file__)}/../data'
+    tables_path     = f'{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}'
+    metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
+    log_path        = f'{data_path}/log/{tag}_JoinEvaluation.log'
+
+    candidates_path = f'{data_path}/outputs/{tag}_candidate_joins.csv'
+    evaluated_path  = f'{data_path}/outputs/{tag}_evaluated_joins.csv'
+
+    add_header          = True
     save_explanation    = True
 
     UP_TO_ROW           = 100
     WRITE_BATCH_SIZE    = 10
 
     # to limit the context passed to the LLM-agent (the "notes" field may be very very long...)
-    MAX_LENGTH_NOTES    = 200
+    MAX_LENGTH_NOTES    = 500
     
     # number of sampled rows passed to the LLM into the question context
-    N_ROWS_SAMPLE       = 3
+    N_ROWS_SAMPLE       = 5
 
     # number of values in common between the candidate joinable columnes
     # passed to the LLM into the question context
@@ -116,7 +118,7 @@ async def amain():
 
     # set up the logging
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    logger = logging.getLogger(f'indexerLogger')
+    logger = logging.getLogger(f'evaluationLogger')
     logger.setLevel(logging.DEBUG)
     handler = TimedRotatingFileHandler(log_path, when="midnight", interval=1, backupCount=3)
     handler.suffix = "%y-%m-%d_%H:%M:%S.log"
@@ -169,7 +171,6 @@ async def amain():
     start_batch_t = time.time()
 
     logging.info("Started Agent JOINs Evaluation")
-    time.sleep(5)
     for i, row in enumerate(candidates.rows()[:UP_TO_ROW], start=1):
         if i % WRITE_BATCH_SIZE == 0:
             logger.info(f'Up to table {i}({round(i * 100 / len(candidates), 3)}%);time:{round(time.time() - start_batch_t, 3)}s')
@@ -178,7 +179,6 @@ async def amain():
                 wr.writerows(evaluations)
             evaluations = []
             start_batch_t = time.time()
-
 
         # ask the agent for the score
         try:
@@ -191,35 +191,48 @@ async def amain():
             r_pkg_note = re.sub(r"(\n|\r|\t)", " ", r_pkg_note)[:MAX_LENGTH_NOTES]
             s_pkg_note = re.sub(r"(\n|\r|\t)", " ", s_pkg_note)[:MAX_LENGTH_NOTES]
 
-            # get a small sample from the dataframes
             r_df = pl.read_parquet(f'{tables_path}/{table_ids[r_tab_id]}')
-            r_df = r_df.sample(max(N_ROWS_SAMPLE, r_df.shape[0]))
-
             s_df = pl.read_parquet(f'{tables_path}/{table_ids[s_tab_id]}')
+
+            # get a small sample from the dataframes
+            r_df = r_df.sample(max(N_ROWS_SAMPLE, r_df.shape[0]))
             r_df = s_df.sample(max(N_ROWS_SAMPLE, s_df.shape[0]))
             
             # get the cells that have made the join
             common_cells = list(set(map(sanitize_string, r_df.to_series(r_col_id))) & set(map(sanitize_string, s_df.to_series(s_col_id))))
             common_cells = common_cells[:MAX_COMM_CELLS]
-            # response = await runtime.send_message(
+                        
             response = await agent.on_messages(
                 messages=[
                     TextMessage(content=f"""
-                        Define a score given the following information from the two tables: 
-                        The columns that joins are {r_col_name=}, {s_col_name=}, 
-                        r_table_name={r_rsc_name}, s_table_name={s_rsc_name}, 
+                        Given the following information about two tables: 
                         
-                        r_table_description={r_pkg_note}, s_table_description={s_pkg_note}
+                        r_table_name: {r_rsc_name}, 
                         
-                        common_cells: {common_cells}
+                        r_table_description={r_pkg_note}, 
                         
                         r_table_sample:
                         {r_df}, 
                         
+                        #########################################
+
+                        s_table_name={s_rsc_name}, 
+                        
+                        s_table_description={s_pkg_note}
+                        
+                        
                         s_table_sample:
                         {s_df}
 
+                        ##########################################
+                        
+                        The columns that joins are {r_col_name=}, {s_col_name=},
+
+                        Cells in common in the joining columns: {common_cells}
+
+                        Define a integer score about the JOIN between the tables on the given columns.
                         Give only one overall score between 0 (casual) and 5 (meaningful) and a clear, short and concise explanation.
+
                         Write the score inside tags <score>SCORE</score>.
                         """,
                         source="user"
@@ -243,9 +256,6 @@ async def amain():
             
             # reset the agent to the initial state
             await agent.on_reset(cancellation_token=CancellationToken())
-
-    # logger.debug("Stopping Agent Runtime")
-    # await runtime.stop()
 
     logger.info(f"Up to table {i}({round(i * 100 / len(candidates), 3)}%);time:{round(time.time() - start_batch_t, 3)}s")
     with open(evaluated_path, "a") as file:
