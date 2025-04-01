@@ -138,7 +138,7 @@ class SQLQueryGeneratorAgent(RoutedAgent):
             reviews = [message.review]
             for m in self._session_memory[message.session_id]:
                 if isinstance(m, SQLReviewResult):
-                    reviews.append(eval(m.review)['suggested_changes'])
+                    reviews.append(m.json_review['suggested_changes'])
                     messages.append(UserMessage(content=m.review, source="Reviewer"))
                 elif isinstance(m, SQLReviewTask):
                     messages.append(AssistantMessage(content=m.sql_query, source="QueryGenerator"))

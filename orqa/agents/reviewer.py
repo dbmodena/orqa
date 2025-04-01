@@ -29,6 +29,7 @@ class ReviewerAgent(RoutedAgent):
         self._system_messages: List[LLMMessage] = [SystemMessage(content=system_message)]
         self._session_memory : Dict[str, List[SQLReviewTask | SQLReviewResult | NLReviewTask | NLReviewResult]] = dict()
         self._model_client = model_client
+        self._logger = logging.getLogger('agentJobLogger')
 
     @message_handler
     async def handle_sql_review_task(self, message: SQLReviewTask, ctx: MessageContext) -> None:
@@ -63,7 +64,8 @@ class ReviewerAgent(RoutedAgent):
             Don't approve the query if:
                 - Previous feedback was not addressed.
                 - the query is too simple (like "SELECT * FROM table1 JOIN table2", if there are WHERE, GROUP, etc is ok)
-                - columns and tables names are not used correctly or not enclosed by ``.
+                - column names are not used correctly or not enclosed by ``.
+                - the query is identical to old questions.
             
             Respond with the following format:
         """ + """
@@ -78,20 +80,12 @@ class ReviewerAgent(RoutedAgent):
 
         response = await self._model_client.create(
             self._system_messages + [UserMessage(content=prompt, source=self.metadata["type"])],
-            cancellation_token=ctx.cancellation_token,
+            cancellation_token=ctx.cancellation_token
         )
 
         assert isinstance(response.content, str)
-        logger = logging.getLogger('agentJobLogger')
-
-        # parse the response JSON
-        m = re.search(r"```(\w+)\s*(.*?)\s*```", response.content, re.DOTALL)
-        assert m, f"No matching group: {response.content}"
-        m = m.groups()
-        assert len(m) == 2, f"Bad JSON review format: {response.content=}"
-        try: review = json.loads(m[1])
-        except: logger.error(f"Bad JSON review format: {m[1]}")
-
+        review = self._extract_that_damn_json_output(response.content, self._logger)
+        
         # construct the review text
         review_text = f"""
             Query review:
@@ -102,12 +96,13 @@ class ReviewerAgent(RoutedAgent):
         review_result = SQLReviewResult(
             review=review_text,
             session_id=message.session_id,
-            approved=approved
+            approved=approved,
+            json_review=review
         )
 
         self._session_memory[message.session_id].append(review_result)
 
-        logger.debug(f"""
+        self._logger.debug(f"""
 Review Result:
 {"-" * 100}
 
@@ -124,7 +119,6 @@ Approved:
 """)        
         # publish the review result
         await self.publish_message(review_result, topic_id=TopicId("default", self.id.key))
-
 
     @message_handler
     async def handle_nl_review_task(self, message: NLReviewTask, ctx: MessageContext) -> None:
@@ -158,7 +152,7 @@ Approved:
                 - The question seems to be uncorrelated to the task or not clear.
                 - Previous feedback was not addressed.                        
             
-            Respond with the following format:
+            Respond with the following JSON format:
         """ + """
             ```json
             {
@@ -171,17 +165,13 @@ Approved:
 
         response = await self._model_client.create(
             self._system_messages + [UserMessage(content=prompt, source=self.metadata["type"])],
-            cancellation_token=ctx.cancellation_token,
+            cancellation_token=ctx.cancellation_token
         )
 
         assert isinstance(response.content, str)
 
         # parse the response JSON
-        m = re.search(r"```(\w+)\s*(.*?)\s*```", response.content, re.DOTALL)
-        assert m, f"No matching group: {response.content}"
-        m = m.groups()
-        assert len(m) == 2, f"Bad JSON review formatting: {response.content=}"
-        review = json.loads(m[1])
+        review = self._extract_that_damn_json_output(response.content, self._logger)
 
         # construct the review text
         review_text = f"""
@@ -193,13 +183,13 @@ Approved:
         review_result = NLReviewResult(
             session_id=message.session_id,
             review=review_text,
-            approved=approved
+            approved=approved,
+            json_review=review
         )
 
         self._session_memory[message.session_id].append(review_result)
 
-        logger = logging.getLogger('agentJobLogger')
-        logger.debug(f"""
+        self._logger.debug(f"""
 Review Result:
 {"-" * 100}
 
@@ -217,3 +207,14 @@ Approved:
         # publish the review result
         await self.publish_message(review_result, topic_id=TopicId("default", self.id.key))
 
+
+    def _extract_that_damn_json_output(self, content, logger):
+        try:
+            return json.loads(re.search(r"```(\w+)\s*(.*?)\s*```", content, re.DOTALL).groups()[-1])
+        except:
+            try:
+                return json.loads(re.search(r"(\{.*?\})", content, re.DOTALL).groups()[-1])
+            except:
+                logger.error(f"Bad formatting in JSON review response:\n{content}")
+                raise ValueError(f"Bad formatting in JSON review response: {content}")
+        

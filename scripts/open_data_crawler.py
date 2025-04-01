@@ -1,29 +1,28 @@
-import re
 import os
 import time
 import queue
 import shutil
 import logging
-import tqdm.auto
 import urllib3
 import zipfile
 import warnings
 from io import BytesIO
+from typing import Tuple
+from statistics import mean
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from logging.handlers import QueueHandler, RotatingFileHandler, QueueListener
 
 import tqdm
-import tqdm.asyncio
 import jsonlines
 import pandas as pd
-from selenium import webdriver
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings('ignore')
 
 
 MAX_THREADS_NUM = 10
-MAX_PROC_NUM = 20
+MAX_PROC_NUM = 10
 
 
 def init_logger(log_directory):
@@ -34,6 +33,14 @@ def init_logger(log_directory):
     if root.hasHandlers():
         root.handlers.clear()
 
+    # TODO keep only the 2 most recent log directories
+    old_dirs =  sorted([d for d in os.listdir(os.path.dirname(log_directory))], reverse=True)
+    dirs_to_delete = old_dirs[3:] if len(old_dirs) > 3 else []
+
+    for dir_to_delete in dirs_to_delete:        
+        dir_path = os.path.join(os.path.dirname(log_directory), dir_to_delete)     
+        shutil.rmtree(dir_path)
+    
     if not root.hasHandlers():
         handler = RotatingFileHandler(f"{log_directory}/{os.getpid()}.log", mode="a", maxBytes=1024 ** 3)
         log_formatter = logging.Formatter("%(asctime)s,[%(process)d],[%(threadName)s],[%(levelname)s],%(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -44,15 +51,15 @@ def init_logger(log_directory):
     return root, listener
 
 
-def download_resource_csv(http: urllib3.PoolManager, 
-                          rsc_url: str, 
-                          rsc_name: str, 
-                          download_directory: str, 
-                          tmp_directory: str, 
-                          output_format: str = 'parquet',
-                          max_content_length: int = 2 ** 29,
-                          logger: logging.Logger|None=None):
-    
+def download_resource_csv(data: Tuple[urllib3.PoolManager | urllib3.ProxyManager, str, str, str, int, logging.Logger|None]):
+        # http: urllib3.PoolManager | urllib3.ProxyManager, 
+        # rsc_url: str, 
+        # rsc_name: str, 
+        # download_directory: str, 
+        # max_content_length: int,
+        # logger: logging.Logger|None):
+    http, rsc_url, rsc_name, download_directory, max_content_length, logger = data
+
     def csv_base():
         # sometimes the data are encoded, sometimes not
         # and we do not want to start reading zip files here
@@ -60,7 +67,8 @@ def download_resource_csv(http: urllib3.PoolManager,
         assert 'DOCTYPE' not in response.data[:100].decode('latin-1')
         try:
             pd.read_csv(response.data, **pd_read_csv_kwargs).to_parquet(f'{download_directory}/{rsc_name}.parquet', **pd_to_parquet_kwargs)
-        except:            
+        except:
+            # in some cases data are encoded, thus we try again with a byte io stream
             pd.read_csv(BytesIO(response.data), **pd_read_csv_kwargs).to_parquet(f'{download_directory}/{rsc_name}.parquet', **pd_to_parquet_kwargs)
             
     def zip():
@@ -68,48 +76,18 @@ def download_resource_csv(http: urllib3.PoolManager,
         with zipfile.ZipFile(BytesIO(response.data), 'r') as z:
             file_names = list(filter(lambda fname: 'metadata' not in fname.lower() and 'fr' not in fname.lower() and fname.endswith('.csv'), z.namelist()))
             for i, fname in enumerate(file_names):
-                pd \
-                    .read_csv(z.open(fname), **pd_read_csv_kwargs) \
-                    .to_parquet(f'{download_directory}/{rsc_name}{"" if len(file_names) == 1 else f"_{i}"}.parquet', 
-                                **pd_to_parquet_kwargs)
-                            
-    def nested_link():
-        try:
-            # initialize the WebDriver
-            # with Firefox I encountered issues
-            options = webdriver.ChromeOptions()
-            options.add_argument("--headless")
-            
-            prefs = {
-                "security.default_personal_cert": "Select Automatically",
-                "webdriver_accept_untrusted_certs": True,
-                "download.default_directory": os.path.abspath(tmp_directory),
-            }
-            options.add_experimental_option("prefs", prefs)
-            driver = webdriver.Chrome(options=options)
-            
-            driver.get(rsc_url)
-            time.sleep(5)
-        except:
-            url_csv_name = rsc_url.split('/')[-1]
-            if url_csv_name in os.listdir(tmp_directory):
-                pd \
-                    .read_csv(f'{tmp_directory}/{url_csv_name}', **pd_read_csv_kwargs) \
-                    .to_parquet(f'{download_directory}/{rsc_name}.parquet', **pd_to_parquet_kwargs)
-            elif re.search(r'href="(https?://[^\"]+\.csv)"', driver.page_source):
-                response = http.request('GET', re.search(r'href="(https?://[^\"]+\.csv)"', driver.page_source).group(1))
-                pd \
-                    .read_csv(response.data, **pd_read_csv_kwargs) \
-                    .to_parquet(f'{download_directory}/{rsc_name}.parquet', **pd_to_parquet_kwargs)
-        finally:
-            driver.quit()
-    
+                (
+                    pd
+                    .read_csv(z.open(fname), **pd_read_csv_kwargs)
+                    .to_parquet(f'{download_directory}/{rsc_name}{"" if len(file_names) == 1 else f"_{i}"}.parquet', **pd_to_parquet_kwargs)
+                )
+
     try:
         # try to get the size of the file
-        response = http.request('GET', rsc_url, preload_content=False)
+        response = http.request('GET', rsc_url, preload_content=False, redirect=True)
         content_bytes = response.headers.get("Content-Length")
 
-        # Accept files with at most 500MB
+        # Accept files with limited size
         if content_bytes and int(content_bytes) > max_content_length:
             if logger: logger.warning(f'Large content-length for {rsc_url=}')
             return False
@@ -118,7 +96,7 @@ def download_resource_csv(http: urllib3.PoolManager,
         pd_to_parquet_kwargs = {'index': False, 'compression': 'gzip'}            
 
         # download all the resource data at once
-        response = http.request('GET', rsc_url)
+        response = http.request('GET', rsc_url, redirect=True)
     except urllib3.exceptions.TimeoutError:
         return False
 
@@ -131,30 +109,30 @@ def download_resource_csv(http: urllib3.PoolManager,
             break
         except:
             continue
-        
+    
+    if logger: logger.debug(f"{'SUCCESS' if success else 'FAILURE'} download resource {rsc_url}")
     return success
 
 
 def thread_task(
-        http: urllib3.PoolManager,
+        http: urllib3.PoolManager | urllib3.ProxyManager,
         resource: dict,             
         download_directory: str,
         temporary_directory: str,       
         logger: logging.Logger|None = None):
     
-    rsc_format = resource['format']
     rsc_url = resource['url']
     rsc_id = resource['id']
 
-    if logger: logger.debug(f'Thread downloading {rsc_url=}...')
+    if logger: logger.debug(f'Thread downloading {rsc_url=}')
 
     success = download_resource_csv(http, rsc_url, rsc_id, download_directory, temporary_directory, logger=logger)
     
     if logger: 
         if success:
-            logger.debug(f'Thread successfully completed download.')
+            logger.debug(f'Success download resource.')
         else:
-            logger.warning(f'Thread failed to download resource {rsc_url=}.')
+            logger.warning(f'Failure download resource {rsc_url=}.')
             
     return success
 
@@ -179,14 +157,17 @@ def process_task(
     start_ptask = time.time()
     
     # create the HTTP manager for this process (shared among its threads)
-    http = urllib3.PoolManager(
+    # http = urllib3.PoolManager(
+    http = urllib3.ProxyManager(
         # num_pools=n_workers,
         maxsize=n_workers,
         retries=False,
-        timeout=urllib3.Timeout(connect=7.0, read=5.0),
+        timeout=urllib3.Timeout(connect=7.0, read=5.0),        
         headers={
             'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0'
-        }
+        },
+        cert_reqs='CERT_NONE',
+        proxy_url='http://localhost:9999'
     )
 
     # the success ratio of tables correctly downloaded
@@ -204,7 +185,7 @@ def process_task(
         os.makedirs(temporary_directory, exist_ok=True)
 
         # get the packages metadata
-        response = http.request('GET', pkg_url)
+        response = http.request('GET', pkg_url, redirect=True)
         if response.status != 200:
             if logger: logger.warning(f'Invalid response for {pkg_url=}: {response.status=}.')
             return start, os.getpid(), round(time.time() - start_ptask), []
@@ -224,31 +205,35 @@ def process_task(
         if logger: logger.info(f'Downloaded packages metadata, from {start=} to {start + len(packages_metadata)}, total resources: {len(res_urls)} (urls={res_urls})')
 
         # run a thread pool to download the resources
+        # with ThreadPoolExecutor(max_workers=min(n_workers, MAX_THREADS_NUM)) as thread_executor:
+        #     futures = [
+        #         thread_executor.submit(thread_task, http, resource, download_directory, temporary_directory, logger)
+        #         for resource in resources
+        #     ]
+        #     # With multiple processes, this isn't really clear, 
+        #     # due to how they use the stdout
+        #     for future in tqdm.tqdm(as_completed(futures, timeout=120), total=len(futures), disable=True, position=os.getpid() % n_workers + 1, leave=False, desc=f"Process {os.getpid()} status:"):
+        #         try:
+        #             if future.result():
+        #                 success += 1
+        #             del future
+        #         except:
+        #             pass
+        
         with ThreadPoolExecutor(max_workers=min(n_workers, MAX_THREADS_NUM)) as thread_executor:
-            futures = [
-                thread_executor.submit(thread_task, http, resource, download_directory, temporary_directory, logger)
-                for resource in resources
-            ]
+            success = sum(thread_executor.map(download_resource_csv, [[http, rsc['url'], rsc['id'], download_directory, 2**29, logger] for rsc in resources]))
+        success_rate = round((success * 100 / len(resources)) if resources else 100, 3)
 
-            # With multiple processes, this isn't really clear, 
-            # due to how they use the stdout
-            for future in tqdm.tqdm(as_completed(futures, timeout=120), total=len(futures), disable=True, position=os.getpid() % n_workers + 1, leave=False, desc=f"Process {os.getpid()} status:"):
-                try:
-                    if future.result():
-                        success += 1
-                    del future
-                except:
-                    pass
     except Exception as e:
         if logger: logger.error(f'Proccess failure: {e}')
     finally:
-        if logger: logger.info(f'Process completed current task. {success}/{len(resources)} ({round((success * 100 / len(resources)) if resources else 100, 3)}%) success resource downloads.')
+        if logger: logger.info(f'Process completed current task. {success}/{len(resources)} ({success_rate}%) success resource downloads.')
         if keep_logging: listener.stop()
         http.clear()
         if logger: logger.debug(f'Process released resources')
         
     shutil.rmtree(temporary_directory, ignore_errors=True)
-    return start, os.getpid(), round(time.time() - start_ptask, 3), packages_metadata
+    return start, os.getpid(), round(time.time() - start_ptask, 3), packages_metadata, success, success_rate
 
 
 
@@ -261,7 +246,7 @@ def download_tables(url_basepoint: str,
                     n_workers: int = 10, 
                     packages_per_worker:int = 1_000,
                     from_n_package:int|None = None,
-                    to_n_package:int|None = None,
+                    to_n_package:int|str = "END",
                     keep_logging: bool = True):
     """
     Download all the available resources from the given Open Data URL basepoint.
@@ -275,7 +260,7 @@ def download_tables(url_basepoint: str,
     
     # instantiate a single connection manager, it should keep 
     # a single pool for each thread, since they access different hosts
-    assert to_n_package > from_n_package
+    assert isinstance(to_n_package, str) and to_n_package == str or isinstance(to_n_package, int) and to_n_package > from_n_package
 
 
     if keep_logging:
@@ -289,12 +274,23 @@ def download_tables(url_basepoint: str,
     package_search_url = f'{url_basepoint}/package_search'
 
     try:
-        # get initial response, to check whether the API 
-        # provides the "package_list" action or not (see US case...)
-        http = urllib3.PoolManager()    
-        response = http.request('GET', f'{package_search_url}?start=0&rows=1000')
+        # get initial response, to get some basic stats
+        init_url = f'{package_search_url}?start=0&rows=1000'
+        # http = urllib3.PoolManager(
+        http = urllib3.ProxyManager(
+            cert_reqs='CERT_NONE',  # Disables SSL certificate verification (equivalent to -k in curl)
+            retries=3,  # Retry on failure (optional)
+            proxy_url='http://localhost:9999',  # Proxy configuration (equivalent to -x in curl)
+        )
+
+        response = http.request(
+            'GET',
+            init_url,
+            redirect=True
+        )
+
         if response.status != 200:
-            if logger: logger.warning(f'Impossible to get initial response for {package_search_url=}?start=0&rows=1000')
+            if logger: logger.warning(f'Impossible to get initial response for {init_url=}')
             return
         
         response = response.json()                
@@ -308,6 +304,7 @@ def download_tables(url_basepoint: str,
         from_n_package      = max(from_n_package, 0) if from_n_package else 0
         to_n_package        = min(n_total_packages, to_n_package) if to_n_package else n_total_packages
         n_total_packages    = to_n_package - from_n_package
+        packages_per_worker = min(packages_per_worker, to_n_package)
 
         metadata_jsonl      = f'{download_directory}/metadata/metadata_from{from_n_package}_to{to_n_package}.jsonl'
         download_directory  = f'{download_directory}/tables/tables_from{from_n_package}_to{to_n_package}'
@@ -333,11 +330,15 @@ def download_tables(url_basepoint: str,
                 ]
             if logger: logger.debug(f'Total work steps: {len(range(from_n_package, to_n_package, packages_per_worker))}')
 
+            total_success = []
             packages_metadata = []
+            
+            # if logger: logger.info('Saving packages metadata to JSON Lines...')
             with jsonlines.open(metadata_jsonl, 'a') as w:
                 for future in tqdm.auto.tqdm(as_completed(futures), total=len(futures), desc="Global Processing Status:"):
-                    start, pid, ptime, metadata = future.result()
-                    if logger: logger.debug(f'[PID:{pid}],[PROC_TIME:{ptime}s],Step completed: [{start},{start + packages_per_worker-1}]')
+                    start, pid, ptime, metadata, success, success_rate = future.result()
+                    total_success.append((success, success_rate))
+                    if logger: logger.debug(f'[PID:{pid}],[PROC_TIME:{ptime}s],[SUCCESS:{success}],[SUCCESS_RATE:{success_rate}],Step completed: [{start},{start + packages_per_worker-1}]')
                     # once a step is completed, write the collected metadata and release these resources
                     for md in metadata:
                         packages_metadata.append(md)
@@ -345,10 +346,10 @@ def download_tables(url_basepoint: str,
                     packages_metadata = []
                     del future
             
-        if logger: logger.info('Done')    
+        if logger: 
+            logger.info('Done')
+            logger.info(f'Total success downloads: {sum(s[0] for s in total_success)}. Average success rate (per process): {mean(s[1] for s in total_success)}')
         
-        if logger: logger.info('Saving packages metadata to JSON Lines...')
-        if logger: logger.info('Done')
     
     except Exception as e:
         if logger: logger.error(e)
@@ -357,18 +358,16 @@ def download_tables(url_basepoint: str,
 
 
 def main():
-
-    from_   = 10_000
-    to_     = 15_000
+    from_   = 0
+    to_     = 'END'
 
     data_path       = f'{os.path.dirname(__file__)}/../data'
     tmp_dir         = f'{data_path}/tmp'
-    log_dir         = f'{data_path}/log/crawling'
+    log_dir         = f'{data_path}/log'
 
     # clean and create directories
     shutil.rmtree(tmp_dir, ignore_errors=True)
     os.makedirs(tmp_dir, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
 
     open_data_portals = {
         'CAN'   : 'https://open.canada.ca/data/api/action',
@@ -380,21 +379,27 @@ def main():
 
     for country_tag, country_ckan_base_url in open_data_portals.items():
         download_dir = f'{data_path}/datasets/{country_tag}'
+        log_dir = f"{log_dir}/{country_tag}/crawling/{time.strftime('%y%m%d_%H_%M_%S')}"
+
         shutil.rmtree(download_dir, ignore_errors=True)
         os.makedirs(download_dir, exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
+
         download_tables(
             country_ckan_base_url, 
-            download_dir, tmp_dir, log_dir, 
+            download_dir, 
+            tmp_dir, 
+            log_dir, 
             ['CSV'], 
-            n_workers=20,
-            packages_per_worker=50,
+            n_workers=8,
+            packages_per_worker=30,
             from_n_package=from_,
             to_n_package=to_,
             keep_logging=True)
 
     # remove the temporary directory
     shutil.rmtree(tmp_dir, ignore_errors=True)
-    shutil.move(log_dir, f"{log_dir}_{time.strftime('%y%m%d_%H_%M_%S')}")
+    # shutil.move(log_dir, f"{log_dir}_{time.strftime('%y%m%d_%H_%M_%S')}")
 
 if __name__ == '__main__':
     main()

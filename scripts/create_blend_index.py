@@ -75,7 +75,7 @@ def get_table_values(table_id):
         filter(
             lambda v: v not in values and not is_num(v), 
             map(
-                lambda s: sanitize_string(str(s)), 
+                sanitize_string, 
                 chain(*(
                     df.select(col).drop_nans().drop_nulls().unique().get_column(col).to_list() 
                     for col in df.columns

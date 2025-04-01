@@ -2,6 +2,7 @@ import re
 import os
 import re 
 import csv
+import sys
 import time
 import asyncio
 import logging
@@ -81,10 +82,7 @@ def get_resource_metadata(rsc_id, table_ids, metadata):
     return md['name'], metadata[rsc_id]['title'], metadata[rsc_id]['notes']
 
 
-async def amain():
-    tag             = 'NHSUK'
-    from_           = 0
-    to_             = 1809
+async def amain(tag="CAN", from_=0, to_=10_000):
 
     data_path       = f'{os.path.dirname(__file__)}/../data'
     tables_path     = f'{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}'
@@ -97,7 +95,7 @@ async def amain():
     add_header          = True
     save_explanation    = True
 
-    UP_TO_ROW           = 100
+    UP_TO_ROW           = 1000
     WRITE_BATCH_SIZE    = 10
 
     # to limit the context passed to the LLM-agent (the "notes" field may be very very long...)
@@ -113,7 +111,7 @@ async def amain():
     # the model name (here we will use LiteLLM and Ollama)
     # model               = "ollama/deepseek-r1:14b"
     # model               = "ollama/llama3.3:latest"
-    model               = "ollama/qwen2.5:14b"
+    model               = "ollama/llama3.1:8b"
 
 
     # set up the logging
@@ -193,15 +191,15 @@ async def amain():
 
             r_df = pl.read_parquet(f'{tables_path}/{table_ids[r_tab_id]}')
             s_df = pl.read_parquet(f'{tables_path}/{table_ids[s_tab_id]}')
-
-            # get a small sample from the dataframes
-            r_df = r_df.sample(max(N_ROWS_SAMPLE, r_df.shape[0]))
-            r_df = s_df.sample(max(N_ROWS_SAMPLE, s_df.shape[0]))
             
             # get the cells that have made the join
             common_cells = list(set(map(sanitize_string, r_df.to_series(r_col_id))) & set(map(sanitize_string, s_df.to_series(s_col_id))))
-            common_cells = common_cells[:MAX_COMM_CELLS]
-                        
+            assert len(common_cells) == row[10]
+            common_cells = common_cells[:MAX_COMM_CELLS]                        
+
+            # get a small sample from the dataframes
+            r_df = r_df.sample(max(N_ROWS_SAMPLE, r_df.shape[0]))
+            s_df = s_df.sample(max(N_ROWS_SAMPLE, s_df.shape[0]))
             response = await agent.on_messages(
                 messages=[
                     TextMessage(content=f"""
@@ -219,7 +217,6 @@ async def amain():
                         s_table_name={s_rsc_name}, 
                         
                         s_table_description={s_pkg_note}
-                        
                         
                         s_table_sample:
                         {s_df}
@@ -266,5 +263,5 @@ async def amain():
 
 
 if __name__ == '__main__':
-    asyncio.run(amain())
+    asyncio.run(amain(*sys.argv[1:4]))
     

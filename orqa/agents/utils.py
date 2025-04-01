@@ -23,6 +23,7 @@ class SQLReviewTask:
 class SQLReviewResult:
     session_id: str
     review: str
+    json_review: dict
     approved: bool
 
 
@@ -49,5 +50,6 @@ class NLReviewTask:
 class NLReviewResult:
     session_id: str
     review: str
+    json_review: dict
     approved: bool
 
