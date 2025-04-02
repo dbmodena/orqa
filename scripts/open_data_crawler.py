@@ -14,6 +14,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 from logging.handlers import QueueHandler, RotatingFileHandler, QueueListener
 
 import tqdm
+import tqdm.auto
 import jsonlines
 import pandas as pd
 
@@ -27,7 +28,7 @@ MAX_PROC_NUM = 10
 
 def init_logger(log_directory):
     root = logging.getLogger(f'crawlerLogger_{os.getpid()}')
-    root.setLevel(logging.DEBUG)
+    root.setLevel(logging.INFO)
     que = queue.Queue(-1)
     queue_handler = QueueHandler(que)
     if root.hasHandlers():
@@ -114,29 +115,6 @@ def download_resource_csv(data: Tuple[urllib3.PoolManager | urllib3.ProxyManager
     return success
 
 
-def thread_task(
-        http: urllib3.PoolManager | urllib3.ProxyManager,
-        resource: dict,             
-        download_directory: str,
-        temporary_directory: str,       
-        logger: logging.Logger|None = None):
-    
-    rsc_url = resource['url']
-    rsc_id = resource['id']
-
-    if logger: logger.debug(f'Thread downloading {rsc_url=}')
-
-    success = download_resource_csv(http, rsc_url, rsc_id, download_directory, temporary_directory, logger=logger)
-    
-    if logger: 
-        if success:
-            logger.debug(f'Success download resource.')
-        else:
-            logger.warning(f'Failure download resource {rsc_url=}.')
-            
-    return success
-
-
 def process_task(
         package_search_url: str,
         download_directory: str,
@@ -172,6 +150,7 @@ def process_task(
 
     # the success ratio of tables correctly downloaded
     success = 0
+    success_rate = 0
     resources = []
     packages_metadata = []
 
@@ -197,32 +176,16 @@ def process_task(
             rsc 
             for pkg in packages_metadata 
             for rsc in pkg['resources'] 
-            if (rsc['format'] in accepted_formats and 'en' in rsc['language'])
+            if rsc['format'] in accepted_formats and ('language' not in rsc or 'language' in rsc and 'en' in rsc['language'])
         ]
         res_urls = [rsc['url'] for rsc in resources]
 
         # Does this duplicates any package downloads?
         if logger: logger.info(f'Downloaded packages metadata, from {start=} to {start + len(packages_metadata)}, total resources: {len(res_urls)} (urls={res_urls})')
-
-        # run a thread pool to download the resources
-        # with ThreadPoolExecutor(max_workers=min(n_workers, MAX_THREADS_NUM)) as thread_executor:
-        #     futures = [
-        #         thread_executor.submit(thread_task, http, resource, download_directory, temporary_directory, logger)
-        #         for resource in resources
-        #     ]
-        #     # With multiple processes, this isn't really clear, 
-        #     # due to how they use the stdout
-        #     for future in tqdm.tqdm(as_completed(futures, timeout=120), total=len(futures), disable=True, position=os.getpid() % n_workers + 1, leave=False, desc=f"Process {os.getpid()} status:"):
-        #         try:
-        #             if future.result():
-        #                 success += 1
-        #             del future
-        #         except:
-        #             pass
         
         with ThreadPoolExecutor(max_workers=min(n_workers, MAX_THREADS_NUM)) as thread_executor:
             success = sum(thread_executor.map(download_resource_csv, [[http, rsc['url'], rsc['id'], download_directory, 2**29, logger] for rsc in resources]))
-        success_rate = round((success * 100 / len(resources)) if resources else 100, 3)
+        success_rate = round((success * 100 / len(resources)) if resources else 0, 3)
 
     except Exception as e:
         if logger: logger.error(f'Proccess failure: {e}')
@@ -241,7 +204,7 @@ def download_tables(url_basepoint: str,
                     download_directory: str,
                     temporary_directory: str,
                     log_directory: str,
-                    accepted_formats: list = ['CSV'],
+                    accepted_formats: list = ["CSV"],
                     logger: logging.Logger|None = None,                    
                     n_workers: int = 10, 
                     packages_per_worker:int = 1_000,
@@ -260,7 +223,7 @@ def download_tables(url_basepoint: str,
     
     # instantiate a single connection manager, it should keep 
     # a single pool for each thread, since they access different hosts
-    assert isinstance(to_n_package, str) and to_n_package == str or isinstance(to_n_package, int) and to_n_package > from_n_package
+    assert isinstance(to_n_package, str) or isinstance(to_n_package, int) and to_n_package > from_n_package
 
 
     if keep_logging:
@@ -302,7 +265,7 @@ def download_tables(url_basepoint: str,
         http.clear()
         
         from_n_package      = max(from_n_package, 0) if from_n_package else 0
-        to_n_package        = min(n_total_packages, to_n_package) if to_n_package else n_total_packages
+        to_n_package        = n_total_packages if isinstance(to_n_package, str) else min(n_total_packages, to_n_package) if to_n_package else n_total_packages
         n_total_packages    = to_n_package - from_n_package
         packages_per_worker = min(packages_per_worker, to_n_package)
 
@@ -338,7 +301,7 @@ def download_tables(url_basepoint: str,
                 for future in tqdm.auto.tqdm(as_completed(futures), total=len(futures), desc="Global Processing Status:"):
                     start, pid, ptime, metadata, success, success_rate = future.result()
                     total_success.append((success, success_rate))
-                    if logger: logger.debug(f'[PID:{pid}],[PROC_TIME:{ptime}s],[SUCCESS:{success}],[SUCCESS_RATE:{success_rate}],Step completed: [{start},{start + packages_per_worker-1}]')
+                    if logger: logger.info(f'[PID:{pid}],[PROC_TIME:{ptime}s],[SUCCESS:{success}],[SUCCESS_RATE:{success_rate}],Step completed: [{start},{start + packages_per_worker-1}]')
                     # once a step is completed, write the collected metadata and release these resources
                     for md in metadata:
                         packages_metadata.append(md)
@@ -370,9 +333,9 @@ def main():
     os.makedirs(tmp_dir, exist_ok=True)
 
     open_data_portals = {
-        'CAN'   : 'https://open.canada.ca/data/api/action',
+        # 'CAN'   : 'https://open.canada.ca/data/api/action',
         # 'US'    : 'https://catalog.data.gov/api/3/action',
-        # 'UK'    : 'https://data.gov.uk/api/action',
+        'UK'    : 'https://data.gov.uk/api/action',
         # 'AFR'   : 'https://open.africa/api/action',
         # 'SG'    : '???'
     }
@@ -391,8 +354,8 @@ def main():
             tmp_dir, 
             log_dir, 
             ['CSV'], 
-            n_workers=8,
-            packages_per_worker=30,
+            n_workers=10,
+            packages_per_worker=10,
             from_n_package=from_,
             to_n_package=to_,
             keep_logging=True)

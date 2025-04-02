@@ -15,58 +15,14 @@ import asyncio
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.messages import TextMessage
-from autogen_core import CancellationToken
+from autogen_core import CancellationToken, ClosureAgent, ClosureContext, DefaultTopicId, MessageContext, SingleThreadedAgentRuntime, TypeSubscription
 from autogen_core.models import ModelFamily
 
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
+from orqa.agents.utils import Answer, Question
 from orqa.utils import sanitize_string
-
-
-async def create_agent(
-        model: str = "ollama/llama3.3",
-        base_url: str = "http://localhost:4000",
-        api_key: str = "NotRequiredSinceWeAreLocal",
-        temperature: int = 0,
-        model_info: dict = {
-            "json_output"       : False,
-            "vision"            : False,
-            "function_calling"  : True,
-            "family"            : ModelFamily.UNKNOWN,
-            "keep_alive"        : "6h", # to keep the model in memory more time
-            "num_ctx"           : 8192 # to increase the context size (not sure) 
-        # }, **kwargs) -> SingleThreadedAgentRuntime:
-        }, **kwargs) -> AssistantAgent:
-    
-    # model_client = OllamaChatCompletionClient(
-    model_client = OpenAIChatCompletionClient(
-        model=model,
-        temperature=temperature,
-        api_key=api_key,
-        base_url=base_url,
-        model_info=model_info,
-        **kwargs,
-    )
-
-    system_message = """
-        You are a smart AI assistant. 
-        Your task is to evaluate if two candidate columns which have common values 
-        represent or not a relevant join.
-        A score of the JOIN is an INTEGER between 0 and 5 where:
-            0 is CASUAL;
-            5 is MEANINGFUL;
-        Do not write code. Return your score between the tags <score>SCORE</score>.
-        Use only values between 0 and 5. Do not use tools. Be clear, concise and short.
-    """
-    
-    # create the assistant agent
-    agent = AssistantAgent(
-        name="JoinEvaluatorAssistant",
-        model_client=model_client,
-        system_message=system_message
-    )
-    
-    return agent
+from orqa.agents.debate import JOIN_EVALUATION_TOPIC_TYPE, JoinScoreAggregator, JoinEvaluator, final_join_evaluation_topic_id
 
 
 def get_package_id(rsc_id, table_ids, metadata):
@@ -108,10 +64,14 @@ async def amain(tag="CAN", from_=0, to_=10_000):
     # passed to the LLM into the question context
     MAX_COMM_CELLS      = 10
 
+    MIN_SCORE           = 0
+    MAX_SCORE           = 5
+    NUM_NEIGHS          = 2
+    MAX_ROUNDS          = 3
+    NUM_SOLVERS         = 3
+
     # the model name (here we will use LiteLLM and Ollama)
-    # model               = "ollama/deepseek-r1:14b"
-    # model               = "ollama/llama3.3:latest"
-    model               = "ollama/llama3.1:8b"
+    model               = "ollama/qwen2.5:3b"
 
 
     # set up the logging
@@ -124,12 +84,107 @@ async def amain(tag="CAN", from_=0, to_=10_000):
     handler.setFormatter(log_formatter)
     logger.addHandler(handler)
 
-    # set up the agent
-    logger.info(f"Setup the Agent (model {model})")
-    agent = await create_agent(model=model)
-    logger.info(f"{type(agent)=}, {agent.name=}, {agent._system_messages=}")
-    await agent.on_reset(cancellation_token=CancellationToken())
-    logger.info(f"After reset: {type(agent)=}, {agent.name=}, {agent._system_messages=}")
+    
+    base_url: str = "http://localhost:4000",
+    api_key: str = "NotRequiredSinceWeAreLocal",
+    temperature: int = 0,
+    model_info: dict = {
+        "json_output"       : False,
+        "vision"            : False,
+        "function_calling"  : True,
+        "family"            : ModelFamily.UNKNOWN,
+        "keep_alive"        : "6h", # to keep the model in memory more time
+        "num_ctx"           : 8192 # to increase the context size (not sure)     
+    }
+
+    model_client = OpenAIChatCompletionClient(
+        model=model,
+        temperature=temperature,
+        api_key=api_key,
+        base_url=base_url,
+        model_info=model_info,
+    )
+
+    
+    # define the runtime
+    runtime = SingleThreadedAgentRuntime()
+
+    # register three different agents for the debating mechanism
+    await JoinEvaluator.register(
+        runtime,
+        "JoinEvaluatorA",
+        lambda: JoinEvaluator(
+            model_client,
+            NUM_NEIGHS,
+            MAX_ROUNDS,
+            MIN_SCORE, MAX_SCORE, logger,
+            topic_type="JoinEvaluatorA"
+        )
+    )
+
+    await JoinEvaluator.register(
+        runtime,
+        "JoinEvaluatorB",
+        lambda: JoinEvaluator(
+            model_client,
+            NUM_NEIGHS,
+            MAX_ROUNDS,
+            MIN_SCORE, MAX_SCORE, logger,
+            topic_type="JoinEvaluatorB"
+        )
+    )
+
+    await JoinEvaluator.register(
+        runtime,
+        "JoinEvaluatorC",
+        lambda: JoinEvaluator(
+            model_client,
+            NUM_NEIGHS,
+            MAX_ROUNDS,
+            MIN_SCORE, MAX_SCORE, logger,
+            topic_type="JoinEvaluatorC"
+        )
+    )
+
+    # register also the final score aggregator
+    await JoinScoreAggregator.register(
+        runtime, 
+        "JoinScoreAggregator", 
+        lambda: JoinScoreAggregator(NUM_SOLVERS, MIN_SCORE, MAX_SCORE, logger))
+
+    # now, every agent should subscribe to the right topic
+    # for the agent names with "A"
+    await runtime.add_subscription(TypeSubscription("JoinEvaluatorA", "JoinEvaluatorB"))
+    await runtime.add_subscription(TypeSubscription("JoinEvaluatorA", "JoinEvaluatorC"))
+
+    # for the agent names with "B"
+    await runtime.add_subscription(TypeSubscription("JoinEvaluatorB", "JoinEvaluatorA"))
+    await runtime.add_subscription(TypeSubscription("JoinEvaluatorB", "JoinEvaluatorC"))
+
+    # and for the agent names with "C"
+    await runtime.add_subscription(TypeSubscription("JoinEvaluatorC", "JoinEvaluatorA"))
+    await runtime.add_subscription(TypeSubscription("JoinEvaluatorC", "JoinEvaluatorB"))
+
+
+    # setup the mechanism to collect the final answers
+    queue = asyncio.Queue[Answer]()
+
+    async def collect_result(_agent: ClosureContext, message: Answer, ctx: MessageContext) -> None:
+        await queue.put(message)
+
+    # now start the runtime (don't know if it's actually necessary 
+    # to start it before closure registration)
+    runtime.start()
+
+    CLOSURE_AGENT_TYPE = "collect_result_agent"
+    await ClosureAgent.register_closure(
+        runtime,
+        CLOSURE_AGENT_TYPE,
+        collect_result,
+        subscriptions=lambda: [TypeSubscription(topic_type=JOIN_EVALUATION_TOPIC_TYPE, agent_type=CLOSURE_AGENT_TYPE)]
+    )
+
+
 
     logger.info("Reading Table IDs")
     table_ids = list(sorted(os.listdir(tables_path), reverse=True))
@@ -158,14 +213,11 @@ async def amain(tag="CAN", from_=0, to_=10_000):
                 'size_union', 
                 'jaccard', 
                 'overlap',
-                f'{model}_score',
-                f'{model}_explanation',
-                f'{model}_errors'
+                'score'
             ])
 
     evaluations = []
-    default_score, default_explanation = -1, "NO_EXPLANATION"
-    score, explanation, errors = default_score, default_explanation, ""
+    score = default_score = -1
     start_batch_t = time.time()
 
     logging.info("Started Agent JOINs Evaluation")
@@ -200,9 +252,10 @@ async def amain(tag="CAN", from_=0, to_=10_000):
             # get a small sample from the dataframes
             r_df = r_df.sample(max(N_ROWS_SAMPLE, r_df.shape[0]))
             s_df = s_df.sample(max(N_ROWS_SAMPLE, s_df.shape[0]))
-            response = await agent.on_messages(
-                messages=[
-                    TextMessage(content=f"""
+            
+            await runtime.publish_message(
+                Question(
+                    content=f"""
                         Given the following information about two tables: 
                         
                         r_table_name: {r_rsc_name}, 
@@ -226,40 +279,25 @@ async def amain(tag="CAN", from_=0, to_=10_000):
                         The columns that joins are {r_col_name=}, {s_col_name=},
 
                         Cells in common in the joining columns: {common_cells}
-
-                        Define a integer score about the JOIN between the tables on the given columns.
-                        Give only one overall score between 0 (casual) and 5 (meaningful) and a clear, short and concise explanation.
-
-                        Write the score inside tags <score>SCORE</score>.
-                        """,
-                        source="user"
-                    ), 
-                ],                
-                cancellation_token=CancellationToken()
+                        """,                        
+                ),
+                topic_id=DefaultTopicId()
             )
 
-            explanation = str(response.chat_message.content).replace('\n', ' ').replace(',', ' ')
-            score = int(re.match(r"\<score\>(\d)\<\/score\>", explanation).groups()[0])
-            assert 0 <= score <= 5, "Score not in defined range"
+            await runtime.stop_when_idle()
+            while not queue.empty():
+                answer = await queue.get()
+            score = answer.score
         except Exception as e:
-            # default values in case of error
-            score = default_score
-            explanation = default_explanation if explanation == default_explanation else explanation
-            errors = str(e).replace('\n', ' ').replace(',', ' ')
-        finally:
-            # append the evaluation and reset the values (not needed?)
-            evaluations.append((*row, score, explanation if save_explanation else "", errors))
-            score, explanation, errors = default_score, default_explanation, ""
-            
-            # reset the agent to the initial state
-            await agent.on_reset(cancellation_token=CancellationToken())
+            score = e
+        evaluations.append(score)
 
     logger.info(f"Up to table {i}({round(i * 100 / len(candidates), 3)}%);time:{round(time.time() - start_batch_t, 3)}s")
     with open(evaluated_path, "a") as file:
         wr = csv.writer(file)
         wr.writerows(evaluations)
 
-    logger.info(f"Job Completed.")
+    logger.info(f"Done.")
 
 
 if __name__ == '__main__':

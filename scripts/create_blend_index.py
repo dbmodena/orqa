@@ -1,10 +1,10 @@
+from concurrent.futures import ProcessPoolExecutor
 import os
 import pickle
 import logging
 from itertools import chain
 from logging.handlers import RotatingFileHandler
 
-import tqdm
 import bidict
 import duckdb
 import polars as pl
@@ -13,17 +13,21 @@ from wrapt_timeout_decorator import timeout
 from orqa.utils import sanitize_string, is_num
 
 
-tag             = 'NHSUK'
+# tag             = 'NHSUK'
+# from_           = 0
+# to_             = 1809
+
+tag             = 'CAN'
 from_           = 0
-to_             = 1809
+to_             = 42705
 
 data_path       = f'{os.path.dirname(__file__)}/../data'
 tables_path     = f'{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}'
 metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
 db_path         = f'{data_path}/datasets/{tag}/database/blend.db'
 values_path     = f'{data_path}/datasets/{tag}/database/values_dict.pickle'
-failures_path   = f'{data_path}/datasets/{tag}/database/failures.txt'
-log_path        = f'{data_path}/log/{tag}_BlendIndexing.log'
+
+log_path        = f'{data_path}/log/{tag}/BlendIndexing.log'
 
 
 os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -42,7 +46,8 @@ os.makedirs(os.path.dirname(db_path), exist_ok=True)
 # take the table IDs in alphabetical order
 table_ids = list(sorted(os.listdir(tables_path), reverse=True))
 
-logger.info(' Start new run '.center(50, '#'))
+logger.info(f"\n{'-' * 100}\n{tag} {from_=}-{to_=}")
+
 
 # init the duckdb database
 con = duckdb.connect(db_path)
@@ -60,7 +65,7 @@ con.execute(f"""
 logger.info('Index table created')
 
 values = {}
-CHECKPOINT = 100    
+CHECKPOINT = 300
 records = []
 
 
@@ -68,36 +73,52 @@ records = []
 # setting this timeout we will prob have some keyerror next
 # @timeout(20)
 def get_table_values(table_id):
-    df = pl.read_parquet(f'{tables_path}/{table_id}')
-    df = df[[s.name for s in df if not (s.null_count() == df.height)]]
+    try:
+        df = pl.read_parquet(f'{tables_path}/{table_id}')
+        df = df[[s.name for s in df if not (s.null_count() == df.height)]]
 
-    return set(
-        filter(
-            lambda v: v not in values and not is_num(v), 
-            map(
-                sanitize_string, 
-                chain(*(
-                    df.select(col).drop_nans().drop_nulls().unique().get_column(col).to_list() 
-                    for col in df.columns
-                    )
-                )                
+        return set(
+            filter(
+                lambda v: not is_num(v), 
+                map(
+                    sanitize_string, 
+                    chain(*(
+                        df.select(col).drop_nans().drop_nulls().unique().get_column(col).to_list() 
+                        for col in df.columns
+                        )
+                    )                
+                )
             )
         )
-    )
+    except:
+        return set()
+
 
 
 i = 0
 if not os.path.exists(values_path):
     logger.info('Create values dictionary')
     
-    for table_id in tqdm.tqdm(table_ids, desc="Creating values dictionary:"):
-        try:
-            unique_vals = get_table_values(table_id)
-            for v in unique_vals:
-                values[v] = i
-                i += 1
-        except TimeoutError:
-            continue
+    with ProcessPoolExecutor(4) as executor:
+        for ntab in range(0, len(table_ids), 100):
+            results = executor.map(get_table_values, table_ids[ntab:ntab+100])
+            logger.debug(f"Obtained values up to table {ntab}/{len(table_ids)} ({round(ntab * 100 / len(table_ids), 3)}%)")
+            
+            for uniques in results:
+                for v in uniques:
+                    if v not in values:
+                        values[v] = i
+                        i += 1
+
+    # for ntab, table_id in enumerate(table_ids):
+    #     if ntab % 100 == 0:
+    #     try:
+    #         unique_vals = get_table_values(table_id)
+    #         for v in unique_vals:
+    #             values[v] = i
+    #             i += 1
+    #     except TimeoutError:
+    #         continue
 
     logger.info('Create bidict from values')
     values = bidict.bidict(values)
@@ -113,7 +134,7 @@ else:
 logger.info(f'{len(values)=}')
 
 
-@timeout(20)
+@timeout(30)
 def collect_table_records(table_idx, table_id):
     df = pl.read_parquet(f'{tables_path}/{table_id}')
 
@@ -127,7 +148,7 @@ def collect_table_records(table_idx, table_id):
 
 n = 0
 logger.info('Start insert values into duckdb')
-for table_idx, table_id in tqdm.tqdm(enumerate(table_ids), total=len(table_ids), desc="Inserting values:"):
+for table_idx, table_id in enumerate(table_ids):
     try:
         records += collect_table_records(table_idx, table_id)
         n += 1
@@ -147,12 +168,12 @@ rec_df = pl.DataFrame(records, schema=['TableId', 'ColumnId', 'RowId', 'CellValu
 con.execute("INSERT INTO AllTables SELECT * FROM rec_df")
 con.commit()
 logger.debug(f'Inserted tables [{n - CHECKPOINT}, {n}]')
-logger.info('Done')        
+logger.info('Done')
 
 logger.info('Creating indexes')
 con.execute("CREATE INDEX IF NOT EXISTS TableId_idx   ON AllTables (TableId);")
 con.execute("CREATE INDEX IF NOT EXISTS ColumnId_idx  ON AllTables (ColumnId);")
 con.execute("CREATE INDEX IF NOT EXISTS RowId_idx     ON AllTables (RowId);")
 con.execute("CREATE INDEX IF NOT EXISTS CellValue_idx ON AllTables (CellValue);")
-logger.info('Done')        
+logger.info('Done')
 

@@ -1,6 +1,13 @@
 from dataclasses import dataclass
 
+from autogen_core import TopicId
+
 # For SQL Query Generation
+
+
+SQL_GENERATION_TOPIC_TYPE = "sql-generation-result"
+sql_generation_topic_id = TopicId(type=SQL_GENERATION_TOPIC_TYPE, source="default")
+
 
 @dataclass
 class SQLGenerationTask:
@@ -28,7 +35,10 @@ class SQLReviewResult:
 
 
 
-# For Natural Language Generation 
+# For Natural Language Generation
+
+NL_GENERATION_TOPIC_TYPE = "nl-generation-result"
+nl_generation_topic_id = TopicId(type=NL_GENERATION_TOPIC_TYPE, source="default")
 
 @dataclass
 class NLGenerationTask:
@@ -52,4 +62,38 @@ class NLReviewResult:
     review: str
     json_review: dict
     approved: bool
+
+
+
+# Debating 
+
+@dataclass
+class Question:
+    content: str
+
+
+@dataclass
+class Answer:
+    score: int
+
+
+@dataclass
+class IntermediateEvaluatorResponse:
+    content: str
+    question: str
+    answer: str
+    nround: int
+
+
+@dataclass
+class EvaluatorRequest:
+    content: str
+    question: str
+
+
+@dataclass
+class FinalEvaluatorResponse:
+    answer: str
+    score: int
+
 

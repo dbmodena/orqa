@@ -27,10 +27,10 @@ from autogen_core.models import (
 from orqa.agents.utils import *
 
 
-__all__ = ['SQLQueryGeneratorAgent']
+__all__ = ['QuestionGeneratorAgent']
 
 @default_subscription
-class SQLQueryGeneratorAgent(RoutedAgent):
+class QuestionGeneratorAgent(RoutedAgent):
     def __init__(self, model_client: ChatCompletionClient, system_message: str, tool_schema: List[Tool], output_results: List, max_num_revisions: int = 3) -> None:
         super().__init__("Natural Language and SQL query generator assistant")
         self._system_messages   : List[LLMMessage] = [SystemMessage(content=system_message)]

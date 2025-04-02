@@ -1,4 +1,6 @@
+import json
 import os
+import random
 import re
 import csv
 import sys
@@ -17,13 +19,13 @@ import polars as pl
 
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 from autogen_core.tools import FunctionTool, Tool
-from autogen_core import SingleThreadedAgentRuntime, DefaultTopicId
+from autogen_core import ClosureAgent, SingleThreadedAgentRuntime, DefaultTopicId, TopicId
 from autogen_core.models import ModelFamily
 
 from orqa.utils import sanitize_string
 from orqa.agents.reviewer import ReviewerAgent
-from orqa.agents.question_generator import SQLQueryGeneratorAgent
-from orqa.agents.utils import SQLGenerationTask, NLGenerationTask
+from orqa.agents.question_generator import QuestionGeneratorAgent
+from orqa.agents.utils import SQLGenerationTask, NLGenerationTask, sql_generation_topic_id, nl_generation_topic_id
 
 
 def get_resource_metadata(rsc_id, table_ids, metadata):
@@ -92,17 +94,18 @@ async def amain(tag, from_, to_):
     data_path           = f"{os.path.dirname(__file__)}/../data"
     tables_path         = f"{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}"
     metadata_path       = f"{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl"
-    log_path            = f"{data_path}/log/{tag}_QuestGen.log"
+    log_path            = f"{data_path}/log/{tag}/QuestGen.log"
     
-    evaluated_path      = f"{data_path}/outputs/{tag}_evaluated_joins.csv"
-    queries_path        = f"{data_path}/outputs/{tag}_generated_queries.csv"
+    bird_dev_path       = f"{data_path}/bird-mini-dev/dev.json"
 
-    UP_TO_ROW           = 30
+    evaluated_path      = f"{data_path}/outputs/{tag}/evaluated_joins.csv"
+    # queries_path        = f"{data_path}/outputs/{tag}/generated_queries.csv"
+    queries_path        = f"{data_path}/outputs/{tag}/generated_queries.json"
+
+
+    UP_TO_ROW           = 5
 
     MAX_RETRIES         = 3
-
-    # number of queries to generate from each join
-    N_GEN_QUERIES       = 2
 
     # to limit the context passed to the LLM-agent (the "notes" field may be very very long...)
     MAX_LENGTH_NOTES    = 500
@@ -110,16 +113,11 @@ async def amain(tag, from_, to_):
     # number of sampled rows passed to the LLM into the question context
     N_ROWS_SAMPLE       = 10
 
-    # number of values in common between the joinable columns
-    # passed to the LLM into the question context
-    MAX_COMM_CELLS      = 10
-
     # the model name (here we will use LiteLLM and Ollama models)
-    gen_model           = "ollama/llama3.3:latest"
-    reviewer_model      = "ollama/llama3.1:8b"
-    # model               = "ollama/qwen2.5:14b"
-    # model               = "ollama/deepseek-r1:70b"
-    # reviewer_model        = "ollama/deepseek-r1:14b"
+    sql_gen_model       = "ollama/qwen2.5-coder:32b"
+    sql_rev_model       = "ollama/qwen2.5-coder:3b"
+    nl_gen_model        = "ollama/qwen2.5:32b"
+    nl_rev_model        = "ollama/qwen2.5:3b"
     
     base_url            = "http://localhost:4000"
     api_key             = "NotRequiredSinceWeAreLocal"
@@ -151,6 +149,15 @@ async def amain(tag, from_, to_):
     stdout_hanlder = logging.StreamHandler()
     logger.addHandler(stdout_hanlder)
 
+    logger.info("Loading BIRD mini-dev")
+    with open(bird_dev_path) as file:
+        bird_dev = json.load(file)
+    
+    # take the three subsets of questions from BIRD, grouped by their difficulty
+    bird_questions = {
+        d: list(filter(lambda q: q['difficulty'] == d, bird_dev)) 
+        for d in ['simple', 'moderate', 'challenging']
+    }
     
     logger.info("Reading Table IDs")
     table_ids = list(sorted(os.listdir(tables_path), reverse=True))
@@ -162,29 +169,45 @@ async def amain(tag, from_, to_):
     logger.info("Loading evaluated JOIN pairs")
     joins = pl.read_csv(evaluated_path).filter((pl.col('ollama/qwen2.5:14b_score') >= 4)) # & (pl.col('ollama/deepseek-r1:14b_score') >= 4))
 
-    with open(queries_path, 'w') as file:
-        csv.writer(file).writerow(['r_rsc_id', 's_rsc_id', 'r_pkg_id', 's_pkg_id', 'r_rsc_name', 's_rsc_name', 'r_col_name', 's_col_name', 'num_query', 'num_sql_reviews', 'sql', 'num_nl_reviews', 'nl'])
-            
+    # with open(queries_path, 'w') as file:
+    #     csv.writer(file).writerow(['r_rsc_id', 's_rsc_id', 'r_pkg_id', 's_pkg_id', 'r_rsc_name', 's_rsc_name', 'r_col_name', 's_col_name', 'num_query', 'num_sql_reviews', 'sql', 'num_nl_reviews', 'nl'])            
 
     # create the Natural Language-SQL Query Generator Agent
     # We use LiteLLM, so ollama and other models should not 
     # give problems with this client type anyway 
-    logger.info(f"Definine Chat Completion Client ({gen_model=}, {reviewer_model=})")
-    qgen_model_client = OpenAIChatCompletionClient(
-        model=gen_model,
+    logger.info(f"Definine Chat Completion Client ({nl_gen_model=}, {nl_rev_model=})")
+    sql_gen_model_client = OpenAIChatCompletionClient(
+        model=sql_gen_model,
         temperature=temperature,
         api_key=api_key,
         base_url=base_url,
         model_info=model_info
     )
 
-    reviewer_model_client = OpenAIChatCompletionClient(
-        model=reviewer_model,
+    sql_rev_model_client = OpenAIChatCompletionClient(
+        model=sql_rev_model,
         temperature=temperature,
         api_key=api_key,
         base_url=base_url,
         model_info=model_info
     )
+
+    nl_gen_model_client = OpenAIChatCompletionClient(
+        model=nl_gen_model,
+        temperature=temperature,
+        api_key=api_key,
+        base_url=base_url,
+        model_info=model_info
+    )
+
+    nl_rev_model_client = OpenAIChatCompletionClient(
+        model=nl_rev_model,
+        temperature=temperature,
+        api_key=api_key,
+        base_url=base_url,
+        model_info=model_info
+    )
+
 
     qgen_system_message = """
         You are a smart AI assistant. 
@@ -208,17 +231,30 @@ async def amain(tag, from_, to_):
         )
     ]
 
-    # register the query generator agent
-    logger.debug("Registering Query Generator Agent")
-    await SQLQueryGeneratorAgent.register(
-        runtime, "query_generator_agent",
-        lambda: SQLQueryGeneratorAgent(qgen_model_client, qgen_system_message, tools, tmp_results, MAX_RETRIES)
+    # register the SQL query generator/reviewr agents
+    logger.debug("Registering SQL Generator Agent")
+    await QuestionGeneratorAgent.register(
+        runtime, "sql_generator_agent",
+        lambda: QuestionGeneratorAgent(sql_gen_model_client, qgen_system_message, tools, tmp_results, MAX_RETRIES)
     )
 
-    logger.debug("Registering Reviewer Agent")
+    logger.debug("Registering SQL Reviewer Agent")
     await ReviewerAgent.register(
-        runtime, "reviewer_agent",
-        lambda: ReviewerAgent(reviewer_model_client, reviewer_system_message)
+        runtime, "sql_reviewer_agent",
+        lambda: ReviewerAgent(sql_rev_model_client, reviewer_system_message)
+    )
+
+    # register the natural language generator/reviewr agents
+    logger.debug("Registering NL Generator Agent")
+    await QuestionGeneratorAgent.register(
+        runtime, "nl_generator_agent",
+        lambda: QuestionGeneratorAgent(nl_gen_model_client, qgen_system_message, tools, tmp_results, MAX_RETRIES)
+    )
+
+    logger.debug("Registering NL Reviewer Agent")
+    await ReviewerAgent.register(
+        runtime, "nl_reviewer_agent",
+        lambda: ReviewerAgent(nl_rev_model_client, reviewer_system_message)
     )
 
     # start processing messages and create one agent
@@ -228,9 +264,7 @@ async def amain(tag, from_, to_):
             
         try:
             # take relevant information for the llm-agent
-            r_tab_id, s_tab_id, _, _, r_col_name, s_col_name, _, _, r_pkg_id, s_pkg_id = row[:10]
-            # r_rsc_id, r_rsc_name, _, r_pkg_note = get_resource_metadata(r_tab_id, table_ids, metadata)
-            # s_rsc_id, s_rsc_name, _, s_pkg_note = get_resource_metadata(s_tab_id, table_ids, metadata)
+            r_tab_id, s_tab_id, _, _, original_r_col_name, original_s_col_name, _, _, r_pkg_id, s_pkg_id = row[:10]
             r_rsc_id, r_rsc_name, _, r_pkg_title, r_pkg_notes, r_pkg_keywords, r_pkg_tags = get_resource_metadata(r_tab_id, table_ids, metadata)
             s_rsc_id, s_rsc_name, _, s_pkg_title, s_pkg_notes, s_pkg_keywords, s_pkg_tags = get_resource_metadata(s_tab_id, table_ids, metadata)
             
@@ -249,8 +283,8 @@ async def amain(tag, from_, to_):
             # rename tables and columns names (to fix that, this should be coherent with the previous steps?)
             r_df.rename(sanitize_string, axis=1, inplace=True)
             s_df.rename(sanitize_string, axis=1, inplace=True)
-            r_col_name, s_col_name = sanitize_string(r_col_name), sanitize_string(s_col_name)
-            r_rsc_name, s_rsc_name = sanitize_string(r_rsc_name), sanitize_string(s_rsc_name)
+            r_col_name, r_rsc_name = sanitize_string(original_r_col_name), sanitize_string(r_rsc_name)
+            s_col_name, s_rsc_name = sanitize_string(original_s_col_name), sanitize_string(s_rsc_name)
             
             # drop null columns
             r_df.dropna(axis=1, how='all', inplace=True)
@@ -272,15 +306,19 @@ async def amain(tag, from_, to_):
 
         old_questions = []
         success = True
-        for nq in range(N_GEN_QUERIES):
+
+        for nq, difficulty, bird_q in enumerate(bird_questions.items()):
             if not success: break
             success = False
             logger.info(f"Iteration {i=}, step {nq}:")
 
+            sql_examples, nl_examples = zip(*[(q['SQL'], q['question']) for q in random.sample(bird_q, k=4)])
+            
             try:
+                logger.debug("Generating SQL query")
                 logger.debug("Starting/Resuming Runtime")
                 runtime.start()
-           
+
                 await runtime.publish_message(                    
                     SQLGenerationTask(sql_task= \
                                         f"""
@@ -300,20 +338,18 @@ async def amain(tag, from_, to_):
                         {s_df_sample},
                         ############################
 
-                        Create a SQL query which requires joining the r column \"{r_col_name}\" and the s column \"{s_col_name}\".
+                        Create a {difficulty} SQL query which requires joining the r column \"{r_col_name}\" and the s column \"{s_col_name}\".
                         
+                        Some examples of good and {difficulty} SQL queries are:
+                        {'\n'.join(sql_examples)}
+
                         Use the tool \"verify_sql\" to check if the SQL query is correct.
 
                         Do not modify tables and columns names.
-                        Use tokens and others to create different and more complex queries with respect to old questions: 
-                        {old_questions}.
-                        Do not use "SELECT *", if possible, use one or more functions in selection to create more insteresting queries.
-                        Use also other attributes that are present in the two schema and if they do not have null values.
-
                         In the SQL put only column names inside ``, not table names.
                         """
                     ),
-                    topic_id=DefaultTopicId()                  
+                    topic_id=DefaultTopicId()                    
                 )
                 
                 # wait the agent response
@@ -328,7 +364,8 @@ async def amain(tag, from_, to_):
                 continue
 
             try:
-                logger.debug("Generating NL")
+                logger.debug("Generating NL question")
+                logger.debug("Resuming Runtime")
                 runtime.start()
                 await runtime.publish_message(
                     NLGenerationTask(
@@ -357,10 +394,11 @@ async def amain(tag, from_, to_):
 
                             The question must be at high level, and must not include any table name inside.
                             The question must be human-like, so do not use SQL-like words, such as null or select.
+                            
+                            Some examples of interesting natural language questions are:
+                            {'\n'.join(nl_examples)}
+
                             Don't use tools.
-
-                            Return only the question.
-
                         """
                     ),
                     topic_id=DefaultTopicId()
@@ -378,8 +416,28 @@ async def amain(tag, from_, to_):
             
             logger.info("#" * 100)
             success = True
+
+            data = {
+                "r_rsc_id"  : r_rsc_id,
+                "s_rsc_id"  : s_rsc_id,
+                "r_pkg_id"  : r_pkg_id,
+                "s_pkg_id"  : s_pkg_id,
+                "r_rsc_name": r_rsc_name,
+                "s_rsc_name": s_rsc_name,
+                "r_col_name": r_col_name,
+                "s_col_name": s_col_name,
+                "difficulty": difficulty,
+                "nq"        : nq,
+                "sql_n_rev" : sql_n_rev,
+                "sql"       : sql,
+                "nl_n_rev"  : nl_n_rev,
+                "nl"        : nl
+            }
+            
             with open(queries_path, 'a') as file:
-                csv.writer(file).writerow([r_rsc_id, s_rsc_id, r_pkg_id, s_pkg_id, r_rsc_name, s_rsc_name, r_col_name, s_col_name, nq, sql_n_rev, sql, nl_n_rev, nl])
+                json.dump(data, file)
+                file.write('\n')
+            #     csv.writer(file).writerow([r_rsc_id, s_rsc_id, r_pkg_id, s_pkg_id, r_rsc_name, s_rsc_name, r_col_name, s_col_name, difficulty, nq, sql_n_rev, sql, nl_n_rev, nl])
                 
     try:
         await runtime.stop_when_idle()
