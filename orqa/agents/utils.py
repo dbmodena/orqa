@@ -94,6 +94,9 @@ class EvaluatorRequest:
 @dataclass
 class FinalEvaluatorResponse:
     answer: str
-    score: int
 
 
+@dataclass
+class ResetOrder:
+    received: list
+    

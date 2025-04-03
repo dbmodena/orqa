@@ -7,6 +7,7 @@ from logging.handlers import RotatingFileHandler
 
 import bidict
 import duckdb
+os.environ["POLARS_MAX_THREADS"] = "10"
 import polars as pl
 from wrapt_timeout_decorator import timeout
 
@@ -17,9 +18,13 @@ from orqa.utils import sanitize_string, is_num
 # from_           = 0
 # to_             = 1809
 
-tag             = 'CAN'
+tag             = 'UK'
 from_           = 0
-to_             = 42705
+to_             = 55556
+
+# tag             = 'CAN'
+# from_           = 0
+# to_             = 42705
 
 data_path       = f'{os.path.dirname(__file__)}/../data'
 tables_path     = f'{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}'
@@ -28,6 +33,8 @@ db_path         = f'{data_path}/datasets/{tag}/database/blend.db'
 values_path     = f'{data_path}/datasets/{tag}/database/values_dict.pickle'
 
 log_path        = f'{data_path}/log/{tag}/BlendIndexing.log'
+
+num_cpu         = 10
 
 
 os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -65,7 +72,7 @@ con.execute(f"""
 logger.info('Index table created')
 
 values = {}
-CHECKPOINT = 300
+CHECKPOINT = 100
 records = []
 
 
@@ -99,16 +106,17 @@ i = 0
 if not os.path.exists(values_path):
     logger.info('Create values dictionary')
     
-    with ProcessPoolExecutor(4) as executor:
-        for ntab in range(0, len(table_ids), 100):
+    with ProcessPoolExecutor(num_cpu) as executor:
+        for ntab in range(0, len(table_ids) + 100, 100):
             results = executor.map(get_table_values, table_ids[ntab:ntab+100])
             logger.debug(f"Obtained values up to table {ntab}/{len(table_ids)} ({round(ntab * 100 / len(table_ids), 3)}%)")
             
-            for uniques in results:
-                for v in uniques:
-                    if v not in values:
-                        values[v] = i
-                        i += 1
+            uniques = filter(lambda v: v not in values, set(chain(*results)))
+            # for uniques in results:
+            for v in uniques:
+                if v not in values:
+                    values[v] = i
+                    i += 1
 
     # for ntab, table_id in enumerate(table_ids):
     #     if ntab % 100 == 0:
@@ -134,41 +142,58 @@ else:
 logger.info(f'{len(values)=}')
 
 
-@timeout(30)
-def collect_table_records(table_idx, table_id):
+# @timeout(30)
+def collect_table_records(data):
+    table_idx, table_id = data
     df = pl.read_parquet(f'{tables_path}/{table_id}')
 
     return [
-        [table_idx, col_idx, row_idx, values[sanitize_string(str(cell))]]
+        [table_idx, col_idx, row_idx, values[sanitize_string(cell)]]
         for col_idx, col in enumerate(df.columns)
         if not df.get_column(col).null_count() == df.height
         for row_idx, cell in enumerate(df.select(col).get_column(col).to_list())        
-        if sanitize_string(str(cell)) in values
+        if sanitize_string(cell) in values
     ]
 
-n = 0
+
 logger.info('Start insert values into duckdb')
-for table_idx, table_id in enumerate(table_ids):
-    try:
-        records += collect_table_records(table_idx, table_id)
-        n += 1
-    except TimeoutError:
-        continue
-    except KeyError:
-        continue
-    
-    if n % CHECKPOINT == 0 and n > 0:
+step = 100
+with ProcessPoolExecutor(num_cpu) as executor:
+    for ntab in range(0, len(table_ids) + step, step):
+        results = executor.map(collect_table_records, enumerate(table_ids[ntab:ntab+step], start=ntab))
+        records = []
+        for table in results:
+            records += table
+
         rec_df = pl.DataFrame(records, schema=['TableId', 'ColumnId', 'RowId', 'CellValue'], orient='row')
         con.execute("INSERT INTO AllTables SELECT * FROM rec_df")
         con.commit()
-        records = []
-        logger.debug(f'Inserted tables [{n - CHECKPOINT}, {n}]')
+            
+        logger.debug(f"Inserting batch tables {ntab}/{len(table_ids)} ({round(ntab * 100 / len(table_ids), 3)}%)")
 
-rec_df = pl.DataFrame(records, schema=['TableId', 'ColumnId', 'RowId', 'CellValue'], orient='row')
-con.execute("INSERT INTO AllTables SELECT * FROM rec_df")
-con.commit()
-logger.debug(f'Inserted tables [{n - CHECKPOINT}, {n}]')
-logger.info('Done')
+
+# n = 0
+# for table_idx, table_id in enumerate(table_ids):
+#     try:
+#         records += collect_table_records(table_idx, table_id)
+#         n += 1
+#     except TimeoutError:
+#         continue
+#     except KeyError:
+#         continue
+#     
+#     if n % CHECKPOINT == 0 and n > 0:
+#         rec_df = pl.DataFrame(records, schema=['TableId', 'ColumnId', 'RowId', 'CellValue'], orient='row')
+#         con.execute("INSERT INTO AllTables SELECT * FROM rec_df")
+#         con.commit()
+#         records = []
+#         logger.debug(f'Inserted tables [{n - CHECKPOINT}, {n}]')
+
+# rec_df = pl.DataFrame(records, schema=['TableId', 'ColumnId', 'RowId', 'CellValue'], orient='row')
+# con.execute("INSERT INTO AllTables SELECT * FROM rec_df")
+# con.commit()
+# logger.debug(f'Inserted tables [{n - CHECKPOINT}, {n}]')
+# logger.info('Done')
 
 logger.info('Creating indexes')
 con.execute("CREATE INDEX IF NOT EXISTS TableId_idx   ON AllTables (TableId);")

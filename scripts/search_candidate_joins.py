@@ -14,15 +14,15 @@ import polars as pl
 from orqa.utils import sanitize_string
 
 
-def main(tag="CAN", from_=0, to_=1809):    
+def main(tag="CAN", from_=0, to_=42705):    
     data_path       = f'{os.path.dirname(__file__)}/../data'
     tables_path     = f'{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}'
     metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
     db_path         = f'{data_path}/datasets/{tag}/database/blend.db'
     valdict_path    = f'{data_path}/datasets/{tag}/database/values_dict.pickle'
-    log_path        = f'{data_path}/log/{tag}_JoinSearch.log'
+    log_path        = f'{data_path}/log/{tag}/JoinSearch.log'
 
-    candidates_path = f'{data_path}/outputs/{tag}_candidate_joins.csv'
+    candidates_path = f'{data_path}/outputs/{tag}/candidate_joins.csv'
 
 
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -35,25 +35,27 @@ def main(tag="CAN", from_=0, to_=1809):
     handler.setFormatter(log_formatter)
     logger.addHandler(handler)
 
-    print("Started Job")
     logger.info("Started Job")
 
     # max number of results we want during search
-    K               = 50
+    K               = 10
 
     # the minimum number of distinct values a column must have
-    MIN_NUM_VALUES  = 6
+    MIN_NUM_VALUES  = 10
+
+    # minimum height for a table
+    MIN_HEIGHT      = 30
 
     # maximum number of null values (ratio) allowed in
     # one column to be accepted as candidate, i.e. drop
     # columns with a lot of nulls
-    MAX_NULL_RATIO  = 0.7
+    MAX_NULL_RATIO  = 0.2
 
     # minimum threshold for these metrics
     MIN_JACCARD     = 0.2
     MIN_OVERLAP     = 0.3
 
-    N_BATCH_APPEND  = 10
+    N_BATCH_APPEND  = 100
 
     # tokens that we don't want to see in headers
     # because they may lead to fuzzy joins
@@ -86,50 +88,56 @@ def main(tag="CAN", from_=0, to_=1809):
     # is not duplicated into the final output
     already_used = set()
 
-
+    # write the header row for the result CSV file
     with open(candidates_path, 'w') as file:
         wr = csv.writer(file)
         wr.writerow([
-            'r_tab_id'    , 's_tab_id',
-            'r_col_id'    , 's_col_id',
-            'r_col_name'  , 's_col_name',
-            'size_r_col'  , 'size_s_col',
-            'r_pkg_id'    , 's_pkg_id',
-            
+            'r_tab_id', 
+            's_tab_id',
+            'r_col_id', 
+            's_col_id',
+            'r_col_name', 
+            's_col_name',
+            'size_r_col', 
+            'size_s_col',
+            'r_pkg_id', 
+            's_pkg_id',
             'size_intersection', 
             'size_union', 
             'jaccard', 
             'overlap'
         ])
 
-
     start_batch_t = time.time()
 
     for r_tab_id in range(len(table_ids)):
-        # read the relative table from disk
+        # read the relative table from disk        
         r_df = pl.read_parquet(f"{tables_path}/{table_ids[r_tab_id]}")
+        r_num_rows = r_df.shape[0]
+        if r_num_rows < MIN_HEIGHT:
+            continue
 
+        # perhaps due to error in crawling and saving metadata
+        if not re.sub(file_pattern, '', table_ids[r_tab_id]) in metadata:
+            continue
+        r_pkg_id = metadata[re.sub(file_pattern, '', table_ids[r_tab_id])]['id']
+        
         # for each col, if it is not supposed to be an ID
         # or a date column, query the index to find potentially 
         # joinable tables
-        for r_col_id in range(len(r_df.columns)):
+        for r_col_id, r_col_name in enumerate(r_df.columns):            
+            # check if any token like "id" or "date" is inside the column name
             if any(tok in r_df.columns[r_col_id].lower() for tok in bad_columns_tokens):
                 continue
 
-            col_size = r_df.shape[0]
-            if not col_size or r_df.to_series(r_col_id).is_null().sum() / col_size >= MAX_NULL_RATIO:
+            # check the number of null values
+            if not r_num_rows or r_df.to_series(r_col_id).is_null().sum() / r_num_rows >= MAX_NULL_RATIO:
                 continue
-            
-            # perhaps due to error in crawling and saving metadata?
-            if not re.sub(file_pattern, '', table_ids[r_tab_id]) in metadata:
-                continue
-            
-            r_col_name = r_df.columns[r_col_id]
-            r_pkg_id = metadata[re.sub(file_pattern, '', table_ids[r_tab_id])]['id']
-            
+
+            # extract the unique and cleaned values from the column 
             r_col = set(
                 filter(lambda v: v in values, 
-                    map(lambda v: sanitize_string(str(v)), r_df.to_series(r_col_id))
+                    map(lambda v: sanitize_string(v), r_df.to_series(r_col_id))
                 )
             )
 
@@ -138,6 +146,7 @@ def main(tag="CAN", from_=0, to_=1809):
 
             r_col_int = list(map(lambda v: str(values[v]), filter(lambda v: v in values, r_col)))
             
+            # apply the SC BLEND search technique, limiting to first K results
             res = con.sql(f"""
                     SELECT TableId, ColumnId, COUNT(DISTINCT CellValue) AS intersec FROM AllTables
                     WHERE CellValue IN ({','.join(r_col_int)})
@@ -161,7 +170,9 @@ def main(tag="CAN", from_=0, to_=1809):
                 # if they belong to the same package, drop the pair
                 if r_pkg_id == s_pkg_id:
                     continue
-
+                
+                # if we have already used this tuple <TableId1, TableId2, Col1, Col2> 
+                # do not save it again
                 if candidate_id := (
                     r_tab_id if r_tab_id <= s_tab_id else s_tab_id, 
                     s_col_id if r_tab_id <= s_tab_id else r_tab_id,
@@ -170,23 +181,21 @@ def main(tag="CAN", from_=0, to_=1809):
                     ) in already_used:
                     continue
                 already_used.add(candidate_id)
-                
-                s_df = pl.scan_parquet(f"{tables_path}/{table_ids[s_tab_id]}")
-            
-                s_col_series = s_df.select(pl.nth(s_col_id)).collect().to_series(0)
-                size = s_col_series.shape[0]
-                if not size or s_col_series.is_null().sum() / size >= MAX_NULL_RATIO:
+                                
+                s_col_series = pl.scan_parquet(f"{tables_path}/{table_ids[s_tab_id]}").select(pl.nth(s_col_id)).collect().to_series(0)
+                s_col_name = s_col_series.name
+                                
+                s_num_rows = s_col_series.shape[0]
+                if s_num_rows < MIN_HEIGHT or s_col_series.is_null().sum() / s_num_rows >= MAX_NULL_RATIO:
                     continue
             
                 s_col = set(
                     filter(lambda v: v in values, 
-                        map(lambda v: sanitize_string(str(v)), 
+                        map(lambda v: sanitize_string(v), 
                             s_col_series
                             )
                         )
-                    )
-                
-                s_col_name = s_df.collect_schema().names()[s_col_id]
+                    )                
                 
                 intersection    = r_col & s_col
                 union           = r_col | s_col
@@ -197,17 +206,23 @@ def main(tag="CAN", from_=0, to_=1809):
                 #   - one of the two columns has only few value;
                 #   - both jaccard and min-overlap are lower than a threshold;
                 #   - columns have the same name and have jaccard/overlap==1;
-                if len(s_col) < MIN_NUM_VALUES or jaccard < MIN_JACCARD or overlap < MIN_OVERLAP \
+                if len(s_col) < MIN_NUM_VALUES \
+                    or jaccard < MIN_JACCARD or overlap < MIN_OVERLAP \
                     or r_col_name == s_col_name and jaccard == 1 and overlap == 1:
                     continue
 
                 candidates.append(
                     [
-                        r_tab_id    , s_tab_id,
-                        r_col_id    , s_col_id,
-                        r_col_name  , s_col_name,
-                        len(r_col)  , len(s_col),
-                        r_pkg_id    , s_pkg_id,
+                        r_tab_id, 
+                        s_tab_id,
+                        r_col_id, 
+                        s_col_id,
+                        r_col_name, 
+                        s_col_name,
+                        len(r_col), 
+                        len(s_col),
+                        r_pkg_id, 
+                        s_pkg_id,
                         
                         len(intersection), 
                         len(union), 
@@ -217,7 +232,6 @@ def main(tag="CAN", from_=0, to_=1809):
                 )
 
         if r_tab_id % N_BATCH_APPEND == 0 and r_tab_id > 0:
-            print(f'Up to table {r_tab_id}({round(r_tab_id * 100 / len(table_ids), 3)}%);Current candidates:{len(candidates)};time:{round(time.time() - start_batch_t, 3)}s')
             logger.info(f'Up to table {r_tab_id}({round(r_tab_id * 100 / len(table_ids), 3)}%);Current candidates:{len(candidates)};time:{round(time.time() - start_batch_t, 3)}s')
             
             with open(candidates_path, 'a') as file:
@@ -227,15 +241,13 @@ def main(tag="CAN", from_=0, to_=1809):
             start_batch_t = time.time()
 
 
-    print(f'Up to table {r_tab_id} ({round(r_tab_id * 100 / len(table_ids), 3)}%);Current candidates:{len(candidates)};time:{round(time.time() - start_batch_t, 3)}s')
     logger.info(f'Up to table {r_tab_id} ({round(r_tab_id * 100 / len(table_ids), 3)}%);Current candidates:{len(candidates)};time:{round(time.time() - start_batch_t, 3)}s')
     with open(candidates_path, 'a') as file:
         wr = csv.writer(file)
         wr.writerows(candidates)
-
-    print("Done")
+    
     logger.info("Done")
 
 
 if __name__ == '__main__':
-    main(*sys.argv[1:4])
+    main(*sys.argv[1:])

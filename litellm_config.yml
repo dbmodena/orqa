@@ -14,9 +14,31 @@ model_list:
       model: ollama/mistral:latest
       api_base: http://localhost:11434
   
+  # Qwen Family
+  - model_name: qwen2.5-3b
+    litellm_params:
+      model: ollama/qwen2.5:3b
+      api_base: http://localhost:11434
+  - model_name: qwen2.5-7b
+    litellm_params:
+      model: ollama/qwen2.5:7b
+      api_base: http://localhost:11434
   - model_name: qwen2.5-14b
     litellm_params:
       model: ollama/qwen2.5:14b
+      api_base: http://localhost:11434
+  - model_name: qwen2.5-32b
+    litellm_params:
+      model: ollama/qwen2.5:32b
+      api_base: http://localhost:11434
+  # Qwen-coder Family
+  - model_name: qwen2.5-coder-3b
+    litellm_params:
+      model: ollama/qwen2.5-coder:3b
+      api_base: http://localhost:11434
+  - model_name: qwen2.5-coder-32b
+    litellm_params:
+      model: ollama/qwen2.5-coder:32b
       api_base: http://localhost:11434
   
   - model_name: deepseek-r1-14b
