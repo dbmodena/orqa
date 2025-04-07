@@ -12,13 +12,13 @@ import jsonlines
 os.environ["POLARS_MAX_THREADS"] = "2"
 import polars as pl
 
-from autogen_core.models import ModelFamily
 from autogen_core import ClosureAgent, ClosureContext, DefaultTopicId, MessageContext, SingleThreadedAgentRuntime, TypeSubscription
+from autogen_core.models import ModelFamily
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
-from orqa.agents.utils import Answer, Question
 from orqa.utils import sanitize_string
-from orqa.agents.debate import JOIN_EVALUATION_TOPIC_TYPE, JoinScoreAggregator, JoinEvaluator, final_join_evaluation_topic_id
+from orqa.agents.debate import JoinScoreAggregator, JoinEvaluator
+from orqa.agents.utils import Answer, Question, JOIN_EVALUATION_TOPIC_TYPE
 
 
 def get_resource_metadata(rsc_id, table_ids, metadata):

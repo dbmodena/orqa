@@ -47,7 +47,6 @@ log_formatter = logging.Formatter("%(asctime)s,[%(process)d],[%(levelname)s],%(m
 handler.setFormatter(log_formatter)
 logger.addHandler(handler)
 
-if os.path.exists(db_path): os.remove(db_path)
 os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
 # take the table IDs in alphabetical order
@@ -118,16 +117,6 @@ if not os.path.exists(values_path):
                     values[v] = i
                     i += 1
 
-    # for ntab, table_id in enumerate(table_ids):
-    #     if ntab % 100 == 0:
-    #     try:
-    #         unique_vals = get_table_values(table_id)
-    #         for v in unique_vals:
-    #             values[v] = i
-    #             i += 1
-    #     except TimeoutError:
-    #         continue
-
     logger.info('Create bidict from values')
     values = bidict.bidict(values)
 
@@ -159,7 +148,7 @@ def collect_table_records(data):
 logger.info('Start insert values into duckdb')
 step = 100
 with ProcessPoolExecutor(num_cpu) as executor:
-    for ntab in range(0, len(table_ids) + step, step):
+    for ntab in range(0, len(table_ids) + step, step):        
         results = executor.map(collect_table_records, enumerate(table_ids[ntab:ntab+step], start=ntab))
         records = []
         for table in results:
@@ -169,36 +158,16 @@ with ProcessPoolExecutor(num_cpu) as executor:
         con.execute("INSERT INTO AllTables SELECT * FROM rec_df")
         con.commit()
             
-        logger.debug(f"Inserting batch tables {ntab}/{len(table_ids)} ({round(ntab * 100 / len(table_ids), 3)}%)")
+        logger.debug(f"Inserting batch tables {ntab}/{len(table_ids)} ({round(ntab * 100 / len(table_ids), 3)}%), inserted records: {rec_df.shape[0]}")
 
-
-# n = 0
-# for table_idx, table_id in enumerate(table_ids):
-#     try:
-#         records += collect_table_records(table_idx, table_id)
-#         n += 1
-#     except TimeoutError:
-#         continue
-#     except KeyError:
-#         continue
-#     
-#     if n % CHECKPOINT == 0 and n > 0:
-#         rec_df = pl.DataFrame(records, schema=['TableId', 'ColumnId', 'RowId', 'CellValue'], orient='row')
-#         con.execute("INSERT INTO AllTables SELECT * FROM rec_df")
-#         con.commit()
-#         records = []
-#         logger.debug(f'Inserted tables [{n - CHECKPOINT}, {n}]')
-
-# rec_df = pl.DataFrame(records, schema=['TableId', 'ColumnId', 'RowId', 'CellValue'], orient='row')
-# con.execute("INSERT INTO AllTables SELECT * FROM rec_df")
-# con.commit()
-# logger.debug(f'Inserted tables [{n - CHECKPOINT}, {n}]')
-# logger.info('Done')
 
 logger.info('Creating indexes')
 con.execute("CREATE INDEX IF NOT EXISTS TableId_idx   ON AllTables (TableId);")
-con.execute("CREATE INDEX IF NOT EXISTS ColumnId_idx  ON AllTables (ColumnId);")
-con.execute("CREATE INDEX IF NOT EXISTS RowId_idx     ON AllTables (RowId);")
+# these should have a very low selectivity thus is prob not necessary
+# if we can get the records relative to our tables with the TableId_idx the main
+# work is done (?)
+# con.execute("CREATE INDEX IF NOT EXISTS ColumnId_idx  ON AllTables (ColumnId);")
+# con.execute("CREATE INDEX IF NOT EXISTS RowId_idx     ON AllTables (RowId);")
 con.execute("CREATE INDEX IF NOT EXISTS CellValue_idx ON AllTables (CellValue);")
 logger.info('Done')
 

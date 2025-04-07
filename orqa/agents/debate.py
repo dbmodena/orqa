@@ -18,11 +18,11 @@ from autogen_core.models import (
     UserMessage,
 )
 
-from orqa.agents.utils import IntermediateEvaluatorResponse, Question, Answer, EvaluatorRequest, FinalEvaluatorResponse, ResetOrder
+from orqa.agents.utils import (
+    IntermediateEvaluatorResponse, Question, Answer, EvaluatorRequest, FinalEvaluatorResponse, ResetOrder,
+    final_join_evaluation_topic_id
+)
 
-
-JOIN_EVALUATION_TOPIC_TYPE = "evaluation-result"
-final_join_evaluation_topic_id = TopicId(type=JOIN_EVALUATION_TOPIC_TYPE, source="default")
 
 
 
@@ -49,7 +49,7 @@ class JoinEvaluator(RoutedAgent):
                     "Your task is to evaluate pairs of candidate tables for a SQL join operation "
                     "by providing a numerical score. "
                     "Limit your output to 50 words, and your final answer should be a single "
-                    f"integer number, between {self._min_score} and {self._max_score}, "
+                    f"integer number, between {self._min_score} and {self._max_score}. Respond with the form:\n"
                     "Answer: <your numerical score here>\n"
                     "Explanation: <your concise explanation>"
                 )
@@ -72,12 +72,12 @@ class JoinEvaluator(RoutedAgent):
             self._logger.debug(f"\n{'-' * 80}\nEvaluator {self.id} round {self._round}:\n{model_result.content}")
         
         # get the integer score
-        m = re.search(r"answer: (\d+)", model_result.content.lower())
-        if m is None:
+        try:
+            m = re.search(r"answer: (\d+)", model_result.content.lower())
+            answer = int(m.group(1))
+        except:
             self._logger.error(f"No valid response!")
             raise ValueError("The model response doesn't contain the answer!")
-        
-        answer = int(m.group(1))
 
         # increment the round number
         self._round += 1
@@ -165,7 +165,7 @@ class JoinScoreAggregator(RoutedAgent):
             f"Give a score for the following task:\n{message.content}\n"
             "Explain briefly your reasoning. Your final answer should be a single integer number, " \
             f"between {self._min_score} and {self._max_score}, respond with the form:\n"
-            "Answer: <your numberical score here> "
+            "Answer: <your numberical score here>\n"
             "Explanation: <your concise explanation>"
         )
         if self._logger: 

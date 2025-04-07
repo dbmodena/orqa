@@ -18,6 +18,8 @@ def is_num(x):
     return True
 
 
+characters_translator = str.maketrans("\n ,.\"", "_____")
+
 @lru_cache(maxsize=int(1e7))
 def sanitize_string(s):
     """
@@ -30,7 +32,7 @@ def sanitize_string(s):
     # normalize accents (e.g., é -> e)
     s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('utf-8')
     # replace problematic characters with underscores
-    return s.replace('\n', '_').replace(' ', '_').replace('.', '_').replace('"', '_').strip()
+    return s.translate(characters_translator).strip()
             
 
 
