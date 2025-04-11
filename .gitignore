@@ -5,6 +5,7 @@
 *.e
 job*.sh
 .venv
+*tmp
 
 *.ipynb_checkpoints
 data/tmp
@@ -15,6 +16,7 @@ data/datasets
 data/log
 clusters
 schema
+bird-mini-dev
 
 **.jsonl
 *.lock

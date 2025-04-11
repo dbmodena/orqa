@@ -32,7 +32,7 @@ metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{
 db_path         = f'{data_path}/datasets/{tag}/database/blend.db'
 values_path     = f'{data_path}/datasets/{tag}/database/values_dict.pickle'
 
-log_path        = f'{data_path}/log/{tag}/BlendIndexing.log'
+log_path        = f'{data_path}/log/{tag}/1_blend_indexing.log'
 
 num_cpu         = 10
 

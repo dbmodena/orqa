@@ -20,7 +20,7 @@ def main(tag="CAN", from_=0, to_=42705):
     metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
     db_path         = f'{data_path}/datasets/{tag}/database/blend.db'
     valdict_path    = f'{data_path}/datasets/{tag}/database/values_dict.pickle'
-    log_path        = f'{data_path}/log/{tag}/JoinSearch.log'
+    log_path        = f'{data_path}/log/{tag}/2_join_search.log'
 
     candidates_path = f'{data_path}/outputs/{tag}/candidate_joins.csv'
 
@@ -38,7 +38,7 @@ def main(tag="CAN", from_=0, to_=42705):
     logger.info("Started Job")
 
     # max number of results we want during search
-    K               = 10
+    K               = 50
 
     # the minimum number of distinct values a column must have
     MIN_NUM_VALUES  = 10
@@ -56,6 +56,9 @@ def main(tag="CAN", from_=0, to_=42705):
     MIN_OVERLAP     = 0.3
 
     N_BATCH_APPEND  = 100
+
+    # if we accept or not tables with the same schema
+    ACCEPT_SAME_SCHEMA     = False
 
     # tokens that we don't want to see in headers
     # because they may lead to fuzzy joins
@@ -121,6 +124,7 @@ def main(tag="CAN", from_=0, to_=42705):
         if not re.sub(file_pattern, '', table_ids[r_tab_id]) in metadata:
             continue
         r_pkg_id = metadata[re.sub(file_pattern, '', table_ids[r_tab_id])]['id']
+        r_column_names = set(map(sanitize_string, r_df.columns))
         
         # for each col, if it is not supposed to be an ID
         # or a date column, query the index to find potentially 
@@ -157,10 +161,7 @@ def main(tag="CAN", from_=0, to_=42705):
             """).fetchall()
             
             # for each tuple, check if this is a potentially valid join candidate
-            # if the overlap is over some kind of threshold, then the pair is
-            # meaningful (this has to be refined, maybe with an agent?)
-            for s_tab_id, s_col_id, intersection in res:
-                
+            for s_tab_id, s_col_id, intersection in res:                
                 # perhaps due to error in crawling and saving metadata?
                 if not re.sub(file_pattern, '', table_ids[s_tab_id]) in metadata:
                     continue
@@ -181,11 +182,17 @@ def main(tag="CAN", from_=0, to_=42705):
                     ) in already_used:
                     continue
                 already_used.add(candidate_id)
-                                
+
+                s_columns_names = set(map(sanitize_string, pl.scan_parquet(f"{tables_path}/{table_ids[s_tab_id]}").collect_schema().names()))
+                if not ACCEPT_SAME_SCHEMA and r_column_names == s_columns_names:
+                    continue 
+
                 s_col_series = pl.scan_parquet(f"{tables_path}/{table_ids[s_tab_id]}").select(pl.nth(s_col_id)).collect().to_series(0)
                 s_col_name = s_col_series.name
                                 
                 s_num_rows = s_col_series.shape[0]
+
+                # the table must have a minimum height and a max null ratio
                 if s_num_rows < MIN_HEIGHT or s_col_series.is_null().sum() / s_num_rows >= MAX_NULL_RATIO:
                     continue
             

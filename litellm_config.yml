@@ -5,9 +5,12 @@ model_list:
   # Llama Family (different types)
   - model_name: llama3.3
     litellm_params:
-      model: ollama/llama3.3:latest
+      model: ollama_chat/llama3.3:latest
       api_base: http://localhost:11434
-
+      temperature: 0
+      keep_alive: -1
+      num_ctx: 8192
+      
   - model_name: llama3.1-8b
     litellm_params:
       model: ollama/llama3.1:8b
@@ -30,14 +33,14 @@ model_list:
       num_ctx: 8192
   - model_name: qwen2.5-14b  
     litellm_params:
-      model: ollama/qwen2.5:14b
+      model: ollama_chat/qwen2.5:14b
       api_base: http://localhost:11434
       temperature: 0
       keep_alive: -1
       num_ctx: 8192
   - model_name: qwen2.5-32b
     litellm_params:
-      model: ollama/qwen2.5:32b
+      model: ollama_chat/qwen2.5:32b
       api_base: http://localhost:11434
       temperature: 0
       keep_alive: -1

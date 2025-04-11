@@ -1,5 +1,6 @@
 import json
 import asyncio
+import warnings
 from typing import List
 from logging import Logger
 
@@ -17,19 +18,18 @@ from autogen_core.models import (
     SystemMessage,
     AssistantMessage,
     ChatCompletionClient,
-    FunctionExecutionResult    
+    FunctionExecutionResult,
 )
 from autogen_core.tools import Tool
 
 from orqa.agents.utils import *
 
+warnings.filterwarnings('ignore')
+
 
 __all__ = ['SQLQueryGeneratorAgent', 'NLQuestionGeneratorAgent']
 
-# WITH age_group_dwelling_counts AS ( 
-#   SELECT R.age_group, SUM(CAST(REPLACE(S.private_dwellings_occupied_by_usual_residents,_2016, '_', '') AS INTEGER)) AS total_dwellings 
-#   FROM R INNER JOIN S ON R.geo = S.geographic_name,_english WHERE R.geo = 'canada' GROUP BY R.age_group 
-# ) SELECT age_group, AVG(total_dwellings) AS average_dwellings FROM age_group_dwelling_counts GROUP BY age_group;
+
 
 @default_subscription
 class SQLQueryGeneratorAgent(RoutedAgent):
@@ -40,165 +40,149 @@ class SQLQueryGeneratorAgent(RoutedAgent):
         self.max_num_revisions  : int = max_num_revisions
         self._logger            : Logger | None = logger
 
+        self._input_tokens      : int = 0
+        self._output_tokens     : int = 0
         self._session_memory    : List[SQLGenerationTask| SQLReviewTask | SQLReviewResult] = []
         self._num_sql_revisions : str = -1
         self._system_messages   : List[LLMMessage] = [
             SystemMessage(content=(
-                "You are a smart AI assistant. "
-                "Your task is to generate SQL queries and natural language questions. "                
+                    "You are a smart Text-to-SQL assistant. "
+                    "Your task is to generate SQL queries of different difficult levels. "
+                    "A 'simple' query involves just basic operations, like simple WHERE clauses. "
+                    "A 'moderate' query could use also grouping functions and other forms of aggregations."
+                    "A 'challenging' query may require window functions, casting, string replacement, subqueries. "
+                    "You are using DuckDB: if necessary, put column names inside double-quotes, not backticks. "
+                    "Use the given tool to validate your SQL query: your response must be only a valid function call."
                 )
             )
         ]
-        
+
+
     @message_handler
-    async def handle_sql_generate_task(self, message: SQLGenerationTask, ctx: MessageContext) -> None:
-        # Reset values from previous session
-        self._session_memory.clear()
-        self._num_sql_revisions = -1
-
-        self._session_memory.append(message)        
-
-        session = self._system_messages + [UserMessage(content=message.sql_task, source=self.metadata["type"])]
+    async def handle_sql_task(self, message: SQLGenerationTask | SQLReviewResult, ctx: MessageContext) -> None:    
+        # create a list of LLM messages to send to the model
+        session: List[LLMMessage] = [*self._system_messages] 
         
-        # Run the chat completion with the tools.
+        # add the message to the current session memory 
+        self._session_memory.append(message)
+        
+        if isinstance(message, SQLGenerationTask):
+            # Reset values from previous session
+            self._session_memory.clear()
+            self._num_sql_revisions = -1
+            self._input_tokens = 0
+            self._output_tokens = 0
+            
+            task = message.sql_task
+            session.append(UserMessage(content=message.sql_task, source="User"))
+
+        elif isinstance(message, SQLReviewResult):
+            review_request = next(
+                m for m in reversed(self._session_memory) 
+                if isinstance(m, SQLReviewTask)
+            )
+            
+            task = review_request.sql_task
+            
+            assert review_request is not None
+
+            # keep track if the SQL actually works or not
+            # TODO in some cases, the reviewer stucks on some fix need
+            # even if it already addressed
+            exe_res = eval(review_request.execution_result)
+            sql_success = 'success' if exe_res['status'] == "success" else exe_res['error_description']
+
+            # add tokens from the reviewer 
+            self._input_tokens += message.input_tokens
+            self._output_tokens += message.output_tokens
+
+            self._num_sql_revisions += 1
+            too_many_revs = self._num_sql_revisions >= self.max_num_revisions
+
+            # if the laast reveiw was successful or we have reached the max number of reviews,
+            #  publish the code writing result
+            if message.approved or too_many_revs:
+                await self.publish_message(
+                    SQLGenerationResult(
+                        sql_task=review_request.sql_task,
+                        sql_query=("FAILURE: " if too_many_revs and not message.approved else "") + review_request.sql_query,
+                        review=message.review,
+                        sql_success=sql_success,
+                        n_rev=self._num_sql_revisions,
+                        input_tokens=self._input_tokens,
+                        output_tokens=self._output_tokens
+                    ),
+                    topic_id=sql_result_topic_id
+                )
+
+                return
+            else: 
+                # list of past reveiws (if any)
+                reviews : list[str] = []
+
+                for m in self._session_memory:
+                    if isinstance(m, SQLReviewResult):
+                        reviews.append(f"{m.execution_result} {m.review}")
+                    
+                # TODO handle better this part
+                m = f"Re-consider the original task. Rewrite the query considering the previous SQL execution outputs and relative reviews: {'\n'.join(reviews)}."
+                
+                # generate a revision using the chat completion API
+                session.append(UserMessage(content=m, source="User"))        
+
         response = await self._model_client.create(
-            messages=session, 
+            messages=session,
             tools=self._tools, 
             cancellation_token=ctx.cancellation_token
         )
-
-        # the agent must generate a tool call to verify its SQL query        
-        assert isinstance(response.content, FunctionCall) or isinstance(response.content, list) and all(
-            isinstance(call, FunctionCall) for call in response.content
-        ), f"Bad response content: {type(response.content)=}, {response.content=}"
-
-        # Execute the tool calls.
-        func_exe_result = await asyncio.gather(
-            *[self._execute_tool_call(call, ctx.cancellation_token) for call in response.content]
-        )
-
-        assert len(func_exe_result) > 0, f"Empty function result set! {func_exe_result}"
-        try:
-            assert isinstance(eval(func_exe_result[0].content), dict), f"Wrong function return type! {func_exe_result}"
-        except SyntaxError:
-            if self._logger: self._logger.error(f"Some error here: {func_exe_result[0]=}")
-            if self._logger: self._logger.error(f"Or here: {func_exe_result[0].content=}")
-
-        func_exe_result = eval([r.content for r in func_exe_result][0])
-            
-        sql_query = func_exe_result["sql_query"]
-        del func_exe_result["sql_query"]
-
-        sql_review_task = SQLReviewTask(
-            sql_task=message.sql_task,
-            sql_query=sql_query,
-            execution_result=str(func_exe_result)
-        )
-
-        # self._logger.debug(f"SQL results in handle_generate_task: {func_exe_result=}")
-
-        self._session_memory.append(sql_review_task)        
-        await self.publish_message(sql_review_task, topic_id=sql_intermediate_topic_id)
-
-    @message_handler
-    async def handle_sql_review_result(self, message: SQLReviewResult, ctx: MessageContext) -> None:
-        self._session_memory.append(message)
-
-        review_request = next(
-            m for m in reversed(self._session_memory) 
-            if isinstance(m, SQLReviewTask)
-        )
+    
+        # count the current input/output session input tokens
+        self._input_tokens += self._model_client.count_tokens(messages=session, tools=self._tools)
+        self._output_tokens += self._model_client.count_tokens(messages=[AssistantMessage(content=response.content, source=self.metadata["type"])], tools=self._tools)
         
-        assert review_request is not None
-
-        self._num_sql_revisions += 1
-        old_sql_query = review_request.sql_query
-        too_many_revs = self._num_sql_revisions >= self.max_num_revisions
-
-        if message.approved or too_many_revs:
-            # publish the code writing result            
-            await self.publish_message(
-                SQLGenerationResult(
-                    sql_task=review_request.sql_task,
-                    sql_query=("FAILURE: " if too_many_revs else "") + review_request.sql_query,
-                    review=message.review,
-                    n_rev=self._num_sql_revisions
-                ),
-                topic_id=sql_result_topic_id
-            )
+        try:
+            # should we consider only cases where the model outpus 
+            # a perfectly valid function call?
+            if isinstance(response.content, FunctionCall):
+                func_call = [response.content]
+            elif isinstance(response.content, list) and all(isinstance(call, FunctionCall) for call in response.content):
+                func_call = response.content
+            elif isinstance(response.content, str):
+                str_function_call = eval(response.content.replace('json', '').replace('`', ''))
+                func_call = [FunctionCall(id=str(hash(response.content)), arguments=str_function_call['arguments'], name=str_function_call['name'])]
             
-        else:
-            # create a list of LLM messages to send to the model
-            messages: List[LLMMessage] = [*self._system_messages]
-
-            # each message isn't a Query** dataclass, but a default message type
-            # with some specific source
-            reviews = [message.review]
-            for m in self._session_memory:
-                if isinstance(m, SQLReviewResult):
-                    reviews.append(m.json_review['suggested_changes'])
-                    messages.append(UserMessage(content=m.review, source="Reviewer"))
-                elif isinstance(m, SQLReviewTask):
-                    messages.append(AssistantMessage(content=m.sql_query, source="QueryGenerator"))
-                elif isinstance(m, SQLGenerationTask):
-                    task = m.sql_task
-                    messages.append(UserMessage(content=m.sql_task, source="User"))
-                else:
-                    raise ValueError(f"Unexpected message type: {m}")
-            
-            # TODO handle this part
-            m = f"Re-consider the task: {task}. Rewrite the query considering the reviews: {'\n'.join(reviews)}. "
-            
-            # generate a revision using the chat completion API
-            response = await self._model_client.create(
-                self._system_messages + [UserMessage(content=m, source="User")],
-                tools=self._tools, 
-                cancellation_token=ctx.cancellation_token
-            )
-
-            assert isinstance(response.content, FunctionCall) or isinstance(response.content, list) and all(
-                isinstance(call, FunctionCall) for call in response.content
-            ), f"Bad response content: {type(response.content)}"
-
             # Execute the tool calls.
-            func_exe_result = await asyncio.gather(
-                *[self._execute_tool_call(call, ctx.cancellation_token) for call in response.content])
-            try:
-                assert len(func_exe_result) > 0, f"Empty function result set! {func_exe_result}"
-                assert isinstance(eval(func_exe_result[0].content), dict), f"Wrong function return type! {func_exe_result}"
-            except SyntaxError:
-                if self._logger: self._logger.error(f"Some error here: {func_exe_result[0]=}")
-                if self._logger: self._logger.error(f"Or here: {func_exe_result[0].content=}")
+            func_exe_result = await asyncio.gather(*[self._execute_tool_call(call, ctx.cancellation_token) for call in func_call])
+            execution_result : dict = eval([r.content for r in func_exe_result][0])
+        except Exception as e:
+            if self._logger: self._logger.error(f"Error in tool handling: {e}")
+            raise e
+        
+        sql_query = execution_result.pop("sql_query")
 
-            func_exe_result = eval([r.content for r in func_exe_result][0])
-            
-            sql_query = func_exe_result["sql_query"]
-            del func_exe_result["sql_query"]
-
-            # self._logger.debug(f"SQL results in handle_review_task: {func_exe_result=}")            
-
-            query_review_task = SQLReviewTask(
-                sql_task=review_request.sql_task,
-                sql_query=sql_query,
-                execution_result=str(func_exe_result)
-            )
-
-            # store the question review task in the session memory
-            self._session_memory.append(query_review_task)
-
-            # publish a new review task
-            await self.publish_message(query_review_task, topic_id=sql_intermediate_topic_id)
-
-        self._logger.debug((
-            f"\n{'-' * 100}\n"
-            "Question Generator:\n"
-            f"Number of Reviews: {self._num_sql_revisions}\n\n"            
-            f"Query (old):\n{old_sql_query}\n"            
-            f"Approved:\n{message.approved}\n"            
-            f"Query (new):\n{sql_query}"
-            f"\n{'-' * 100}\n"
-            )
+        query_review_task = SQLReviewTask(
+            sql_task=task,
+            sql_query=sql_query,
+            execution_result=str(execution_result)
         )
+
+        # add the review task to the session memory
+        self._session_memory.append(query_review_task)
+
+        if self._logger:
+            self._logger.debug(
+                (
+                    f"\n{'-' * 100}\n"
+                    "Question Generator:\n"
+                    f"Number of Reviews: {self._num_sql_revisions}\n\n"      
+                    f"Execution result:\n{execution_result}\n"
+                    f"Query:\n{sql_query}"
+                    f"\n{'-' * 100}\n"
+                )
+            )
+
+        # publish the new review task
+        await self.publish_message(query_review_task, topic_id=sql_intermediate_topic_id)
         
     async def _execute_tool_call(
         self, call: FunctionCall, cancellation_token: CancellationToken
@@ -214,7 +198,7 @@ class SQLQueryGeneratorAgent(RoutedAgent):
                 call_id=call.id, content=tool.return_value_as_string(result), is_error=False, name=tool.name
             )
         except Exception as e:
-            return FunctionExecutionResult(call_id=call.id, content=str(e), is_error=True, name=tool.name)
+            return FunctionExecutionResult(call_id=call.id, content=str({"status": "error", "error_description": str(e), "sql_query": None}), is_error=True, name=tool.name)
 
 
 
@@ -224,110 +208,119 @@ class NLQuestionGeneratorAgent(RoutedAgent):
         super().__init__("Natural Language generator assistant")
         self._model_client      : ChatCompletionClient  = model_client
         self.max_num_revisions  : int = max_num_revisions
-        self._logger            : Logger | None  = logger 
+        self._logger            : Logger | None  = logger         
         
+        self._input_tokens      : int = 0
+        self._output_tokens     : int = 0
         self._session_memory    : List[NLGenerationTask | NLReviewTask | NLReviewResult] = []
         self._num_nl_revisions  : int = 0
         self._system_messages   : List[LLMMessage] = [
             SystemMessage(content=(
                 "You are a smart AI assistant. "
-                "Your task is to generate natural language questions based on SQL queries."
+                "Your task is to generate natural language questions."
                 )
             )
         ]
     
     @message_handler
-    async def handle_nl_generate_task(self, message: NLGenerationTask, ctx: MessageContext) -> None:
-        # Reset previous session values
-        self._session_memory.clear()
-        self._num_nl_revisions = -1
-
-        # Add the message to the session memory
-        self._session_memory.append(message)
+    async def handle_nl_task(self, message: NLGenerationTask | NLReviewResult, ctx: MessageContext) -> None:
+        # create a list of LLM messages to send to the model
+        session: List[LLMMessage] = [*self._system_messages] 
         
-        # Run the chat completion with the tools.
+        
+        if isinstance(message, NLGenerationTask):
+            # Reset values from previous session
+            self._session_memory.clear()
+            self._num_nl_revisions = -1
+            self._input_tokens = 0
+            self._output_tokens = 0
+            
+            task = message.nl_task
+            session.append(UserMessage(content=message.nl_task, source="User"))
+
+        elif isinstance(message, NLReviewResult):
+            review_request = next(
+                m for m in reversed(self._session_memory) 
+                if isinstance(m, NLReviewTask)
+            )            
+            assert review_request is not None
+            task = review_request.nl_task
+            
+            # add the tokens from the reviewer
+            self._input_tokens += message.input_tokens
+            self._output_tokens += message.output_tokens
+
+            # and check termination conditions
+            too_many_revs = self._num_nl_revisions >= self.max_num_revisions
+
+            if message.approved or too_many_revs:
+                # publish the code writing result
+                await self.publish_message(
+                    NLGenerationResult(
+                        nl_question=("FAILURE: " if too_many_revs and not message.approved else "") + review_request.nl_question,
+                        nl_task=review_request.nl_task,
+                        review=message.review,
+                        n_rev=self._num_nl_revisions,
+                        input_tokens=self._input_tokens,
+                        output_tokens=self._output_tokens
+                    ),
+                    topic_id=nl_result_topic_id
+                )
+
+                return
+            else:
+                # create a list of LLM messages to send to the model
+                messages: List[LLMMessage] = [*self._system_messages]
+
+                # each message isn't a Query** dataclass, but a default message type
+                # with some specific source
+                for msg in self._session_memory:
+                    if isinstance(msg, NLGenerationTask):
+                        task = msg.nl_task
+                        messages.append(UserMessage(content=msg.nl_task, source="User"))
+                    
+                msg = (
+                    f"Re-consider the task: {task} and rewrite the question considering the review: {message.review}. "
+                    "Pay attention also to previous feedbacks."
+                )
+
+                # add the message to the current generation session memory
+                session.append(UserMessage(content=msg, source=self.metadata["type"]))
+
+        # create the response with the client
         response = await self._model_client.create(
-            messages=self._system_messages + [UserMessage(content=message.nl_task, source=self.metadata["type"])],             
+            messages=session,
             cancellation_token=ctx.cancellation_token
         )
 
-        nl_question = response.content
+        # count input/output tokens
+        self._input_tokens += self._model_client.count_tokens(messages=session)
+        self._output_tokens += self._model_client.count_tokens(messages=[AssistantMessage(content=response.content, source=self.metadata["type"])])
+
+        # the agent must generate a tool call to verify its SQL query
+        assert isinstance(response.content, str)        
         
-        nl_review_task = NLReviewTask(
-            nl_task=message.nl_task,
-            nl_question=nl_question
+        question_review_task = NLReviewTask(
+            nl_task=task,
+            nl_question=response.content
         )
 
-        self._session_memory.append(nl_review_task)        
-        await self.publish_message(nl_review_task, topic_id=nl_intermediate_topic_id)
-
-    @message_handler
-    async def handle_nl_review_result(self, message: NLReviewResult, ctx: MessageContext) -> None:
-        self._session_memory.append(message)        
-
-        review_request = next(
-            m for m in reversed(self._session_memory) 
-            if isinstance(m, NLReviewTask)
-        )
-        
-        assert review_request is not None
-
+        # increment the number of revisions
         self._num_nl_revisions += 1
-        old_nl_question = review_request.nl_question
-        too_many_revs = self._num_nl_revisions >= self.max_num_revisions
-        if message.approved or too_many_revs:
-            # publish the code writing result
-            await self.publish_message(
-                NLGenerationResult(
-                    nl_question=("FAILURE: " if too_many_revs else "") + review_request.nl_question,
-                    nl_task=review_request.nl_task,
-                    review=message.review,
-                    n_rev=self._num_nl_revisions
-                ),
-                topic_id=nl_result_topic_id
+
+        # store the question review task in the session memory
+        self._session_memory.append(question_review_task)
+
+        # publish a new review task
+        await self.publish_message(question_review_task, topic_id=nl_intermediate_topic_id)
+
+        if self._logger:
+            self._logger.debug(
+                (
+                    f"\n{'-' * 100}\n"
+                    "NL Question Generator:\n"
+                    f"Number of Reviews: {self._num_nl_revisions}\n"
+                    f"Question (new):\n{response.content}"
+                    f"\n{'-' * 100}\n"
+                )
             )
-        else:
-            # create a list of LLM messages to send to the model
-            messages: List[LLMMessage] = [*self._system_messages]
-
-            # each message isn't a Query** dataclass, but a default message type
-            # with some specific source
-            for msg in self._session_memory:
-                if isinstance(msg, NLGenerationTask):
-                    task = msg.nl_task
-                    messages.append(UserMessage(content=msg.nl_task, source="User"))
-                
-            msg = (
-                f"Re-consider the task: {task} and rewrite the question considering the review: {message.review}. "
-                "Pay attention also to previous feedbacks."
-            )
-
-            response = await self._model_client.create(
-                self._system_messages + [UserMessage(content=msg, source=self.metadata["type"])],
-                cancellation_token=ctx.cancellation_token
-            )
-
-            # the agent must generate a tool call to verify its SQL query
-            assert isinstance(response.content, str)        
-            
-            question_review_task = NLReviewTask(
-                nl_task=review_request.nl_task,
-                nl_question=response.content
-            )
-
-            # store the question review task in the session memory
-            self._session_memory.append(question_review_task)
-
-            # publish a new review task
-            await self.publish_message(question_review_task, topic_id=nl_intermediate_topic_id)
-
-        self._logger.debug((
-            f"\n{'-' * 100}\n"
-            "NL Question Generator:\n"
-            f"Number of Reviews: {self._num_nl_revisions}\n"
-            f"Question (old):\n{old_nl_question}\n"
-            f"Approved: {message.approved}\n"            
-            f"Question (new):\n{response.content}"
-            f"\n{'-' * 100}\n"
-            )
-        )

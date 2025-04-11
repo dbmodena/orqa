@@ -6,10 +6,10 @@ from autogen_core import (
     DefaultTopicId,
     MessageContext,
     RoutedAgent,
-    TopicId,
     default_subscription,
     message_handler,
 )
+
 from autogen_core.models import (
     AssistantMessage,
     ChatCompletionClient,
@@ -29,7 +29,8 @@ from orqa.agents.utils import (
 @default_subscription
 class JoinEvaluator(RoutedAgent):
     def __init__(self, model_client: ChatCompletionClient, topic_type: str, 
-                 num_neighbors: int, max_rounds: int, min_score:int = 0, max_score: int = 5, 
+                 num_neighbors: int, max_rounds: int, 
+                 min_score:int = 0, max_score: int = 5, 
                  logger: logging.Logger|None = None):
         super().__init__("Evaluates candidate joinable tables debating with other agents")
         self._topic_type = topic_type
@@ -48,8 +49,9 @@ class JoinEvaluator(RoutedAgent):
                     "You are an helpful assistant in tabular data comprehension. "
                     "Your task is to evaluate pairs of candidate tables for a SQL join operation "
                     "by providing a numerical score. "
-                    "Limit your output to 50 words, and your final answer should be a single "
-                    f"integer number, between {self._min_score} and {self._max_score}. Respond with the form:\n"
+                    "Limit your output to 50 words, "
+                    f"and your final answer should be a single integer number, between {self._min_score} and {self._max_score}. "
+                    "Respond with the form:\n"
                     "Answer: <your numerical score here>\n"
                     "Explanation: <your concise explanation>"
                 )
@@ -62,22 +64,23 @@ class JoinEvaluator(RoutedAgent):
         self._history.append(UserMessage(content=message.content, source="User"))
 
         # make an inference using the underlying model
-        model_result = await self._model_client.create(self._system_messages + self._history)
-        assert isinstance(model_result.content, str)
+        response = await self._model_client.create(self._system_messages + self._history)
+        assert isinstance(response.content, str)
 
         # add the response to the memory
-        self._history.append(AssistantMessage(content=model_result.content, source=self.metadata["type"]))
+        self._history.append(AssistantMessage(content=response.content, source=self.metadata["type"]))        
 
         if self._logger:
-            self._logger.debug(f"\n{'-' * 80}\nEvaluator {self.id} round {self._round}:\n{model_result.content}")
+            self._logger.debug(f"\n{'-' * 80}\nEvaluator {self.id} round {self._round}:\n{response.content}")
         
-        # get the integer score
         try:
-            m = re.search(r"answer: (\d+)", model_result.content.lower())
+            # get the integer score
+            m = re.search(r"answer: (\d+)", response.content.lower())
             answer = int(m.group(1))
+            assert self._min_score <= answer <= self._max_score
         except:
-            self._logger.error(f"No valid response!")
-            raise ValueError("The model response doesn't contain the answer!")
+            if self._logger: self._logger.error(f"No valid response! {response.content}")
+            answer = -1
 
         # increment the round number
         self._round += 1
@@ -89,7 +92,7 @@ class JoinEvaluator(RoutedAgent):
             # otherwise continue with an intermediate response
             await self.publish_message(
                 IntermediateEvaluatorResponse(
-                    content=model_result.content,
+                    content=response.content,
                     question=message.question,
                     answer=answer,
                     nround=self._round
@@ -133,15 +136,11 @@ class JoinEvaluator(RoutedAgent):
     @message_handler
     async def handle_reset(self, message: ResetOrder, ctx: MessageContext) -> None:
         # set the round number to 0
-        if not self.id in message.received:
-            if self._logger: 
-                self._logger.debug(f"Solver {self.id} has done reset.")
-            self._round = 0
-            self._history = []
-            self._buffer = {}
-            ids = message.received
-            ids.append(self.id.key)
-            await self.publish_message(ResetOrder(received=ids), self.id)
+        if self._logger: 
+            self._logger.debug(f"Solver {self.id} has done reset.")
+        self._round = 0
+        self._history = []
+        self._buffer = {}
 
 
 
@@ -190,8 +189,7 @@ class JoinScoreAggregator(RoutedAgent):
             )
 
             # Send the reset message to the solvers
-            await self.publish_message(ResetOrder([]), topic_id=DefaultTopicId())
+            await self.publish_message(ResetOrder(), topic_id=DefaultTopicId())
             
             # Clear the responses.
             self._buffer.clear()
-            # print(f"{'-'*80}\nAggregator {self.id} publishes final answer:\n{majority_answer}")

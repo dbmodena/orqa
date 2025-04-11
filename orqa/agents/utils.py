@@ -1,5 +1,55 @@
 from dataclasses import dataclass
+
 from autogen_core import TopicId
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+from autogen_core.models import FunctionExecutionResult
+
+
+def get_model_client(model, family: str = "unknown") -> OpenAIChatCompletionClient:  # type: ignore
+    "Mimic OpenAI API using Local LLM Server."
+    return OpenAIChatCompletionClient(
+        model=model,
+        api_key="NotRequiredSinceWeAreLocal",
+        base_url="http://localhost:4000/",
+        model_capabilities={
+            "json_output": False,
+            "vision": False,
+            "function_calling": True,
+            "family": family
+        },
+    )    
+
+
+
+
+GENERATION_TOPIC_TYPE   = "generation-result"
+RESULT_TOPIC_TYPE       = "final-result"
+generation_topic_id     = TopicId(type=GENERATION_TOPIC_TYPE    , source="default")
+result_topic_id         = TopicId(type=RESULT_TOPIC_TYPE        , source="default")
+
+
+@dataclass
+class GenerationTask:
+    task: str
+
+@dataclass
+class GenerationResult:
+    sql: str
+    nl: str
+    n_rev: int
+
+@dataclass
+class ReviewTask:
+    task: str
+    sql: str
+    nl: str
+    execution_result: str
+
+@dataclass
+class ReviewResult:
+    review: str
+    json_review: dict
+    approved: bool
 
 
 # For SQL Query Generation
@@ -14,26 +64,32 @@ sql_result_topic_id         = TopicId(type=SQL_RESULT_TOPIC_TYPE        , source
 
 @dataclass
 class SQLGenerationTask:
-    sql_task: str
+    sql_task                : str
 
 @dataclass
 class SQLGenerationResult:
-    sql_task: str
-    sql_query: str
-    review: str
-    n_rev: int
+    sql_task                : str
+    sql_query               : str
+    review                  : str
+    sql_success             : bool
+    n_rev                   : int
+    input_tokens            : int
+    output_tokens           : int
 
 @dataclass
 class SQLReviewTask:
-    sql_task: str
-    sql_query: str
-    execution_result: str
+    sql_task                : str
+    sql_query               : str
+    execution_result        : str
 
 @dataclass
 class SQLReviewResult:
-    review: str
-    json_review: dict
-    approved: bool
+    review                  : str
+    json_review             : dict
+    approved                : bool
+    execution_result        : str
+    input_tokens            : int
+    output_tokens           : int
 
 
 
@@ -56,6 +112,8 @@ class NLGenerationResult:
     nl_question: str
     review: str
     n_rev: int
+    input_tokens: int
+    output_tokens: int
 
 @dataclass
 class NLReviewTask:
@@ -67,6 +125,9 @@ class NLReviewResult:
     review: str
     json_review: dict
     approved: bool
+    input_tokens: int
+    output_tokens: int
+
 
 
 # Debating 
@@ -83,7 +144,6 @@ class Question:
 class Answer:
     score: int
 
-
 @dataclass
 class IntermediateEvaluatorResponse:
     content: str
@@ -91,19 +151,15 @@ class IntermediateEvaluatorResponse:
     answer: str
     nround: int
 
-
 @dataclass
 class EvaluatorRequest:
     content: str
     question: str
 
-
 @dataclass
 class FinalEvaluatorResponse:
     answer: str
 
-
 @dataclass
 class ResetOrder:
-    received: list
-    
+    pass
