@@ -1,3 +1,4 @@
+import csv
 import os
 import re
 import sys
@@ -100,7 +101,7 @@ async def amain(tag, from_, to_):
     bird_dev_path       = f"{data_path}/bird-mini-dev/dev.json"
 
     evaluated_path      = f"{data_path}/outputs/{tag}/evaluated_joins.csv"
-    queries_path        = f"{data_path}/outputs/{tag}/generated_queries_union.jsonl"
+    queries_path        = f"{data_path}/outputs/{tag}/generated_queries_final.csv"
 
     UP_TO_ROW           = 1000000
 
@@ -116,14 +117,14 @@ async def amain(tag, from_, to_):
     # (as number of characters)
     MAX_LENGTH_NOTES    = 300
     
-    # number of sampled rows passed to the LLM into the question context
     N_ROWS_SAMPLE       = 3
+    # number of sampled rows passed to the LLM into the question context
 
     # minimum score from the evaluation stage
     MIN_SCORE           = 8
 
-    DO_SINGLE_TABLE     = False
-    DO_JOIN             = False
+    DO_SINGLE_TABLE     = True
+    DO_JOIN             = True
     DO_UNION            = True
 
     # the model name (here we will use LiteLLM and Ollama models)
@@ -143,7 +144,7 @@ async def amain(tag, from_, to_):
     # set up the logging
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     logger = logging.getLogger("agent_logger_union")
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     handler = logging.FileHandler(log_path)
     log_formatter = logging.Formatter("%(asctime)s,[%(levelname)s],%(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(log_formatter)
@@ -232,9 +233,9 @@ async def amain(tag, from_, to_):
                              message: SQLGenerationResult | NLGenerationResult, 
                              ctx: MessageContext) -> None:
         if isinstance(message, SQLGenerationResult):
-            await queue.put((message.sql_query, message.n_rev, message.sql_success, message.input_tokens, message.output_tokens, message.review))
+            await queue.put((message.sql_query.replace('\n', ' '), message.n_rev, message.sql_success.replace('\n', ' '), message.input_tokens, message.output_tokens, message.review.replace('\n', ' ')))
         elif isinstance(message, NLGenerationResult):
-            await queue.put((message.nl_question, message.n_rev, message.input_tokens, message.output_tokens, message.review))
+            await queue.put((message.nl_question.replace('\n', ' '), message.n_rev, message.input_tokens, message.output_tokens, message.review.replace('\n', ' ')))
 
     CLOSURE_AGENT_TYPE = "collect_result_agent"
     await ClosureAgent.register_closure(
@@ -265,6 +266,11 @@ async def amain(tag, from_, to_):
         try:
             # take relevant information for the llm-agent
             r_tab_id, s_tab_id, _, _, original_r_col_name, original_s_col_name, r_pkg_id, s_pkg_id, _, _ = row
+            
+            # for simplicity, because these could lead to some naming complications
+            # TODO handle naming with multi-table resources
+            if '_' in table_ids[r_tab_id] or '_' in table_ids[s_tab_id]:
+                continue
 
             r_rsc_id, r_rsc_name, _, _, r_pkg_notes, r_pkg_keywords, r_pkg_tags = get_resource_metadata(r_tab_id, table_ids, metadata)
             s_rsc_id, s_rsc_name, _, _, s_pkg_notes, s_pkg_keywords, s_pkg_tags = get_resource_metadata(s_tab_id, table_ids, metadata)
@@ -318,7 +324,8 @@ async def amain(tag, from_, to_):
         except Exception as e:
             logger.error(f"Error in query preparation: >>>{e}<<< ")
             continue
-
+        
+        prev_sql, prev_nl = [], []
 
         #############################################
         ##### Generate Single-Table queries    ######
@@ -335,21 +342,12 @@ async def amain(tag, from_, to_):
 
                 # bring the dataframe in the global scope 
                 # to be used in the tool
-                globals()['R'] = df
-                
-                query_question_data = {
-                    "id"        : n_id,
-                    "type"      : "single-table",
-                    "rsc_id"    : rsc_id,                
-                    "pkg_id"    : pkg_id,
-                    "rsc_name"  : rsc_name,                
-                }
-                n_id += 1
+                globals()['R'] = df                
 
-                prev_sql = []
-                prev_nl = []
-                current_generations = {}            
-                
+                # reset values
+                prev_sql.clear() 
+                prev_nl.clear()
+
                 for nq, (difficulty, bird_q) in enumerate(bird_questions.items()):            
                     logger.info(f"{i=}, step {nq} - SINGLE TABLE")
 
@@ -376,7 +374,7 @@ async def amain(tag, from_, to_):
                                 f"Example rows of the table:\n{df_str}"
                                 f"\n{'-' * 50}\n"
                                 f"Generate a {difficulty} SQL query based on the given table. "
-                                f"Be different from previous queries: {prev_sql}. "                                
+                                f"The new query must be different from previous queries: {prev_sql}. "                                
                                 )
                             ),
                             topic_id=sql_generation_topic_id
@@ -390,7 +388,7 @@ async def amain(tag, from_, to_):
                         
                         while not queue.empty():
                             sql, sql_n_rev, sql_success, sql_intok, sql_outok, sql_review = await queue.get()
-                            prev_sql.append(sql)
+                            prev_sql.append(sql.removeprefix("FAILURE: "))
                         if sql == 'ERROR' and sql_n_rev == -1:
                             raise ValueError('Agent output not correctly received')
 
@@ -402,18 +400,13 @@ async def amain(tag, from_, to_):
                             NLGenerationTask(
                                 nl_task=(                                                        
                                     "Consider the following information:\n"
-                                    f"The table R is about: {notes}.\n"
+                                    f"The table {rsc_name} is about: {notes}.\n"
                                     f"Some keywords and tags about it are: {keywords}, {tags}.\n"
                                     f"Example rows with schema:\n{df_str}"
                                     f"\n{'-' * 50}\n"
-                                    f"Generate a natural language question which represents the SQL query {sql} on the given table."
-                                    "Do not include any table name inside the question, and do not use 'dataset_r'. "
-                                    "Do not use original column names if they are not human-like: try to figure out what an "
-                                    "abbreviation means based on the given context (like 'geo' --> 'geography' --> 'region'). "
-                                    "The question must be human-like: do not use SQL-like words, such as null or select. "
-                                    "Try to generate fluent question as human."
+                                    f"Generate a natural language question which represents the SQL query {sql} on the given table."                                    
                                     "If keyowrds or notes are meaningful, insert remiders to them. "
-                                    f'Be different from previous questions: {prev_nl}. '
+                                    f"The new questions must be different from previous questions: {prev_nl}. "
                                     "Your response must be only the question, nothing else."
                                 )
                             ),
@@ -425,7 +418,7 @@ async def amain(tag, from_, to_):
                         nl_time = round(time.time() - nl_start_t, 3)
                         while not queue.empty():
                             nl, nl_n_rev, nl_intok, nl_outok, nl_review = await queue.get()                        
-                            prev_nl.append(nl)
+                            prev_nl.append(nl.removeprefix("FAILURE: "))
                         if nl == 'ERROR' and nl_n_rev == -1:
                             raise ValueError('Agent output not correctly received')
 
@@ -433,12 +426,24 @@ async def amain(tag, from_, to_):
                     except Exception as e:
                         logger.error(f'Error in generation: {e}')
                         if sql == 'ERROR': sql = f'ERROR: {str(e)}, SQL: {nl}'
-                        if nl == 'ERROR' : nl = f'ERROR: {str(e)}, NL: {nl}'
+                        if nl == 'ERROR' : nl  = f'ERROR: {str(e)}, NL: {nl}'
 
                     success = not nl.startswith('ERROR') and not sql.startswith('ERROR') and not nl.startswith('FAILURE') and not sql.startswith('FAILURE')
-                        
-                    current_generations[difficulty] = {
-                        "nq"        : nq,
+                    
+                    n_id += 1
+                    results.append({
+                        "id"        : n_id,
+                        "type"      : "single-join",
+                        "r_rsc_id"  : rsc_id,
+                        "s_rsc_id"  : None,
+                        "r_pkg_id"  : pkg_id,
+                        "s_pkg_id"  : None,
+                        "r_rsc_name": rsc_name,
+                        "s_rsc_name": None,
+                        "r_col_name": None,
+                        "s_col_name": None,     
+                                                
+                        "difficulty": difficulty,
                         "sql"       : sql,
                         "nl"        : nl,
                         "success"   : success,
@@ -457,35 +462,18 @@ async def amain(tag, from_, to_):
                         "nl_outok"  : nl_outok,
                         
                         "tot_time"  : nl_time + sql_time,
-                    }
+                    })
                 
-                query_question_data['query_question'] = current_generations
-                results.append(query_question_data)
-
-
 
         #############################################
         ##### Generate Multi-Table JOIN queries #####
         #############################################
 
-        if DO_JOIN and not set(r_columns_dtypes) == set(s_columns_dtypes):
-            query_question_data = {
-                "id"        : n_id,
-                "type"      : "multi-table-join",
-                "r_rsc_id"  : r_rsc_id,
-                "s_rsc_id"  : s_rsc_id,
-                "r_pkg_id"  : r_pkg_id,
-                "s_pkg_id"  : s_pkg_id,
-                "r_rsc_name": r_rsc_name,
-                "s_rsc_name": s_rsc_name,
-                "r_col_name": r_col_name,
-                "s_col_name": s_col_name,
-            }
-            n_id += 1
+        if DO_JOIN and not set(r_columns_dtypes) == set(s_columns_dtypes):            
 
-            prev_sql = []
-            prev_nl = []
-            current_generations = {}
+            # reset values
+            prev_sql.clear() 
+            prev_nl.clear()
 
             # bring the dataframe in the global scope 
             # to be used in the tool
@@ -527,7 +515,7 @@ async def amain(tag, from_, to_):
                             f"\n{'-' * 50}\n"
                             f"Generate a {difficulty} SQL query based on the given tables. "
                             f"The query must include a JOIN on the R column {r_col_name} and on the S column {s_col_name}. "
-                            f"Be different from previous queries: {prev_sql}. "                            
+                            f"The new query must be different from previous queries: {prev_sql}. "                            
                             )
                         ),
                         topic_id=sql_generation_topic_id
@@ -541,7 +529,7 @@ async def amain(tag, from_, to_):
                     
                     while not queue.empty():
                         sql, sql_n_rev, sql_success, sql_intok, sql_outok, sql_review = await queue.get()
-                        prev_sql.append(sql)
+                        prev_sql.append(sql.removeprefix("FAILURE: "))
                     if sql == 'ERROR' and sql_n_rev == -1:
                         raise ValueError('Agent output not correctly received')
                             
@@ -553,22 +541,18 @@ async def amain(tag, from_, to_):
                         NLGenerationTask(
                             nl_task=(                                                        
                                 "Consider the following information:\n"
-                                f"The table R is about: {r_pkg_notes}.\n"
+                                f"The table {r_rsc_name} is about: {r_pkg_notes}.\n"
                                 f"Some keywords and tags about it are: {r_pkg_keywords}, {r_pkg_tags}.\n"
                                 f"Example rows with schema:\n{r_df_str}"
                                 f"\n{'-' * 50}\n"
-                                f"The table S is about: {s_pkg_notes}.\n"
+                                f"The table {s_rsc_name} is about: {s_pkg_notes}.\n"
                                 f"Some keywords and tags about it are: {s_pkg_keywords}, {s_pkg_tags}.\n"
                                 f"Example rows: {s_df_str}"
                                 f"\n{'-' * 50}\n"
                                 f"Generate a natural language question which represents the SQL query {sql} on the given tables."
-                                "Do not include any table name inside the question, and do not use 'dataset_r' or 'dataset_s'. "
-                                "Do not use original column names if they are not human-like: try to figure out what an "
-                                "abbreviation means based on the given context (like 'geo' --> 'geography' --> 'region'). "
-                                "The question must be human-like: do not use SQL-like words, such as null or select. "
                                 "If keyowrds or notes are meaningful, insert some remiders to them. "
                                 f"Keep focus on R column {r_col_name} and on S column {s_col_name}. "
-                                f'Be different from previous questions: {prev_nl}. '
+                                f"The new question must be different from previous questions: {prev_nl}. "
                                 "Your response must be only the question, nothing else."
                             )
                         ),
@@ -580,7 +564,7 @@ async def amain(tag, from_, to_):
                     nl_time = round(time.time() - nl_start_t, 3)
                     while not queue.empty():
                         nl, nl_n_rev, nl_intok, nl_outok, nl_review = await queue.get()
-                        prev_nl.append(nl)  
+                        prev_nl.append(nl.removeprefix("FAILURE: "))  
                     if nl == 'ERROR' and nl_n_rev == -1:
                         raise ValueError('Agent output not correctly received')                        
 
@@ -588,12 +572,24 @@ async def amain(tag, from_, to_):
                 except Exception as e:
                     logger.error(f'Error in generation: {e}')
                     if sql == 'ERROR': sql = f'ERROR: {str(e)}, SQL: {nl}'
-                    if nl == 'ERROR' : nl = f'ERROR: {str(e)}, NL: {nl}'
+                    if nl == 'ERROR' : nl  = f'ERROR: {str(e)}, NL: {nl}'
 
                 success = not nl.startswith('ERROR') and not sql.startswith('ERROR') and not nl.startswith('FAILURE') and not sql.startswith('FAILURE')
-                        
-                current_generations[difficulty] = {
-                    "nq"        : nq,
+                
+                n_id += 1
+                results.append({
+                    "id"        : n_id,
+                    "type"      : "multi-table-join",
+                    "r_rsc_id"  : r_rsc_id,
+                    "s_rsc_id"  : s_rsc_id,
+                    "r_pkg_id"  : r_pkg_id,
+                    "s_pkg_id"  : s_pkg_id,
+                    "r_rsc_name": r_rsc_name,
+                    "s_rsc_name": s_rsc_name,
+                    "r_col_name": r_col_name,
+                    "s_col_name": s_col_name,
+                
+                    "difficulty": difficulty,
                     "sql"       : sql,
                     "nl"        : nl,
                     "success"   : success,
@@ -612,53 +608,34 @@ async def amain(tag, from_, to_):
                     "nl_outok"  : nl_outok,
                     
                     "tot_time"  : nl_time + sql_time,
-                }
-            
-            query_question_data['query_question'] = current_generations
-            results.append(query_question_data)
+                })
             
         
         #############################################
         ##### Generate Multi-Table UNION queries ####
         #############################################
 
-        if DO_UNION:
-            # For the UNION query generation, we can now try a very
-            # simple schema alignment process, checking if the two tables
-            # share at most a high percentage of attributes
+        # For the UNION query generation, we can now try a very
+        # simple schema alignment process, checking if the two tables
+        # share at most a high percentage of attributes
 
-            # get pairs of (colname, dtype) in common
-            matches = set(r_columns_dtypes) & set(s_columns_dtypes)
+        # get pairs of (colname, dtype) in common
+        matches = set(r_columns_dtypes) & set(s_columns_dtypes)
 
-            # if for both tables the number of matches is more 
-            # than the 70% if the total attributes, these are
-            # likely unionable
-            # are_unionable = (len(matches) / len(r_columns_dtypes) >= 0.7) \
-            #     & (len(matches) / len(s_columns_dtypes) >= 0.7) \
-            #     & (len(r_columns_dtypes) >= 3)
-            unionable = set(r_columns_dtypes) == set(s_columns_dtypes)
-            if not unionable:
-                continue
-
-            query_question_data = {
-                "id"        : n_id,
-                "type"      : "multi-table-union",
-                "r_rsc_id"  : r_rsc_id,
-                "s_rsc_id"  : s_rsc_id,
-                "r_pkg_id"  : r_pkg_id,
-                "s_pkg_id"  : s_pkg_id,
-                "r_rsc_name": r_rsc_name,
-                "s_rsc_name": s_rsc_name,
-                "r_col_name": r_col_name,
-                "s_col_name": s_col_name,
-            }
-
-            n_id += 1
-
-            prev_sql = []
-            prev_nl = []
-            current_generations = {}
-
+        # if for both tables the number of matches is more 
+        # than the 70% if the total attributes, these are
+        # likely unionable
+        # are_unionable = (len(matches) / len(r_columns_dtypes) >= 0.7) \
+        #     & (len(matches) / len(s_columns_dtypes) >= 0.7) \
+        #     & (len(r_columns_dtypes) >= 3)
+        unionable = set(r_columns_dtypes) == set(s_columns_dtypes)
+        
+        if DO_UNION and unionable:
+            
+            # reset values
+            prev_sql.clear() 
+            prev_nl.clear()
+            
             # bring the dataframe in the global scope 
             # to be used in the tool
             globals()['R'] = r_df
@@ -700,7 +677,7 @@ async def amain(tag, from_, to_):
                             f"\n{'-' * 50}\n"
                             f"Generate a {difficulty} UNION SQL query based on the given tables. "
                             f"The two tables have in common these attribtues: {list(zip(*matches))[0]}. "
-                            f"Be different from previous queries: {prev_sql}. "
+                            f"The new query must be different from previous queries: {prev_sql}. "
                             )
                         ),
                         topic_id=sql_generation_topic_id
@@ -714,7 +691,7 @@ async def amain(tag, from_, to_):
                     
                     while not queue.empty():
                         sql, sql_n_rev, sql_success, sql_intok, sql_outok, sql_review = await queue.get()
-                        prev_sql.append(sql)
+                        prev_sql.append(sql.removeprefix("FAILURE: "))
                     if sql == 'ERROR' and sql_n_rev == -1:
                         raise ValueError('Agent output not correctly received')
                             
@@ -726,21 +703,18 @@ async def amain(tag, from_, to_):
                         NLGenerationTask(
                             nl_task=(                                                        
                                 "Consider the following information:\n"
-                                f"The table R is about: {r_pkg_notes}.\n"
+                                f"The table {r_rsc_name} is about: {r_pkg_notes}.\n"
                                 f"Some keywords and tags about it are: {r_pkg_keywords}, {r_pkg_tags}.\n"
                                 f"Example rows with schema:\n{r_df_str}"
                                 f"\n{'-' * 50}\n"
-                                f"The table S is about: {s_pkg_notes}.\n"
+                                f"The table {s_rsc_name} is about: {s_pkg_notes}.\n"
                                 f"Some keywords and tags about it are: {s_pkg_keywords}, {s_pkg_tags}.\n"
                                 f"Example rows: {s_df_str}"
                                 f"\n{'-' * 50}\n"
                                 f"Generate a natural language question which represents the SQL query {sql} on the given tables."
                                 "Do not include any table name inside the question, and do not use 'dataset_r' or 'dataset_s'. "
-                                "Do not use original column names if they are not human-like: try to figure out what an "
-                                "abbreviation means based on the given context (like 'geo' --> 'geography' --> 'region'). "
-                                "The question must be human-like: do not use SQL-like words, such as null or select. "
                                 "If keyowrds or notes are meaningful, insert some remiders to them. "
-                                f'Be different from previous questions: {prev_nl}. '
+                                f"The new question must be different from previous questions: {prev_nl}. "
                                 "Your response must be only the question, nothing else."
                             )
                         ),
@@ -752,7 +726,7 @@ async def amain(tag, from_, to_):
                     nl_time = round(time.time() - nl_start_t, 3)
                     while not queue.empty():
                         nl, nl_n_rev, nl_intok, nl_outok, nl_review = await queue.get()
-                        prev_nl.append(nl)  
+                        prev_nl.append(nl.removeprefix("FAILURE: "))
                     if nl == 'ERROR' and nl_n_rev == -1:
                         raise ValueError('Agent output not correctly received')                        
 
@@ -760,15 +734,27 @@ async def amain(tag, from_, to_):
                 except Exception as e:
                     logger.error(f'Error in generation: {e}')
                     if sql == 'ERROR': sql = f'ERROR: {str(e)}, SQL: {nl}'
-                    if nl == 'ERROR' : nl = f'ERROR: {str(e)}, NL: {nl}'
+                    if nl == 'ERROR' : nl  = f'ERROR: {str(e)}, NL: {nl}'
 
                 success = not nl.startswith('ERROR') and not sql.startswith('ERROR') and not nl.startswith('FAILURE') and not sql.startswith('FAILURE')
-                        
-                current_generations[difficulty] = {
-                    "nq"        : nq,
-                    "success"   : success,
+                
+                n_id += 1
+                results.append({
+                    "id"        : n_id,
+                    "type"      : "multi-table-union",
+                    "r_rsc_id"  : r_rsc_id,
+                    "s_rsc_id"  : s_rsc_id,
+                    "r_pkg_id"  : r_pkg_id,
+                    "s_pkg_id"  : s_pkg_id,
+                    "r_rsc_name": r_rsc_name,
+                    "s_rsc_name": s_rsc_name,
+                    "r_col_name": r_col_name,
+                    "s_col_name": s_col_name,
+                
+                    "difficulty": difficulty,
                     "sql"       : sql,
                     "nl"        : nl,
+                    "success"   : success,
 
                     "sql_success": sql_success,
                     "sql_time"  : sql_time,
@@ -784,16 +770,12 @@ async def amain(tag, from_, to_):
                     "nl_outok"  : nl_outok,
                     
                     "tot_time"  : nl_time + sql_time,
-                }
-                
-                query_question_data['query_question'] = current_generations
-                results.append(query_question_data)
+                })
 
-
-        if len(results) % 10 == 0:
-            with jsonlines.open(queries_path, 'a') as file:
-                file.write_all(results)
-            results = []
+        file_exists = os.path.exists(queries_path)
+        pl.DataFrame(results) \
+            .write_csv(open(queries_path, 'a' if file_exists else 'w'), include_header=not file_exists)
+        results.clear()
 
         logger.info(f"Run {i}/{len(rows)} ({round(i * 100 / len(rows), 3)}%), (step_time: {round(time.time() - start_step_t, 3)}s, total_time:{round(time.time() - start_t, 3)}s)")
 
@@ -802,10 +784,10 @@ async def amain(tag, from_, to_):
     except Exception as e:
         logger.error(f"Error on closing: {e}")
 
-    if len(results) % 10 == 0:
-        with jsonlines.open(queries_path, 'a') as file:
-            file.write_all(results)
-        results = []
+    file_exists = os.path.exists(queries_path)
+    pl.DataFrame(results) \
+        .write_csv(open(queries_path, 'a' if file_exists else 'w'), include_header=not file_exists)
+    results.clear()
 
 
     logger.info("Done")

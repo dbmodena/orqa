@@ -51,7 +51,8 @@ class SQLQueryGeneratorAgent(RoutedAgent):
                     "A 'simple' query involves just basic operations, like simple WHERE clauses. "
                     "A 'moderate' query could use also grouping functions and other forms of aggregations."
                     "A 'challenging' query may require window functions, casting, string replacement, subqueries. "
-                    "You are using DuckDB: if necessary, put column names inside double-quotes, not backticks. "
+                    "You are using DuckDB: if necessary, put column names inside double-quotes. "
+                    "Do not cast FLOAT to REAL. If a VARCHAR attribute is similar to a datetime, try to cast it to DATE or DATETIME. "
                     "Use the given tool to validate your SQL query: your response must be only a valid function call."
                 )
             )
@@ -96,7 +97,6 @@ class SQLQueryGeneratorAgent(RoutedAgent):
             self._input_tokens += message.input_tokens
             self._output_tokens += message.output_tokens
 
-            self._num_sql_revisions += 1
             too_many_revs = self._num_sql_revisions >= self.max_num_revisions
 
             # if the laast reveiw was successful or we have reached the max number of reviews,
@@ -105,7 +105,7 @@ class SQLQueryGeneratorAgent(RoutedAgent):
                 await self.publish_message(
                     SQLGenerationResult(
                         sql_task=review_request.sql_task,
-                        sql_query=("FAILURE: " if too_many_revs and not message.approved else "") + review_request.sql_query,
+                        sql_query=f"{'FAILURE: ' if too_many_revs and not message.approved else ''}{review_request.sql_query}",
                         review=message.review,
                         sql_success=sql_success,
                         n_rev=self._num_sql_revisions,
@@ -122,10 +122,13 @@ class SQLQueryGeneratorAgent(RoutedAgent):
 
                 for m in self._session_memory:
                     if isinstance(m, SQLReviewResult):
-                        reviews.append(f"{m.execution_result} {m.review}")
+                        reviews.append(f"Previous execution result: {m.execution_result}. Relative review: {m.review}")
                     
                 # TODO handle better this part
-                m = f"Re-consider the original task. Rewrite the query considering the previous SQL execution outputs and relative reviews: {'\n'.join(reviews)}."
+                m = (
+                    "Re-consider the original task. Be different from old queries. "
+                    f"Rewrite the query considering the previous SQL execution outputs and relative reviews: {'\n'.join(reviews)}."
+                )
                 
                 # generate a revision using the chat completion API
                 session.append(UserMessage(content=m, source="User"))        
@@ -159,6 +162,9 @@ class SQLQueryGeneratorAgent(RoutedAgent):
             raise e
         
         sql_query = execution_result.pop("sql_query")
+        
+        # increase the number of reviews
+        self._num_sql_revisions += 1
 
         query_review_task = SQLReviewTask(
             sql_task=task,
@@ -218,6 +224,11 @@ class NLQuestionGeneratorAgent(RoutedAgent):
             SystemMessage(content=(
                 "You are a smart AI assistant. "
                 "Your task is to generate natural language questions."
+                "The questions must be human-like: do not use SQL-like words, such as null or select. "
+                "Try to generate fluent questions as human."
+                "Do not include any table name inside the question, and do not use 'dataset_r' or 'dataset_s'. "
+                "Do not use original column names if they are not human-like: try to figure out what an "
+                "abbreviation means based on the given context (like 'geo' --> 'geography' --> 'region'). "                                    
                 )
             )
         ]
@@ -257,7 +268,7 @@ class NLQuestionGeneratorAgent(RoutedAgent):
                 # publish the code writing result
                 await self.publish_message(
                     NLGenerationResult(
-                        nl_question=("FAILURE: " if too_many_revs and not message.approved else "") + review_request.nl_question,
+                        nl_question=f"{'FAILURE: ' if too_many_revs and not message.approved else ''}{review_request.nl_question}",
                         nl_task=review_request.nl_task,
                         review=message.review,
                         n_rev=self._num_nl_revisions,
