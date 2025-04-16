@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import queue
 import shutil
@@ -53,12 +54,6 @@ def init_logger(log_directory):
 
 
 def download_resource_csv(data: Tuple[urllib3.PoolManager | urllib3.ProxyManager, str, str, str, int, logging.Logger|None]):
-        # http: urllib3.PoolManager | urllib3.ProxyManager, 
-        # rsc_url: str, 
-        # rsc_name: str, 
-        # download_directory: str, 
-        # max_content_length: int,
-        # logger: logging.Logger|None):
     http, rsc_url, rsc_name, download_directory, max_content_length, logger = data
 
     def csv_base():
@@ -124,6 +119,7 @@ def process_task(
         n_workers: int = 10,
         packages_per_worker:int = 1_000,
         accepted_formats: list = ['CSV'],
+        proxy_kwargs: dict | None = None, 
         keep_logging: bool = True):
     
     if keep_logging:
@@ -136,17 +132,25 @@ def process_task(
     
     # create the HTTP manager for this process (shared among its threads)
     # http = urllib3.PoolManager(
-    http = urllib3.ProxyManager(
-        # num_pools=n_workers,
-        maxsize=n_workers,
-        retries=False,
-        timeout=urllib3.Timeout(connect=7.0, read=5.0),        
-        headers={
-            'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0'
-        },
-        cert_reqs='CERT_NONE',
-        proxy_url='http://localhost:9999'
-    )
+    if proxy_kwargs:
+        http = urllib3.ProxyManager(
+            maxsize=n_workers,
+            retries=False,
+            timeout=urllib3.Timeout(connect=7.0, read=5.0),        
+            headers={
+                'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0'
+            },
+            **proxy_kwargs
+        )
+    else:
+        http = urllib3.PoolManager(
+            maxsize=n_workers,
+            retries=False,
+            timeout=urllib3.Timeout(connect=7.0, read=5.0),        
+            headers={
+                'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0'
+            }
+        )
 
     # the success ratio of tables correctly downloaded
     success = 0
@@ -210,6 +214,7 @@ def download_tables(url_basepoint: str,
                     packages_per_worker:int = 1_000,
                     from_n_package:int|None = None,
                     to_n_package:int|str = "END",
+                    proxy_kwargs: None | dict = None, 
                     keep_logging: bool = True):
     """
     Download all the available resources from the given Open Data URL basepoint.
@@ -239,12 +244,15 @@ def download_tables(url_basepoint: str,
     try:
         # get initial response, to get some basic stats
         init_url = f'{package_search_url}?start=0&rows=1000'
-        # http = urllib3.PoolManager(
-        http = urllib3.ProxyManager(
-            cert_reqs='CERT_NONE',  # Disables SSL certificate verification (equivalent to -k in curl)
-            retries=3,  # Retry on failure (optional)
-            proxy_url='http://localhost:9999',  # Proxy configuration (equivalent to -x in curl)
-        )
+        if not proxy_kwargs:
+            http = urllib3.PoolManager()
+        else:
+            http = urllib3.ProxyManager(
+                **proxy_kwargs
+                # cert_reqs='CERT_NONE',  # Disables SSL certificate verification (equivalent to -k in curl)
+                # retries=3,  # Retry on failure (optional)
+                # proxy_url='http://localhost:9999',  # Proxy configuration (equivalent to -x in curl)
+            )
 
         response = http.request(
             'GET',
@@ -264,13 +272,14 @@ def download_tables(url_basepoint: str,
             logger.info(f'{n_valid_resources=} in first 1000 packages ({round(n_valid_resources / 1000, 1)} on average)')
         http.clear()
         
+        to_n_package_usr    = to_n_package
         from_n_package      = max(from_n_package, 0) if from_n_package else 0
         to_n_package        = n_total_packages if isinstance(to_n_package, str) else min(n_total_packages, to_n_package) if to_n_package else n_total_packages
         n_total_packages    = to_n_package - from_n_package
         packages_per_worker = min(packages_per_worker, to_n_package)
 
-        metadata_jsonl      = f'{download_directory}/metadata/metadata_from{from_n_package}_to{to_n_package}.jsonl'
-        download_directory  = f'{download_directory}/tables/tables_from{from_n_package}_to{to_n_package}'
+        metadata_jsonl      = f'{download_directory}/metadata/metadata_from{from_n_package}_to{to_n_package if isinstance(to_n_package_usr, int) else to_n_package_usr}.jsonl'
+        download_directory  = f'{download_directory}/tables/tables_from{from_n_package}_to{to_n_package if isinstance(to_n_package_usr, int) else to_n_package_usr}'
         
         # remove old existent data
         shutil.rmtree(download_directory, ignore_errors=True)
@@ -288,7 +297,7 @@ def download_tables(url_basepoint: str,
         with ProcessPoolExecutor(max_workers=min(n_workers, MAX_PROC_NUM), mp_context=mp.get_context('spawn')) as executor:
             futures = [
                 executor.submit(
-                    process_task, package_search_url, download_directory, temporary_directory, log_directory, i, n_workers, packages_per_worker, accepted_formats, keep_logging)
+                    process_task, package_search_url, download_directory, temporary_directory, log_directory, i, n_workers, packages_per_worker, accepted_formats, proxy_kwargs, keep_logging)
                     for i in range(from_n_package, to_n_package, packages_per_worker)
                 ]
             if logger: logger.debug(f'Total work steps: {len(range(from_n_package, to_n_package, packages_per_worker))}')
@@ -320,49 +329,50 @@ def download_tables(url_basepoint: str,
         if keep_logging: listener.stop()
 
 
-def main():
-    from_   = 0
-    to_     = 'END'
-
+def main(country_tag: str = 'CAN',
+         from_: int = 0,
+         to_: int|str = 'END',
+         country_ckan_base_url: str = 'https://open.canada.ca/data/api/action'):
+    
     data_path       = f'{os.path.dirname(__file__)}/../data'
     tmp_dir         = f'{data_path}/tmp'
     log_dir         = f'{data_path}/log'
 
     # clean and create directories
+    # currently is not used, TODO check if is ok
+    # to store large files on disk and do then IO 
     shutil.rmtree(tmp_dir, ignore_errors=True)
     os.makedirs(tmp_dir, exist_ok=True)
 
-    open_data_portals = {
-        # 'CAN'   : 'https://open.canada.ca/data/api/action',
-        # 'US'    : 'https://catalog.data.gov/api/3/action',
-        'UK'    : 'https://data.gov.uk/api/action',
-        # 'AFR'   : 'https://open.africa/api/action',
-        # 'SG'    : '???'
-    }
+    # 'CAN'   : 'https://open.canada.ca/data/api/action',
+    # 'US'    : 'https://catalog.data.gov/api/3/action',
+    # 'UK'    : 'https://data.gov.uk/api/action',
+    # 'AFR'   : 'https://open.africa/api/action',
+    # 'SG'    : '???'
+    
+    download_dir = f'{data_path}/datasets/{country_tag}'
+    log_dir = f"{log_dir}/{country_tag}/crawling/{time.strftime('%y%m%d_%H_%M_%S')}"
 
-    for country_tag, country_ckan_base_url in open_data_portals.items():
-        download_dir = f'{data_path}/datasets/{country_tag}'
-        log_dir = f"{log_dir}/{country_tag}/crawling/{time.strftime('%y%m%d_%H_%M_%S')}"
+    shutil.rmtree(download_dir, ignore_errors=True)
+    os.makedirs(download_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
 
-        shutil.rmtree(download_dir, ignore_errors=True)
-        os.makedirs(download_dir, exist_ok=True)
-        os.makedirs(log_dir, exist_ok=True)
-
-        download_tables(
-            country_ckan_base_url, 
-            download_dir, 
-            tmp_dir, 
-            log_dir, 
-            ['CSV'], 
-            n_workers=10,
-            packages_per_worker=10,
-            from_n_package=from_,
-            to_n_package=to_,
-            keep_logging=True)
+    download_tables(
+        country_ckan_base_url, 
+        download_dir, 
+        tmp_dir, 
+        log_dir, 
+        ['CSV'], 
+        n_workers=10,
+        packages_per_worker=10,
+        from_n_package=from_,
+        to_n_package=to_,
+        keep_logging=True
+    )
 
     # remove the temporary directory
     shutil.rmtree(tmp_dir, ignore_errors=True)
     # shutil.move(log_dir, f"{log_dir}_{time.strftime('%y%m%d_%H_%M_%S')}")
 
 if __name__ == '__main__':
-    main()
+    main(sys.argv[1:])

@@ -22,28 +22,28 @@ model_list:
       model: ollama_chat/qwen2.5:3b      
       api_base: http://localhost:11434
       temperature: 0
-      keep_alive: -1
+      keep_alive: 24h
       num_ctx: 8192
   - model_name: qwen2.5-7b
     litellm_params:
       model: ollama_chat/qwen2.5:7b
       api_base: http://localhost:11434
       temperature: 0
-      keep_alive: -1
+      keep_alive: 24h
       num_ctx: 8192
   - model_name: qwen2.5-14b  
     litellm_params:
       model: ollama_chat/qwen2.5:14b
       api_base: http://localhost:11434
       temperature: 0
-      keep_alive: -1
+      keep_alive: 24h
       num_ctx: 8192
   - model_name: qwen2.5-32b
     litellm_params:
       model: ollama_chat/qwen2.5:32b
       api_base: http://localhost:11434
       temperature: 0
-      keep_alive: -1
+      keep_alive: 24h
       num_ctx: 8192
 
   # Qwen-coder Family
@@ -52,21 +52,21 @@ model_list:
       model: ollama/qwen2.5-coder:3b
       api_base: http://localhost:11434
       temperature: 0
-      keep_alive: -1
+      keep_alive: 24h
       num_ctx: 8192
   - model_name: qwen2.5-coder-7b
     litellm_params:
       model: ollama_chat/qwen2.5-coder:7b
       api_base: http://localhost:11434
       temperature: 0
-      keep_alive: -1
+      keep_alive: 24h
       num_ctx: 8192
   - model_name: qwen2.5-coder-32b
     litellm_params:
       model: ollama_chat/qwen2.5-coder:32b
       api_base: http://localhost:11434
       temperature: 0
-      keep_alive: -1
+      keep_alive: 24h
       num_ctx: 12288
 
   # Granite IBM Family

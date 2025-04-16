@@ -47,7 +47,7 @@ class JoinEvaluator(RoutedAgent):
             SystemMessage(
                 content=(
                     "You are an helpful assistant in tabular data comprehension. "
-                    "Your task is to evaluate pairs of candidate tables for a SQL join operation "
+                    "Your task is to evaluate pairs of candidate tables for a SQL operation "
                     "by providing a numerical score. "
                     "Limit your output to 50 words, "
                     f"and your final answer should be a single integer number, between {self._min_score} and {self._max_score}. "

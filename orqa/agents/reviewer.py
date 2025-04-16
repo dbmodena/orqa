@@ -38,7 +38,8 @@ class ReviewerAgent(RoutedAgent):
             SystemMessage(content=(
                 "You are a query reviewer. "
                 "You focus on the correctness of proposed SQL queries or Natural Language Questions."
-                "For the SQL, think only on the current query, and do not worry for future operations."
+                "For the SQL, focus on the query syntax. "
+                "Consider that is used DuckDB syntax."
                 )
             )
         ]
@@ -64,10 +65,11 @@ class ReviewerAgent(RoutedAgent):
             f"The proposed SQL query is:\n{message.sql_query}\n"
             f"The execution of this query is:\n{message.execution_result}\n"
             f"Previous feedback:\n{previous_feedback}\n"
-            "Revise the query if the execution was not successful. Otherwise, approve it."
+            "Revise the query if the execution was not successful."
             "In the query has given an error, check if:\n"
             "- Previous feedback was not addressed.\n"
             "- the query does not involve required columns (if any).\n"
+            "- the query is identical to any previously generated query.\n"
             "If you need to indicate a column or a value, enclose it with single quotes. "
             "Respond with the following format:\n"
             "```json\n{\n"
@@ -80,15 +82,21 @@ class ReviewerAgent(RoutedAgent):
         session = self._system_messages + [UserMessage(content=prompt, source=self.metadata["type"])]
         response = await self._model_client.create(
             messages=session,
-            cancellation_token=ctx.cancellation_token
+            cancellation_token=ctx.cancellation_token,
+            json_output=True
         )
 
-        # count the current input/output session input tokens
-        input_tokens = self._model_client.count_tokens(messages=session)
-        output_tokens = self._model_client.count_tokens(messages=[AssistantMessage(content=response.content, source=self.metadata["type"])])
+        try:
+            # count the current input/output session input tokens
+            input_tokens  = self._model_client.count_tokens(messages=session)
+            output_tokens = self._model_client.count_tokens(messages=[AssistantMessage(content=response.content, source=self.metadata["type"])])
+        except:
+            input_tokens = 0
+            output_tokens = 0
 
         assert isinstance(response.content, str)
-        review = self._extract_json_output(response.content)
+        review = json.loads(response.content) # self._extract_json_output(response.content)
+        #review = self._extract_json_output(response.content)
         
         # construct the review text
         review_text = f"Query review: {'\n'.join([f'{k}: {v}' for k, v in review.items()])}"
@@ -134,10 +142,11 @@ class ReviewerAgent(RoutedAgent):
             f"Previous feedback:\n{previous_feedback}\n"            
             "Don't approve the question if:\n"
             "- Previous feedback was not addressed.\n"
-            "- the question is too simple (like 'Where is Canada?').\n"
+            "- The question is too generic or simple.\n"
             "- The question seems to be uncorrelated to the current task.\n"
             "- columns and tables names are explicitly present into the question.\n"
             "- columns required by the user are not correctly used (if any).\n"
+            "- the question use too specific terms, like 'tables', 'datasets', 'packages', 'data', 'records'.\n"
             "If you need to indicate a column or a value, enclose it with single quotes. "
             "Respond with the following format:\n"
             "```json\n{\n"
@@ -150,17 +159,22 @@ class ReviewerAgent(RoutedAgent):
         session = self._system_messages + [UserMessage(content=prompt, source=self.metadata["type"])]
         response = await self._model_client.create(
             messages=session,
-            cancellation_token=ctx.cancellation_token
+            cancellation_token=ctx.cancellation_token,
+            json_output=True
         )
-
-        # count the current input/output session input tokens
-        input_tokens = self._model_client.count_tokens(messages=session)
-        output_tokens = self._model_client.count_tokens(messages=[AssistantMessage(content=response.content, source=self.metadata["type"])])
+    
+        try:
+            # count the current input/output session input tokens
+            input_tokens  = self._model_client.count_tokens(messages=session)
+            output_tokens = self._model_client.count_tokens(messages=[AssistantMessage(content=response.content, source=self.metadata["type"])])
+        except:
+            input_tokens = 0
+            output_tokens = 0
 
         assert isinstance(response.content, str)
 
         # parse the response JSON
-        review = self._extract_json_output(response.content)
+        review = json.loads(response.content) # self._extract_json_output(response.content)
 
         # construct the review text
         review_text = f"""

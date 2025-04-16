@@ -1,34 +1,79 @@
-from concurrent.futures import ProcessPoolExecutor
 import os
+import sys
 import pickle
 import logging
 from itertools import chain
 from logging.handlers import RotatingFileHandler
+from concurrent.futures import ProcessPoolExecutor
+
+os.environ["POLARS_MAX_THREADS"] = "10"
 
 import bidict
 import duckdb
-os.environ["POLARS_MAX_THREADS"] = "10"
 import polars as pl
+import polars.selectors as cs
 from wrapt_timeout_decorator import timeout
 
 from orqa.utils import sanitize_string, is_num
 
 
-# tag             = 'NHSUK'
-# from_           = 0
-# to_             = 1809
 
-tag             = 'UK'
-from_           = 0
-to_             = 55556
 
-# tag             = 'CAN'
-# from_           = 0
-# to_             = 42705
+def get_table_values(table_id: str, tables_path: str):
+    try:
+        df = pl.read_parquet(f'{tables_path}/{table_id}')
+        df = df[[s.name for s in df if not (s.null_count() == df.height)]]
+            
+        # dtype conversion to bool/int/float
+        for column in df.columns:
+            try:
+                if df.select(column).drop_nulls().unique().shape[0] == 2:
+                    df = df.with_columns(pl.col(column).cast(dtype))
+                    continue                
+            except: pass
+
+            try:
+                dtype = pl.Float64 if any(',' in str(x) or '.' in str(x) for x in set(df.select(column).sample(1000, with_replacement=True).to_series())) else pl.Int64
+                df = df.with_columns(pl.col(column).cast(dtype))
+            except: continue
+
+
+        return set(
+            filter(
+                lambda v: not is_num(v), 
+                map(
+                    sanitize_string, 
+                    chain(*(
+                        df.select(col).drop_nans().drop_nulls().unique().get_column(col).to_list() 
+                        for col in df.select(cs.exclude(cs.numeric(), cs.boolean())).columns
+                        )
+                    )                
+                )
+            )
+        )
+    except:
+        return set()
+
+
+
+def collect_table_records(data):
+    table_idx, table_id = data
+    df = pl.read_parquet(f'{tables_path}/{table_id}')
+
+    return [
+        [table_idx, col_idx, row_idx, values[sanitize_string(cell)]]
+        for col_idx, col in enumerate(df.columns)
+        if not df.get_column(col).null_count() == df.height
+        for row_idx, cell in enumerate(df.select(col).get_column(col).to_list())        
+        if sanitize_string(cell) in values
+    ]
+
+
+
+tag, from_, to_ = sys.argv[1:]
 
 data_path       = f'{os.path.dirname(__file__)}/../data'
 tables_path     = f'{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}'
-metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
 db_path         = f'{data_path}/datasets/{tag}/database/blend.db'
 values_path     = f'{data_path}/datasets/{tag}/database/values_dict.pickle'
 
@@ -61,11 +106,11 @@ logger.info('Connected to DuckDB')
 
 con.execute(f"""
     CREATE OR REPLACE TABLE AllTables (
-       TableId      INT , 
-       ColumnId     INT , 
-       RowId        INT , 
-       CellValue    INT    
-       );
+    TableId      INT , 
+    ColumnId     INT , 
+    RowId        INT , 
+    CellValue    INT    
+    );
     """
 )
 logger.info('Index table created')
@@ -73,32 +118,6 @@ logger.info('Index table created')
 values = {}
 CHECKPOINT = 100
 records = []
-
-
-
-# setting this timeout we will prob have some keyerror next
-# @timeout(20)
-def get_table_values(table_id):
-    try:
-        df = pl.read_parquet(f'{tables_path}/{table_id}')
-        df = df[[s.name for s in df if not (s.null_count() == df.height)]]
-
-        return set(
-            filter(
-                lambda v: not is_num(v), 
-                map(
-                    sanitize_string, 
-                    chain(*(
-                        df.select(col).drop_nans().drop_nulls().unique().get_column(col).to_list() 
-                        for col in df.columns
-                        )
-                    )                
-                )
-            )
-        )
-    except:
-        return set()
-
 
 
 i = 0
@@ -129,20 +148,6 @@ else:
         values = pickle.load(fr)
 
 logger.info(f'{len(values)=}')
-
-
-# @timeout(30)
-def collect_table_records(data):
-    table_idx, table_id = data
-    df = pl.read_parquet(f'{tables_path}/{table_id}')
-
-    return [
-        [table_idx, col_idx, row_idx, values[sanitize_string(cell)]]
-        for col_idx, col in enumerate(df.columns)
-        if not df.get_column(col).null_count() == df.height
-        for row_idx, cell in enumerate(df.select(col).get_column(col).to_list())        
-        if sanitize_string(cell) in values
-    ]
 
 
 logger.info('Start insert values into duckdb')

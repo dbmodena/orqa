@@ -12,7 +12,7 @@ def get_model_client(model, family: str = "unknown") -> OpenAIChatCompletionClie
         api_key="NotRequiredSinceWeAreLocal",
         base_url="http://localhost:4000/",
         model_capabilities={
-            "json_output": False,
+            "json_output": True,
             "vision": False,
             "function_calling": True,
             "family": family

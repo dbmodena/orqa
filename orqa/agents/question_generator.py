@@ -46,13 +46,15 @@ class SQLQueryGeneratorAgent(RoutedAgent):
         self._num_sql_revisions : str = -1
         self._system_messages   : List[LLMMessage] = [
             SystemMessage(content=(
-                    "You are a smart Text-to-SQL assistant. "
+                    "You are a smart SQL coder assistant. "
                     "Your task is to generate SQL queries of different difficult levels. "
                     "A 'simple' query involves just basic operations, like simple WHERE clauses. "
-                    "A 'moderate' query could use also grouping functions and other forms of aggregations."
-                    "A 'challenging' query may require window functions, casting, string replacement, subqueries. "
+                    "A 'moderate' query could use  casting, string replacement, grouping functions and other forms of aggregations."
+                    "A 'challenging' query may require window functions, subqueries and other complex operations. "
                     "You are using DuckDB: if necessary, put column names inside double-quotes. "
-                    "Do not cast FLOAT to REAL. If a VARCHAR attribute is similar to a datetime, try to cast it to DATE or DATETIME. "
+                    "Do not cast FLOAT to REAL. "
+                    "If a VARCHAR attribute is similar to a datetime, try to cast it to DATE or DATETIME. "
+                    "When using regex operations, use proper options. "
                     "Use the given tool to validate your SQL query: your response must be only a valid function call."
                 )
             )
@@ -139,10 +141,14 @@ class SQLQueryGeneratorAgent(RoutedAgent):
             cancellation_token=ctx.cancellation_token
         )
     
-        # count the current input/output session input tokens
-        self._input_tokens += self._model_client.count_tokens(messages=session, tools=self._tools)
-        self._output_tokens += self._model_client.count_tokens(messages=[AssistantMessage(content=response.content, source=self.metadata["type"])], tools=self._tools)
-        
+        try:
+            # count the current input/output session input tokens
+            self._input_tokens  += self._model_client.count_tokens(messages=session, tools=self._tools)
+            self._output_tokens += self._model_client.count_tokens(messages=[AssistantMessage(content=response.content, source=self.metadata["type"])], tools=self._tools)
+        except:
+            self._input_tokens  += 0
+            self._output_tokens += 0
+            
         try:
             # should we consider only cases where the model outpus 
             # a perfectly valid function call?
@@ -222,13 +228,16 @@ class NLQuestionGeneratorAgent(RoutedAgent):
         self._num_nl_revisions  : int = 0
         self._system_messages   : List[LLMMessage] = [
             SystemMessage(content=(
-                "You are a smart AI assistant. "
-                "Your task is to generate natural language questions."
-                "The questions must be human-like: do not use SQL-like words, such as null or select. "
-                "Try to generate fluent questions as human."
-                "Do not include any table name inside the question, and do not use 'dataset_r' or 'dataset_s'. "
-                "Do not use original column names if they are not human-like: try to figure out what an "
-                "abbreviation means based on the given context (like 'geo' --> 'geography' --> 'region'). "                                    
+                "Your task is to generate natural language questions, related to table from Open Data, from a given SQL query. "
+                "Pretend to be a user that is using Open Data search portals and needs to get answers that's inside the results of that query. "
+                "The questions you create must be fluent and human-like: do not use SQL-like words, such as null or select. "
+                "Keep focus on join and union operations between tables, if any. "
+                "Because a common Open Data user (as you, in this case) does not know anything in advance about the final result, "
+                "you can't use terms like records, data, datasets, tables, csv, packages and resources. "
+                "If values are used inside the SQL query, try to understand what they means based on the given context: "
+                "for example, 'ref' may mean 'refused' in a column about orders status. "
+                "You must not use explicit table or column names into the question. "
+                "Your response must be only the question, nothing else."
                 )
             )
         ]
@@ -237,7 +246,6 @@ class NLQuestionGeneratorAgent(RoutedAgent):
     async def handle_nl_task(self, message: NLGenerationTask | NLReviewResult, ctx: MessageContext) -> None:
         # create a list of LLM messages to send to the model
         session: List[LLMMessage] = [*self._system_messages] 
-        
         
         if isinstance(message, NLGenerationTask):
             # Reset values from previous session
@@ -304,9 +312,14 @@ class NLQuestionGeneratorAgent(RoutedAgent):
             cancellation_token=ctx.cancellation_token
         )
 
-        # count input/output tokens
-        self._input_tokens += self._model_client.count_tokens(messages=session)
-        self._output_tokens += self._model_client.count_tokens(messages=[AssistantMessage(content=response.content, source=self.metadata["type"])])
+        try:
+            # count input/output tokens
+            self._input_tokens  += self._model_client.count_tokens(messages=session)
+            self._output_tokens += self._model_client.count_tokens(messages=[AssistantMessage(content=response.content, source=self.metadata["type"])])
+        except:
+            # due to connection error
+            self._input_tokens  += 0
+            self._output_tokens += 0
 
         # the agent must generate a tool call to verify its SQL query
         assert isinstance(response.content, str)        

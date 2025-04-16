@@ -1,11 +1,11 @@
-import logging
-from logging.handlers import RotatingFileHandler
+import re
 import os
 import csv
-import pickle
-import re
 import sys
 import time
+import pickle
+import logging
+from logging.handlers import RotatingFileHandler
 
 import duckdb
 import jsonlines
@@ -14,7 +14,10 @@ import polars as pl
 from orqa.utils import sanitize_string
 
 
-def main(tag="CAN", from_=0, to_=42705):    
+def main(tag: str = "CAN", 
+         from_: int = 0, 
+         to_: int = "END"):    
+    
     data_path       = f'{os.path.dirname(__file__)}/../data'
     tables_path     = f'{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}'
     metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
@@ -58,7 +61,7 @@ def main(tag="CAN", from_=0, to_=42705):
     N_BATCH_APPEND  = 100
 
     # if we accept or not tables with the same schema
-    ACCEPT_SAME_SCHEMA     = False
+    ACCEPT_SAME_SCHEMA = True
 
     # tokens that we don't want to see in headers
     # because they may lead to fuzzy joins
@@ -95,8 +98,8 @@ def main(tag="CAN", from_=0, to_=42705):
     with open(candidates_path, 'w') as file:
         wr = csv.writer(file)
         wr.writerow([
-            'r_tab_id', 
-            's_tab_id',
+            'r_rsc_id', 
+            's_rsc_id',
             'r_col_id', 
             's_col_id',
             'r_col_name', 
@@ -151,7 +154,7 @@ def main(tag="CAN", from_=0, to_=42705):
             r_col_int = list(map(lambda v: str(values[v]), filter(lambda v: v in values, r_col)))
             
             # apply the SC BLEND search technique, limiting to first K results
-            res = con.sql(f"""
+            results = con.sql(f"""
                     SELECT TableId, ColumnId, COUNT(DISTINCT CellValue) AS intersec FROM AllTables
                     WHERE CellValue IN ({','.join(r_col_int)})
                     AND TableId <> {r_tab_id}
@@ -161,7 +164,7 @@ def main(tag="CAN", from_=0, to_=42705):
             """).fetchall()
             
             # for each tuple, check if this is a potentially valid join candidate
-            for s_tab_id, s_col_id, intersection in res:                
+            for s_tab_id, s_col_id, intersection in results:                
                 # perhaps due to error in crawling and saving metadata?
                 if not re.sub(file_pattern, '', table_ids[s_tab_id]) in metadata:
                     continue
@@ -211,17 +214,17 @@ def main(tag="CAN", from_=0, to_=42705):
 
                 # do not consider this pair if:
                 #   - one of the two columns has only few value;
-                #   - both jaccard and min-overlap are lower than a threshold;
-                #   - columns have the same name and have jaccard/overlap==1;
-                if len(s_col) < MIN_NUM_VALUES \
-                    or jaccard < MIN_JACCARD or overlap < MIN_OVERLAP \
-                    or r_col_name == s_col_name and jaccard == 1 and overlap == 1:
+                #   - both jaccard and min-overlap are lower than a threshold (not used, to check if really useful);
+                #   - columns have the same name and have jaccard/overlap==1 (not used, to check if really useful);
+                if len(s_col) < MIN_NUM_VALUES: #  \
+                    # or jaccard < MIN_JACCARD or overlap < MIN_OVERLAP \
+                    # or r_col_name == s_col_name and jaccard == 1 and overlap == 1:
                     continue
 
                 candidates.append(
                     [
-                        r_tab_id, 
-                        s_tab_id,
+                        table_ids[r_tab_id].removesuffix('.parquet'), 
+                        table_ids[s_tab_id].removesuffix('.parquet'),
                         r_col_id, 
                         s_col_id,
                         r_col_name, 
