@@ -9,16 +9,13 @@ import logging
 import jsonlines
 import polars as pl
 
-warnings.filterwarnings('ignore')
-
-
 from autogen_core import ClosureAgent, ClosureContext, DefaultTopicId, MessageContext, SingleThreadedAgentRuntime, TypeSubscription
 
 from orqa.utils import get_all_data
 from orqa.agents.debate import JoinScoreAggregator, JoinEvaluator
 from orqa.agents.utils import Answer, Question, JOIN_EVALUATION_TOPIC_TYPE, get_model_client
 
-
+warnings.filterwarnings('ignore')
 
 
 async def amain(tag: str = "CAN", 

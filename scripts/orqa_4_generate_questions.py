@@ -64,7 +64,6 @@ async def verify_sql(sql_query: Annotated[str, "A SQL query which represents the
             "sql_query": sql_query,
             "result": results
         }
-    
 
 
 async def amain(tag: str = "CAN", 
@@ -235,14 +234,12 @@ async def amain(tag: str = "CAN",
 
     await runtime.stop_when_idle()
 
-    
     # start processing messages and create one agent
     logger.info("Started Queries Generation")
     
     already_seen_tables = set()
     results = []
     start_t = time.time()
-
 
     prev_sql, prev_nl = [], []
 
@@ -422,8 +419,6 @@ async def amain(tag: str = "CAN",
                         
                         "tot_time"  : nl_time + sql_time,
                     })
-
-                
 
         ############################################
         ####### Generate Multi-Table queries #######
@@ -608,7 +603,6 @@ async def amain(tag: str = "CAN",
                     
                     "tot_time"  : nl_time + sql_time,
                 })
-            
 
         file_exists = os.path.exists(queries_path)        
         pl.DataFrame(results) \

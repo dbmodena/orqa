@@ -62,6 +62,7 @@ def main(tag: str = "CAN",
     MIN_JACCARD     = 0.2
     MIN_OVERLAP     = 0.3
 
+    # more fine grained cleaning to get interesting  
     CLEAN_MODE = "complex"
 
     N_BATCH_APPEND  = 20
@@ -139,7 +140,11 @@ def main(tag: str = "CAN",
         # for each col, if it is not supposed to be an ID
         # or a date column, query the index to find potentially 
         # joinable tables
-        for r_col_id, r_col_name in enumerate(r_df.columns):            
+        for r_col_id, r_col_name in enumerate(r_df.columns):
+            # discard numerical columns
+            if r_df.get_column(r_col_name).dtype.is_numeric():
+                continue
+            
             # check if any token like "id" or "date" is inside the column name
             if any(tok in r_df.columns[r_col_id].lower() for tok in bad_columns_tokens):
                 continue

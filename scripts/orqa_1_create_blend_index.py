@@ -14,8 +14,6 @@ import polars.selectors as cs
 from orqa.utils import sanitize_string, is_num
 
 
-
-
 def get_table_values(table_id: str, tables_path: str):
     try:
         df = pl.read_parquet(f'{tables_path}/{table_id}')
@@ -26,14 +24,14 @@ def get_table_values(table_id: str, tables_path: str):
             try:
                 if df.select(column).drop_nulls().unique().shape[0] == 2:
                     df = df.with_columns(pl.col(column).cast(dtype))
-                    continue                
+                    continue
             except: pass
-
             try:
-                dtype = pl.Float64 if any(',' in str(x) or '.' in str(x) for x in set(df.select(column).sample(1000, with_replacement=True).to_series())) else pl.Int64
+                dtype = pl.Float64 if any(',' in str(x) or '.' in str(x) 
+                                          for x in set(df.select(column).sample(1000, with_replacement=True).to_series())
+                                          ) else pl.Int64
                 df = df.with_columns(pl.col(column).cast(dtype))
             except: continue
-
 
         return set(
             filter(
@@ -52,7 +50,6 @@ def get_table_values(table_id: str, tables_path: str):
         return set()
 
 
-
 def collect_table_records(data):
     table_idx, table_id = data
     df = pl.read_parquet(f'{tables_path}/{table_id}')
@@ -61,10 +58,11 @@ def collect_table_records(data):
         [table_idx, col_idx, row_idx, values[sanitize_string(cell)]]
         for col_idx, col in enumerate(df.columns)
         if not df.get_column(col).null_count() == df.height
-        for row_idx, cell in enumerate(df.select(col).get_column(col).to_list())        
+        # all columns are considered here to keep the right index
+        # (TODO optimize and more consistent with other df handling parts)
+        for row_idx, cell in enumerate(df.select(col).get_column(col).to_list())
         if sanitize_string(cell) in values
     ]
-
 
 
 tag, from_, to_ = sys.argv[1:]
@@ -76,8 +74,7 @@ values_path     = f'{data_path}/datasets/{tag}/database/values_dict.pickle'
 
 log_path        = f'{data_path}/log/{tag}/1_blend_indexing.log'
 
-num_cpu         = 10
-
+num_workers     = 10
 
 os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
@@ -95,7 +92,6 @@ os.makedirs(os.path.dirname(db_path), exist_ok=True)
 table_ids = list(sorted(os.listdir(tables_path), reverse=True))
 
 logger.info(f"\n{'-' * 100}\n{tag} {from_=}-{to_=}")
-
 
 # init the duckdb database
 con = duckdb.connect(db_path)
@@ -116,12 +112,11 @@ values = {}
 CHECKPOINT = 100
 records = []
 
-
 i = 0
 if not os.path.exists(values_path):
     logger.info('Create values dictionary')
     
-    with ProcessPoolExecutor(num_cpu) as executor:
+    with ProcessPoolExecutor(num_workers) as executor:
         for ntab in range(0, len(table_ids) + 100, 100):
             results = executor.map(get_table_values, table_ids[ntab:ntab+100])
             logger.debug(f"Obtained values up to table {ntab}/{len(table_ids)} ({round(ntab * 100 / len(table_ids), 3)}%)")
@@ -146,10 +141,9 @@ else:
 
 logger.info(f'{len(values)=}')
 
-
 logger.info('Start insert values into duckdb')
 step = 100
-with ProcessPoolExecutor(num_cpu) as executor:
+with ProcessPoolExecutor(num_workers) as executor:
     for ntab in range(0, len(table_ids) + step, step):        
         results = executor.map(collect_table_records, enumerate(table_ids[ntab:ntab+step], start=ntab))
         records = []
@@ -162,14 +156,8 @@ with ProcessPoolExecutor(num_cpu) as executor:
             
         logger.debug(f"Inserting batch tables {ntab}/{len(table_ids)} ({round(ntab * 100 / len(table_ids), 3)}%), inserted records: {rec_df.shape[0]}")
 
-
 logger.info('Creating indexes')
 con.execute("CREATE INDEX IF NOT EXISTS TableId_idx   ON AllTables (TableId);")
-# these should have a very low selectivity thus is prob not necessary
-# if we can get the records relative to our tables with the TableId_idx the main
-# work is done (?)
-# con.execute("CREATE INDEX IF NOT EXISTS ColumnId_idx  ON AllTables (ColumnId);")
-# con.execute("CREATE INDEX IF NOT EXISTS RowId_idx     ON AllTables (RowId);")
 con.execute("CREATE INDEX IF NOT EXISTS CellValue_idx ON AllTables (CellValue);")
 logger.info('Done')
 
