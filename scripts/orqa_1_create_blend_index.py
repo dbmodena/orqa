@@ -6,13 +6,10 @@ from itertools import chain
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ProcessPoolExecutor
 
-os.environ["POLARS_MAX_THREADS"] = "10"
-
 import bidict
 import duckdb
 import polars as pl
 import polars.selectors as cs
-from wrapt_timeout_decorator import timeout
 
 from orqa.utils import sanitize_string, is_num
 

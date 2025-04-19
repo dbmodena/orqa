@@ -10,6 +10,7 @@ from logging.handlers import RotatingFileHandler
 import duckdb
 import jsonlines
 import polars as pl
+from tqdm import tqdm
 
 from orqa.utils import sanitize_string
 
@@ -25,7 +26,7 @@ def main(tag: str = "CAN",
     valdict_path    = f'{data_path}/datasets/{tag}/database/values_dict.pickle'
     log_path        = f'{data_path}/log/{tag}/2_join_search.log'
 
-    candidates_path = f'{data_path}/outputs/{tag}/candidate_joins.csv'
+    candidates_path = f'{data_path}/outputs/{tag}/candidate_joins_test.csv'
 
 
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -39,6 +40,9 @@ def main(tag: str = "CAN",
     logger.addHandler(handler)
 
     logger.info("Started Job")
+
+    # number of tables for which do the search
+    BUDGET          = 100
 
     # max number of results we want during search
     K               = 50
@@ -58,7 +62,9 @@ def main(tag: str = "CAN",
     MIN_JACCARD     = 0.2
     MIN_OVERLAP     = 0.3
 
-    N_BATCH_APPEND  = 100
+    CLEAN_MODE = "complex"
+
+    N_BATCH_APPEND  = 20
 
     # if we accept or not tables with the same schema
     ACCEPT_SAME_SCHEMA = True
@@ -67,6 +73,7 @@ def main(tag: str = "CAN",
     # because they may lead to fuzzy joins
     bad_columns_tokens = {'id', 'date', 'unnamed'}
 
+    # pattern for resource name extraction
     file_pattern    = re.compile(r'(_\d+)?.parquet$')
 
     # the output list where candidates are stored
@@ -116,7 +123,7 @@ def main(tag: str = "CAN",
 
     start_batch_t = time.time()
 
-    for r_tab_id in range(len(table_ids)):
+    for r_tab_id in tqdm(range(min(BUDGET, len(table_ids))), disable=False):
         # read the relative table from disk        
         r_df = pl.read_parquet(f"{tables_path}/{table_ids[r_tab_id]}")
         r_num_rows = r_df.shape[0]
@@ -127,7 +134,7 @@ def main(tag: str = "CAN",
         if not re.sub(file_pattern, '', table_ids[r_tab_id]) in metadata:
             continue
         r_pkg_id = metadata[re.sub(file_pattern, '', table_ids[r_tab_id])]['id']
-        r_column_names = set(map(sanitize_string, r_df.columns))
+        r_column_names = set(map(lambda v: sanitize_string(v, CLEAN_MODE), r_df.columns))
         
         # for each col, if it is not supposed to be an ID
         # or a date column, query the index to find potentially 
@@ -144,7 +151,7 @@ def main(tag: str = "CAN",
             # extract the unique and cleaned values from the column 
             r_col = set(
                 filter(lambda v: v in values, 
-                    map(lambda v: sanitize_string(v), r_df.to_series(r_col_id))
+                    map(lambda v: sanitize_string(v, CLEAN_MODE), r_df.to_series(r_col_id))
                 )
             )
 
@@ -164,7 +171,18 @@ def main(tag: str = "CAN",
             """).fetchall()
             
             # for each tuple, check if this is a potentially valid join candidate
-            for s_tab_id, s_col_id, intersection in results:                
+            for s_tab_id, s_col_id, intersection in results:         
+                # if this candidate is valid, this record will be overriden
+                candidates.append(
+                    [
+                        table_ids[r_tab_id].removesuffix('.parquet'), 
+                        table_ids[s_tab_id].removesuffix('.parquet'),
+                        r_col_id, 
+                        s_col_id,
+                        None, None, None, None, None, None, None, None, None, None, None
+                    ]
+                )
+
                 # perhaps due to error in crawling and saving metadata?
                 if not re.sub(file_pattern, '', table_ids[s_tab_id]) in metadata:
                     continue
@@ -179,14 +197,15 @@ def main(tag: str = "CAN",
                 # do not save it again
                 if candidate_id := (
                     r_tab_id if r_tab_id <= s_tab_id else s_tab_id, 
-                    s_col_id if r_tab_id <= s_tab_id else r_tab_id,
+                    s_tab_id if r_tab_id <= s_tab_id else r_tab_id,
                     r_col_id if r_tab_id <= s_tab_id else s_col_id,
                     s_col_id if r_tab_id <= s_tab_id else r_col_id,
                     ) in already_used:
                     continue
                 already_used.add(candidate_id)
 
-                s_columns_names = set(map(sanitize_string, pl.scan_parquet(f"{tables_path}/{table_ids[s_tab_id]}").collect_schema().names()))
+                s_columns_names = set(map(lambda v: sanitize_string(v, CLEAN_MODE), 
+                                          pl.scan_parquet(f"{tables_path}/{table_ids[s_tab_id]}").collect_schema().names()))
                 if not ACCEPT_SAME_SCHEMA and r_column_names == s_columns_names:
                     continue 
 
@@ -201,7 +220,7 @@ def main(tag: str = "CAN",
             
                 s_col = set(
                     filter(lambda v: v in values, 
-                        map(lambda v: sanitize_string(v), 
+                        map(lambda v: sanitize_string(v, CLEAN_MODE), 
                             s_col_series
                             )
                         )
@@ -220,7 +239,8 @@ def main(tag: str = "CAN",
                     # or jaccard < MIN_JACCARD or overlap < MIN_OVERLAP \
                     # or r_col_name == s_col_name and jaccard == 1 and overlap == 1:
                     continue
-
+                
+                candidates.pop()
                 candidates.append(
                     [
                         table_ids[r_tab_id].removesuffix('.parquet'), 

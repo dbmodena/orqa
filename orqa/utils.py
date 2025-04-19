@@ -1,9 +1,9 @@
 import re
-from functools import lru_cache
+import unicodedata
 from typing import Literal
+from functools import lru_cache
 
 import inflection
-import unicodedata
 import polars as pl
 
 
@@ -17,13 +17,10 @@ pl_str_config = {
 }
 
 
-@lru_cache(maxsize=int(1e7))
-def is_num(x):
-    "Very very simple solution, but for many cases it's fine"
+@lru_cache(maxsize=int(1e6))
+def is_num(x) -> bool:
+    "Very very simple solution, but for many cases works"
     if isinstance(x, str):
-        # chars '_' and '/' are kept, they are used often
-        # for datetime, like 2021_2023 which may be more
-        # interesting than basic numbers
         x = x.replace(',', '.').replace('%', ' ')
     try: 
         float(x)
@@ -36,25 +33,24 @@ replace_chars = "\n \\\"()[]"
 characters_translator = str.maketrans(replace_chars, "_" * len(replace_chars))
 
 @lru_cache(maxsize=int(1e6))
-def sanitize_string(s, mode: Literal["base", "complex"]= "base"):
-    """
-    Replaces problematic characters in column names with underscores,
-    normalizes accents, and strips spaces.
-    """
-
+def sanitize_string(s, mode: Literal["base", "complex"] | None = None) -> str:
     if not isinstance(s, str):
         return str(s)
-    elif mode == "base":
-        return str(s).lower()
-    elif mode == "complex":
-        # inflection
-        s = inflection.underscore(s).lower()
-        # normalize accents (e.g., é -> e)
-        s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('utf-8')
-        # replace problematic characters with underscores
-        return s.translate(characters_translator).strip()
-    else:
-        raise ValueError(f"Unsupported mode: {mode}")
+    
+    match mode:
+        case None:
+            return str(s)
+        case "base":
+            return str(s).lower()
+        case "complex":
+            # inflection
+            s = inflection.underscore(s).lower()
+            # normalize accents (e.g., é -> e)
+            s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('utf-8')
+            # replace problematic characters with underscores
+            return s.translate(characters_translator).strip()
+        case _:
+            raise ValueError(f"Unsupported mode: {mode}")
 
 
 
@@ -131,32 +127,27 @@ def create_table_sql(df: pl.DataFrame, table_name):
 def get_all_data(rsc_id, tables_path, metadata, col_name: str, 
                  max_length_notes: int = 500, max_num_columns: int = 20, num_rows_sample: int = 5,
                  sql_table_name: str = 'R', 
-                 sanitize_headers: bool | str = False,
-                 sanitize_elements: bool | str = False,
+                 clean_headers: Literal["base", "complex"] | None = None,
+                 clean_elements: Literal["base", "complex"] | None = None,
                  pl_str_config: dict = pl_str_config):
     rsc_id, rsc_name, _, pkg_name, pkg_notes, pkg_keywords, pkg_tags, org_name, org_title, org_desc, jur = get_resource_metadata(rsc_id, metadata)
     pkg_notes = re.sub(r"((\<[^\>]+\>)|\n|\r|\t)", " ", pkg_notes)[:max_length_notes]    
-    col_name= sanitize_string(col_name)
+    col_name= sanitize_string(col_name, clean_headers)
 
-    df = pl.scan_parquet(f'{tables_path}/{rsc_id}.parquet')
-        
-    if sanitize_elements:
-        mode = sanitize_elements if isinstance(sanitize_elements, str) else "base"
-        df = df.select(pl.all().map_elements(
-            lambda s: sanitize_string(s, mode), pl.String)
+    df = (
+        pl.scan_parquet(f'{tables_path}/{rsc_id}.parquet')
+        .rename(lambda s: sanitize_string(s, clean_headers))
+        .select(pl.all().map_elements(
+           lambda s: sanitize_string(s, clean_elements), pl.String)
         )
+        .collect()
+    )
 
-    if sanitize_headers:
-        mode = sanitize_headers if isinstance(sanitize_headers, str) else "base"
-        df = df.rename(lambda s: sanitize_string(s, mode))
-
-    df = df.collect()
-    
     # dtype conversion to bool/int/float
     for column in df.columns:
         try:
             if df.select(column).drop_nulls().unique().shape[0] == 2:
-                df = df.with_columns(pl.col(column).cast(dtype))
+                df = df.with_columns(pl.col(column).cast(pl.Boolean))
                 continue                
         except: pass
 

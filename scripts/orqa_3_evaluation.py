@@ -1,5 +1,4 @@
 import os
-import re 
 import csv
 import sys
 import time
@@ -31,19 +30,22 @@ async def amain(tag: str = "CAN",
     metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
     log_path        = f'{data_path}/log/{tag}/3_join_evaluation_{time.strftime('%y%m%d_%H_%M_%S')}.log'
 
-    candidates_path = f'{data_path}/outputs/{tag}/candidate_joins.csv'
-    evaluated_path  = f'{data_path}/outputs/{tag}/evaluated_joins.csv'
+    candidates_path = f'{data_path}/outputs/{tag}/candidate_joins_test.csv'
+    evaluated_path  = f'{data_path}/outputs/{tag}/evaluated_joins_test.csv'
 
     UP_TO_ROW           = 'END'
     WRITE_BATCH_SIZE    = 100
 
-    MAX_N_COLUMNS       = 10
+    MAX_N_COLUMNS       = 20
 
     # to limit the context passed to the LLM-agent (the "notes" field may be very long)
     MAX_LENGTH_NOTES    = 500
     
     # number of sampled rows passed to the LLM into the question context
     N_ROWS_SAMPLE       = 5
+
+    CLEAN_HEADERS       = "complex"
+    CLEAN_ELEMENTS      = None
 
     MIN_SCORE           = 0
     MAX_SCORE           = 10
@@ -119,7 +121,7 @@ async def amain(tag: str = "CAN",
         metadata = {rsc['id']: md for md in fr.iter() for rsc in md['resources'] if rsc['format'] == 'CSV'}
 
     logger.info("Loading Candidate JOINs from CSV")
-    candidates = pl.read_csv(candidates_path, ignore_errors=True)
+    candidates = pl.read_csv(candidates_path, ignore_errors=True, truncate_ragged_lines=True).drop_nulls()
 
     # add the header row to the output CSV file
     with open(evaluated_path, 'w') as file:
@@ -156,18 +158,18 @@ async def amain(tag: str = "CAN",
         start_debate_t = end_debate_t = -1
         try:
             # take relevant information for the llm-agent
-            r_rsc_id, s_rsc_id, r_col_id, s_col_id, r_col_name, s_col_name, _, _, r_pkg_id, s_pkg_id, _, _, _, _ = row
+            r_rsc_id, s_rsc_id, r_col_id, s_col_id, original_r_col_name, original_s_col_name, _, _, r_pkg_id, s_pkg_id, _, _, _, _ = row
 
             (
-                r_rsc_id, r_rsc_name, r_pkg_name, r_pkg_notes, r_pkg_keywords, r_pkg_tags, r_org_name, r_org_desc, r_jur,
+                r_rsc_id, r_rsc_name, r_pkg_name, r_pkg_notes, r_pkg_keywords, r_pkg_tags, r_org_name, r_org_title, r_org_desc, r_jur,
                 r_col_name, _, r_df_str, _, _
-            ) = get_all_data(r_rsc_id, tables_path, metadata, r_col_name, MAX_LENGTH_NOTES, MAX_N_COLUMNS, N_ROWS_SAMPLE, 'R')
+            ) = get_all_data(r_rsc_id, tables_path, metadata, original_r_col_name, MAX_LENGTH_NOTES, MAX_N_COLUMNS, N_ROWS_SAMPLE, 'R', CLEAN_HEADERS, CLEAN_ELEMENTS)
 
 
             (
-                s_rsc_id, s_rsc_name, s_pkg_name, s_pkg_notes, s_pkg_keywords, s_pkg_tags, s_org_name, s_org_desc, s_jur,
+                s_rsc_id, s_rsc_name, s_pkg_name, s_pkg_notes, s_pkg_keywords, s_pkg_tags, s_org_name, s_org_title, s_org_desc, s_jur,
                 s_col_name, _, s_df_str, _, _
-            ) = get_all_data(s_rsc_id, tables_path, metadata, s_col_name, MAX_LENGTH_NOTES, MAX_N_COLUMNS, N_ROWS_SAMPLE, 'S')
+            ) = get_all_data(s_rsc_id, tables_path, metadata, original_s_col_name, MAX_LENGTH_NOTES, MAX_N_COLUMNS, N_ROWS_SAMPLE, 'S', CLEAN_HEADERS, CLEAN_ELEMENTS)
             
             
             # start/resume the runtime and publish the question message
@@ -177,22 +179,21 @@ async def amain(tag: str = "CAN",
             await runtime.publish_message(
                 Question(
                     content=(
-                       "Consider the following information:\n"
+                        "Consider the following information:\n"
                         f"The table '{r_rsc_name}' belongs to the package '{r_pkg_name}'. "
-                        f"This package is published by the organisaztion '{r_org_name}', that is '{r_org_desc}', under the jurisdiction '{r_jur}'. "
+                        f"This package is published by the organisaztion '{r_org_name}', titled as '{r_org_title}' that is about '{r_org_desc}', under the jurisdiction '{r_jur}'. "
                         f"The table description is: {r_pkg_notes}.\n"
-                        f"Some keywords and tags about it are: {r_pkg_keywords}, {r_pkg_tags}.\n"
+                        f"Keywords and tags about it are: {r_pkg_keywords}, {r_pkg_tags}.\n"
                         f"Example rows with schema:\n{r_df_str}"
                         f"\n{'-' * 50}\n"
                         f"The table '{s_rsc_name}' belongs to the package '{s_pkg_name}'. "
-                        f"This package is published by the organisaztion '{s_org_name}', that is {s_org_desc}, under the jurisdiction '{s_jur}'. "
+                        f"This package is published by the organisaztion '{s_org_name}', titled as '{s_org_title}' that is about {s_org_desc}, under the jurisdiction '{s_jur}'. "
                         f"The table description is: {s_pkg_notes}.\n"
-                        f"Some keywords and tags about it are: {s_pkg_keywords}, {s_pkg_tags}.\n"
+                        f"Keywords and tags about it are: {s_pkg_keywords}, {s_pkg_tags}.\n"
                         f"Example rows: {s_df_str}"
                         f"\n{'-' * 50}\n"
                         "Define a relationship quality score for the two tables. "
-                        "Focus on the meaningfulness of the operation between the given tables, "
-                        "base your choice on their description and keywords."
+                        "Focus on the meaningfulness of a potential operation between the given tables. "
                     )                   
                 ),
                 topic_id=DefaultTopicId()

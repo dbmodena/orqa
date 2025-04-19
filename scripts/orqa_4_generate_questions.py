@@ -36,7 +36,7 @@ async def verify_sql(sql_query: Annotated[str, "A SQL query which represents the
         
         # duckdb can use directly the dataframe
         # without disk operations
-        results = duckdb.sql(sql_query).fetchmany()
+        results = duckdb.sql(sql_query).fetchmany(size=1)
         is_empty = len(results) == 0
         results = str(results)
     except Exception as e:
@@ -78,9 +78,11 @@ async def amain(tag: str = "CAN",
     bird_dev_path       = f"{data_path}/bird-mini-dev/dev.json"
 
     evaluated_path      = f"{data_path}/outputs/{tag}/evaluated_joins.csv"
-    queries_path        = f"{data_path}/outputs/{tag}/retrieval_queries_noclean.csv"
+    queries_path        = f"{data_path}/outputs/{tag}/queries.csv"
 
-    UP_TO_ROW           = 3
+    # how many pairs from evaluated ones
+    # are used for the generation.
+    UP_TO_ROW           = 10_000
 
     # maximum numbers of reviews
     MAX_REVIEWS         = 3
@@ -90,8 +92,8 @@ async def amain(tag: str = "CAN",
     # a subset, plus the join column 
     MAX_N_COLUMNS       = 20
 
-    # to limit the context passed to the LLM-agent from the metadata notes
-    # (as number of characters)
+    # to limit the context passed to the LLM-agent 
+    # from the metadata notes
     MAX_LENGTH_NOTES    = 1000
     
     # number of sampled rows passed to the LLM into the question context
@@ -107,18 +109,18 @@ async def amain(tag: str = "CAN",
     SANITIZE_ELEMENTS   = "base"
 
     DO_SINGLE_TABLE     = True
-    DO_JOIN             = False
-    DO_UNION            = False
+    DO_JOIN             = True
+    DO_UNION            = True
 
     # the model name (here we will use LiteLLM and Ollama models)
-    sql_gen_model       = "qwen2.5-coder-32b" # "llama3.3" #
-    sql_rev_model       = "qwen2.5-coder-32b" # "llama3.3" #
-    nl_gen_model        = "qwen2.5-32b" # "llama3.3" #
-    nl_rev_model        = "qwen2.5-32b" # "llama3.3" #
+    sql_gen_model       = "qwen2.5-coder-32b"
+    sql_rev_model       = "qwen2.5-coder-32b"
+    nl_gen_model        = "qwen2.5-32b"
+    nl_rev_model        = "qwen2.5-32b"
 
     # set up the logging
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    logger = logging.getLogger("agent_logger_union")
+    logger = logging.getLogger("agent_logger_generation")
     logger.setLevel(logging.INFO)
     handler = logging.FileHandler(log_path)
     log_formatter = logging.Formatter("%(asctime)s,[%(levelname)s],%(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -132,6 +134,7 @@ async def amain(tag: str = "CAN",
         bird_dev = json.load(file)
     
     # take the three subsets of questions from BIRD, grouped by their difficulty
+    # (not used now)
     bird_questions = {
         d: list(filter(lambda q: q['difficulty'] == d, bird_dev)) 
         for d in ['simple', 'moderate', 'challenging']
@@ -151,7 +154,7 @@ async def amain(tag: str = "CAN",
         .unique(subset=['r_tab_id', 's_tab_id'], maintain_order=True)
         .drop_nans(subset=["score"])
         .filter(pl.col('score') >= MIN_SCORE)
-        .select(pl.all().shuffle(seed=139903))
+        .select(pl.all().shuffle(seed=130399))
     )
     
     logger.info(f"Evaluated pairs with score >= {MIN_SCORE}: {joins.shape[0]}")
@@ -215,9 +218,9 @@ async def amain(tag: str = "CAN",
                              message: SQLGenerationResult | NLGenerationResult, 
                              ctx: MessageContext) -> None:
         if isinstance(message, SQLGenerationResult):
-            await queue.put((message.sql_query.replace('\n', ' '), message.n_rev, message.sql_success.replace('\n', ' '), message.input_tokens, message.output_tokens, message.review.replace('\n', ' ')))
+            await queue.put((message.sql_query.replace('\n', ' '), message.n_rev, message.sql_success.replace('\n', ' ').strip(), message.input_tokens, message.output_tokens, message.review.replace('\n', ' ').strip()))
         elif isinstance(message, NLGenerationResult):
-            await queue.put((message.nl_question.replace('\n', ' '), message.n_rev, message.input_tokens, message.output_tokens, message.review.replace('\n', ' ')))
+            await queue.put((message.nl_question.replace('\n', ' '), message.n_rev, message.input_tokens, message.output_tokens, message.review.replace('\n', ' ').strip()))
 
     CLOSURE_AGENT_TYPE = "collect_result_agent"
     await ClosureAgent.register_closure(
@@ -240,13 +243,13 @@ async def amain(tag: str = "CAN",
     results = []
     start_t = time.time()
 
-    n_id = 0
 
     prev_sql, prev_nl = [], []
 
-    
-    rows = joins.rows()[:UP_TO_ROW if isinstance(UP_TO_ROW, int) else joins.shape[0]]
-    for i, row in enumerate(rows, start=0):
+    n_id = 0
+    start = 0
+    rows = joins.rows()[start:UP_TO_ROW if isinstance(UP_TO_ROW, int) else joins.shape[0]]
+    for i, row in enumerate(rows, start=start):
         start_step_t = time.time()
         try:
             r_rsc_id, s_rsc_id, _, _, original_r_col_name, original_s_col_name, r_pkg_id, s_pkg_id, _, _ = row
@@ -263,12 +266,11 @@ async def amain(tag: str = "CAN",
                 r_col_name, r_df, r_df_str, r_sql_schema, r_columns_dtypes
             ) = get_all_data(r_rsc_id, tables_path, metadata, original_r_col_name, MAX_LENGTH_NOTES, MAX_N_COLUMNS, N_ROWS_SAMPLE, 'R', SANITIZE_HEADERS, SANITIZE_ELEMENTS)
 
-
             (
                 s_rsc_id, s_rsc_name, s_pkg_name, s_pkg_notes, s_pkg_keywords, s_pkg_tags, s_org_name, s_org_title, s_org_desc, s_jur,
                 s_col_name, s_df, s_df_str, s_sql_schema, s_columns_dtypes
             ) = get_all_data(s_rsc_id, tables_path, metadata, original_s_col_name, MAX_LENGTH_NOTES, MAX_N_COLUMNS, N_ROWS_SAMPLE, 'S', SANITIZE_HEADERS, SANITIZE_ELEMENTS)            
-            
+
         except Exception as e:
             logger.error(f"Error in query preparation: >>>{e}<<< ")
             raise e
@@ -301,6 +303,8 @@ async def amain(tag: str = "CAN",
                     sql = nl = "ERROR"
                     sql_time = nl_time = -1
                     sql_n_rev = nl_n_rev = -1
+                    sql_intok = sql_outok = -1
+                    nl_intok = nl_outok = -1
                     sql_success = False
                     sql_review = nl_review = "NOREVIEW"
 
@@ -335,87 +339,90 @@ async def amain(tag: str = "CAN",
                             raise ValueError('Agent output not correctly received')
 
                         # if the SQL generation failed, do not continue with NL generation 
-                        if sql_success == 'success':
-                            logger.debug("Generating NL question")                    
-                            runtime.start()
-                            nl_start_t = time.time()
-                            await runtime.publish_message(
-                                NLGenerationTask(
-                                    nl_task=(                                                        
-                                        "Consider the following information:\n"
-                                        f"The table '{rsc_name}' belongs to the package '{pkg_name}'. "
-                                        f"This package is published by the organisaztion '{org_name}', titled as '{org_title}' that is about {org_desc}, under the jurisdiction '{jur}'. "
-                                        f"The table description is: '{notes}'.\n"
-                                        f"Some keywords and tags about it are: {keywords}, {tags}.\n"
-                                        f"Example rows with schema:\n{df_str}"
-                                        f"\n{'-' * 50}\n"
-                                        f"Generate a natural language question which represents the SQL query {sql} on the given table."                                    
-                                        f"The new question must be different from previous: {prev_nl}. "                                    
-                                    )
-                                ),
-                                topic_id=nl_generation_topic_id
-                            )
-                            
-                            # wait the agent response
-                            await runtime.stop_when_idle()
-                            nl_time = round(time.time() - nl_start_t, 3)
-                            while not queue.empty():
-                                nl, nl_n_rev, nl_intok, nl_outok, nl_review = await queue.get()                        
-                                prev_nl.append(nl.removeprefix("FAILURE: "))
-                            if nl == 'ERROR' and nl_n_rev == -1:
-                                raise ValueError('Agent output not correctly received')
-                            
-                            # we do not want that table or columns named are explicitly referenced
-                            # inside the question: sometimes the model does that, and that's not good
-                            # TODO put this inside a tool for dynamic fixing
-                            if any(re.search(r"(\"|\')" + column + r"(\"|\')", nl) or ('_' in column and column in nl) for column in df.columns):
-                                nl = f'FAILURE: {nl}'
-                                nl_review = f'Original column name inside question - {nl_review}'
-
-                            logger.debug("Idle state after NL generation")
+                        if sql_success != 'success':
+                            raise ValueError(f"SQL generation failed.")
                         
+                        logger.debug("Generating NL question")                    
+                        runtime.start()
+                        nl_start_t = time.time()
+                        await runtime.publish_message(
+                            NLGenerationTask(
+                                nl_task=(                                                        
+                                    "Consider the following information:\n"
+                                    f"The table '{rsc_name}' belongs to the package '{pkg_name}'. "
+                                    f"This package is published by the organisaztion '{org_name}', titled as '{org_title}' that is about {org_desc}, under the jurisdiction '{jur}'. "
+                                    f"The table description is: '{notes}'.\n"
+                                    f"Keywords and tags about it are: {keywords}, {tags}.\n"
+                                    f"Example rows with schema:\n{df_str}"
+                                    f"\n{'-' * 50}\n"
+                                    f"Generate a natural language question which represents the SQL query {sql} on the given table."                                    
+                                    f"The new question must be different from previous: {prev_nl}. "
+                                    "Pay attention to all the clauses used into the query. "
+                                    "You must introduce into the question remainders to keywords, organization and other metadata."
+                                )
+                            ),
+                            topic_id=nl_generation_topic_id
+                        )
+                        
+                        # wait the agent response
+                        await runtime.stop_when_idle()
+                        nl_time = round(time.time() - nl_start_t, 3)
+                        while not queue.empty():
+                            nl, nl_n_rev, nl_intok, nl_outok, nl_review = await queue.get()                        
+                            prev_nl.append(nl.removeprefix("FAILURE: "))
+                        if nl == 'ERROR' and nl_n_rev == -1:
+                            raise ValueError('Agent output not correctly received')
+                        
+                        # we do not want that table or columns named are explicitly referenced
+                        # inside the question: sometimes the model does that, and that's not good
+                        # TODO put this inside a tool for dynamic fixing
+                        if any(re.search(r"(\"|\')" + column + r"(\"|\')", nl) or ('_' in column and column in nl) for column in df.columns):
+                            nl = f'FAILURE: {nl}'
+                            nl_review = f'Original column name inside question - {nl_review}'
+
+                        logger.debug("Idle state after NL generation")
+                    except Exception as e:
+                        logger.error(f'Error in generation: {e} - resources {rsc_id}')                        
                         if sql == 'ERROR': sql = f'ERROR: {str(e)}, SQL: {nl}'
                         if nl == 'ERROR' : nl  = f'ERROR: {str(e)}, NL: {nl}'
 
-                        success = not nl.startswith('ERROR') and not sql.startswith('ERROR') and not nl.startswith('FAILURE') and not sql.startswith('FAILURE')
+                    success = not nl.startswith('ERROR') and not sql.startswith('ERROR') and not nl.startswith('FAILURE') and not sql.startswith('FAILURE')
+                    
+                    n_id += 1
+                    results.append({
+                        "id"        : n_id,
+                        "type"      : "single-table",
+                        "difficulty": difficulty,
+                        "success"   : success,
                         
-                        n_id += 1
-                        results.append({
-                            "id"        : n_id,
-                            "type"      : "single-table",
-                            "difficulty": difficulty,
-                            "success"   : success,
-                            
-                            "r_rsc_id"  : rsc_id,
-                            "s_rsc_id"  : None,
-                            "r_pkg_id"  : pkg_id,
-                            "s_pkg_id"  : None,
-                            "r_rsc_name": rsc_name,
-                            "s_rsc_name": None,
-                            "r_col_name": None,
-                            "s_col_name": None,     
-                                                    
-                            "sql"       : sql,
-                            "nl"        : nl,
+                        "r_rsc_id"  : rsc_id,
+                        "s_rsc_id"  : None,
+                        "r_pkg_id"  : pkg_id,
+                        "s_pkg_id"  : None,
+                        "r_rsc_name": rsc_name,
+                        "s_rsc_name": None,
+                        "r_col_name": None,
+                        "s_col_name": None,     
+                                                
+                        "sql"       : sql,
+                        "nl"        : nl,
 
-                            "sql_success": sql_success,
-                            "sql_time"  : sql_time,
-                            "sql_n_rev" : sql_n_rev,
-                            "sql_review": None if success else sql_review,
-                            "sql_intok" : sql_intok,
-                            "sql_outok" : sql_outok,
+                        "sql_success": sql_success,
+                        "sql_time"  : sql_time,
+                        "sql_n_rev" : sql_n_rev,
+                        "sql_review": None if success else sql_review,
+                        "sql_intok" : sql_intok,
+                        "sql_outok" : sql_outok,
 
-                            "nl_time"   : nl_time,
-                            "nl_n_rev"  : nl_n_rev,
-                            "nl_review" : None if success else nl_review,
-                            "nl_intok"  : nl_intok,
-                            "nl_outok"  : nl_outok,
-                            
-                            "tot_time"  : nl_time + sql_time,
-                        })
+                        "nl_time"   : nl_time,
+                        "nl_n_rev"  : nl_n_rev,
+                        "nl_review" : None if success else nl_review,
+                        "nl_intok"  : nl_intok,
+                        "nl_outok"  : nl_outok,
+                        
+                        "tot_time"  : nl_time + sql_time,
+                    })
 
-                    except Exception as e:
-                        logger.error(f'Error in generation: {e} - resources {rsc_id}')
                 
 
         ############################################
@@ -439,13 +446,13 @@ async def amain(tag: str = "CAN",
             f"The table '{r_rsc_name}' belongs to the package '{r_pkg_name}'. "
             f"This package is published by the organisaztion '{r_org_name}', titled as '{r_org_title}' that is about '{r_org_desc}', under the jurisdiction '{r_jur}'. "
             f"The table description is: {r_pkg_notes}.\n"
-            f"Some keywords and tags about it are: {r_pkg_keywords}, {r_pkg_tags}.\n"
+            f"Keywords and tags about it are: {r_pkg_keywords}, {r_pkg_tags}.\n"
             f"Example rows with schema:\n{r_df_str}"
             f"\n{'-' * 50}\n"
             f"The table '{s_rsc_name}' belongs to the package '{s_pkg_name}'. "
             f"This package is published by the organisaztion '{s_org_name}', titled as '{s_org_title}' that is about {s_org_desc}, under the jurisdiction '{s_jur}'. "
             f"The table description is: {s_pkg_notes}.\n"
-            f"Some keywords and tags about it are: {s_pkg_keywords}, {s_pkg_tags}.\n"
+            f"Keywords and tags about it are: {s_pkg_keywords}, {s_pkg_tags}.\n"
             f"Example rows: {s_df_str}"
             f"\n{'-' * 50}\n"
         )
@@ -479,17 +486,19 @@ async def amain(tag: str = "CAN",
                 sql = nl = "ERROR"
                 sql_time = nl_time = -1
                 sql_n_rev = nl_n_rev = -1
+                sql_intok = sql_outok = -1
+                nl_intok = nl_outok = -1
                 sql_success = False
                 sql_review = nl_review = "NOREVIEW"
 
                 sql_join_prompt = (
-                    f"Generate a {difficulty} SQL query based on the given tables. Use only 'R' and 'S' to indecate the tables. "
+                    f"Generate a {difficulty} SQL query based on the given tables. Use only 'R' and 'S' to reference the tables. "
                     f"The query must include a JOIN on the R column {r_col_name} and on the S column {s_col_name}. "
                     f"The new query must be different from previous queries: {prev_sql}. "
                 )
 
                 sql_union_prompt = (
-                    f"Generate a {difficulty} UNION SQL query based on the given tables. Use only 'R' and 'S' to indecate the tables. "
+                    f"Generate a {difficulty} UNION SQL query based on the given tables. Use only 'R' and 'S' to reference the tables. "
                     f"The two tables have in common these attribtues: {matches[0] if matches else []}. "
                     f"The new query must be different from previous queries: {prev_sql}. "
                 )
@@ -519,90 +528,89 @@ async def amain(tag: str = "CAN",
                     if sql == 'ERROR' and sql_n_rev == -1:
                         raise ValueError('Agent output not correctly received')
                             
-                    if 'success' in sql_success:
-                        logger.debug("Generating NL question")
-                        
-                        runtime.start()
-                        nl_start_t = time.time()
-                        await runtime.publish_message(
-                            NLGenerationTask(
-                                nl_task=(                            
-                                        multi_table_nl_base_prompt + 
-                                        f"Generate a natural language question which accurately represents the SQL query {sql} on the given tables and its aim."                    
-                                        "Pay attention to all the clauses used into the query. "
-                                        "You must introduce into the question remainders to keywords and/or organization and other metadata."
-                                )
-                            ),
-                            topic_id=nl_generation_topic_id
-                        )
-                        
-                        # wait the agent response
-                        await runtime.stop_when_idle()
-                        nl_time = round(time.time() - nl_start_t, 3)
-                        while not queue.empty():
-                            nl, nl_n_rev, nl_intok, nl_outok, nl_review = await queue.get()
-                            prev_nl.append(nl.removeprefix("FAILURE: "))  
-                        if nl == 'ERROR' and nl_n_rev == -1:
-                            raise ValueError('Agent output not correctly received')
+                    if sql_success != 'success':
+                        raise ValueError(f"SQL generation failed.")
                     
-                        # we do not want that table or columns named are explicitly referenced
-                        # inside the question: sometimes the model does that, and that's not good
-                        # TODO put this inside a tool for dynamic fixing
-                        if any(re.search(r"(\"|\')" + column + r"(\"|\')", nl) or ('_' in column and column in nl) for column in r_df.columns) \
-                                or any(re.search(r"(\"|\')" + column + r"(\"|\')", nl) or ('_' in column and column in nl) for column in s_df.columns) \
-                                or re.search(r"(\"|\')" + r_rsc_name + r"(\"|\')", nl) \
-                                or re.search(r"(\"|\')" + s_rsc_name + r"(\"|\')", nl):
-                            nl = f'FAILURE: {nl}'
-                            nl_review = f'Original column name inside question - {nl_review}'
-
-                        logger.debug("Idle state after NL generation")                
-
+                    logger.debug("Generating NL question")
                     
-                    if sql == 'ERROR': sql = f'ERROR: {str(e)}, SQL: {nl}'
-                    if nl == 'ERROR' : nl  = f'ERROR: {str(e)}, NL: {nl}'
-
-                    success = not nl.startswith('ERROR') and not sql.startswith('ERROR') and not nl.startswith('FAILURE') and not sql.startswith('FAILURE')
-                    n_id += 1
-                    results.append({
-                        "id"        : n_id,
-                        "type"      : f"multi-table-{task.lower()}",
-                        "difficulty": difficulty,
-                        "success"   : success,
-
-                        "r_rsc_id"  : r_rsc_id,
-                        "s_rsc_id"  : s_rsc_id,
-                        "r_pkg_id"  : r_pkg_id,
-                        "s_pkg_id"  : s_pkg_id,
-                        "r_rsc_name": r_rsc_name,
-                        "s_rsc_name": s_rsc_name,
-                        "r_col_name": r_col_name,
-                        "s_col_name": s_col_name,
+                    runtime.start()
+                    nl_start_t = time.time()
+                    await runtime.publish_message(
+                        NLGenerationTask(
+                            nl_task=(                            
+                                    multi_table_nl_base_prompt + 
+                                    f"Generate a natural language question which accurately represents the SQL query {sql} on the given tables and its aim."                    
+                                    "Pay attention to all the clauses used into the query. "
+                                    "You must introduce into the question remainders to keywords, organization and other metadata."
+                            )
+                        ),
+                        topic_id=nl_generation_topic_id
+                    )
                     
-                        "sql"       : sql,
-                        "nl"        : nl,
+                    # wait the agent response
+                    await runtime.stop_when_idle()
+                    nl_time = round(time.time() - nl_start_t, 3)
+                    while not queue.empty():
+                        nl, nl_n_rev, nl_intok, nl_outok, nl_review = await queue.get()
+                        prev_nl.append(nl.removeprefix("FAILURE: "))  
+                    if nl == 'ERROR' and nl_n_rev == -1:
+                        raise ValueError('Agent output not correctly received')
+                
+                    # we do not want that table or columns named are explicitly referenced
+                    # inside the question: sometimes the model does that, and that's not good
+                    # TODO put this inside a tool for dynamic fixing
+                    if any(re.search(r"(\"|\')" + column + r"(\"|\')", nl) or ('_' in column and column in nl) for column in r_df.columns) \
+                            or any(re.search(r"(\"|\')" + column + r"(\"|\')", nl) or ('_' in column and column in nl) for column in s_df.columns) \
+                            or re.search(r"(\"|\')" + r_rsc_name + r"(\"|\')", nl) \
+                            or re.search(r"(\"|\')" + s_rsc_name + r"(\"|\')", nl):
+                        nl = f'FAILURE: {nl}'
+                        nl_review = f'Original column name inside question - {nl_review}'
 
-                        "sql_success": sql_success,
-                        "sql_time"  : sql_time,
-                        "sql_n_rev" : sql_n_rev,
-                        "sql_review": None if success else sql_review,
-                        "sql_intok" : sql_intok,
-                        "sql_outok" : sql_outok,
-
-                        "nl_time"   : nl_time,
-                        "nl_n_rev"  : nl_n_rev,
-                        "nl_review" : None if success else nl_review,
-                        "nl_intok"  : nl_intok,
-                        "nl_outok"  : nl_outok,
-                        
-                        "tot_time"  : nl_time + sql_time,
-                    })
+                    logger.debug("Idle state after NL generation")                
 
                 except Exception as e:
                     logger.error(f'Error in {task} generation: {e} - resources {r_rsc_id}, {s_rsc_id}')
+                    if sql == 'ERROR': sql = f'ERROR: {str(e)}, SQL: {nl}'
+                    if nl == 'ERROR' : nl  = f'ERROR: {str(e)}, NL: {nl}'
+
+                success = not nl.startswith('ERROR') and not sql.startswith('ERROR') and not nl.startswith('FAILURE') and not sql.startswith('FAILURE')
+                n_id += 1
+                results.append({
+                    "id"        : n_id,
+                    "type"      : f"multi-table-{task.lower()}",
+                    "difficulty": difficulty,
+                    "success"   : success,
+
+                    "r_rsc_id"  : r_rsc_id,
+                    "s_rsc_id"  : s_rsc_id,
+                    "r_pkg_id"  : r_pkg_id,
+                    "s_pkg_id"  : s_pkg_id,
+                    "r_rsc_name": r_rsc_name,
+                    "s_rsc_name": s_rsc_name,
+                    "r_col_name": r_col_name,
+                    "s_col_name": s_col_name,
+                
+                    "sql"       : sql,
+                    "nl"        : nl,
+
+                    "sql_success": sql_success,
+                    "sql_time"  : sql_time,
+                    "sql_n_rev" : sql_n_rev,
+                    "sql_review": None if success else sql_review,
+                    "sql_intok" : sql_intok,
+                    "sql_outok" : sql_outok,
+
+                    "nl_time"   : nl_time,
+                    "nl_n_rev"  : nl_n_rev,
+                    "nl_review" : None if success else nl_review,
+                    "nl_intok"  : nl_intok,
+                    "nl_outok"  : nl_outok,
+                    
+                    "tot_time"  : nl_time + sql_time,
+                })
             
 
-        file_exists = os.path.exists(queries_path)
-        logger.warning(f"{file_exists=} so include_header={not file_exists}")
+        file_exists = os.path.exists(queries_path)        
         pl.DataFrame(results) \
             .write_csv(open(queries_path, 'a' if file_exists else 'w'), include_header=not file_exists)
         results.clear()

@@ -2,7 +2,6 @@ from dataclasses import dataclass
 
 from autogen_core import TopicId
 from autogen_ext.models.openai import OpenAIChatCompletionClient
-from autogen_core.models import FunctionExecutionResult
 
 
 def get_model_client(model, family: str = "unknown") -> OpenAIChatCompletionClient:  # type: ignore
@@ -147,7 +146,7 @@ class Answer:
 @dataclass
 class IntermediateEvaluatorResponse:
     content: str
-    question: str
+    task: str
     answer: str
     nround: int
 

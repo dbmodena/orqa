@@ -48,7 +48,7 @@ class JoinEvaluator(RoutedAgent):
                 content=(
                     "You are an helpful assistant in tabular data comprehension. "
                     "Your task is to evaluate pairs of candidate tables for a SQL operation "
-                    "by providing a numerical score. "
+                    "by providing a numerical score. If given, reason on other assistants observations. "
                     "Limit your output to 50 words, "
                     f"and your final answer should be a single integer number, between {self._min_score} and {self._max_score}. "
                     "Respond with the form:\n"
@@ -93,7 +93,7 @@ class JoinEvaluator(RoutedAgent):
             await self.publish_message(
                 IntermediateEvaluatorResponse(
                     content=response.content,
-                    question=message.question,
+                    task=message.question,
                     answer=answer,
                     nround=self._round
                 ),
@@ -119,16 +119,12 @@ class JoinEvaluator(RoutedAgent):
             
             prompt += (
                 "Using the evaluations from other agents as additional information, "
-                "can you provide your score to the current table pairs? "
-                f"The original task is {message.question}. "
-                "Respond with the following form:\n"
-                "Answer: <your numerical score here>\n"
-                "Explanation: <your concise explanation>\n"
-                f"Remember to give an integer score between {self._min_score} and {self._max_score}!"
+                "provide your score to the current table pairs. "
+                f"The original task is {message.task}. "
             )
 
             # Send the question to the agent itself to solve.
-            await self.send_message(EvaluatorRequest(content=prompt, question=message.question), self.id)
+            await self.send_message(EvaluatorRequest(content=prompt, question=message.task), self.id)
             
             # Clear the buffer.
             self._buffer.pop(message.nround)

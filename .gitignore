@@ -8,16 +8,8 @@ job*.sh
 *tmp
 
 *.ipynb_checkpoints
-data/tmp
-data/outputs
-data/lakebench
-data/lakebench_gt
-data/datasets
-data/log
-clusters
-schema
-bird-mini-dev
-
+data
+prev*
 **.jsonl
 *.lock
 
