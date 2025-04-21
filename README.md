@@ -62,4 +62,4 @@ At this stage, customization of the workflow—such as selecting different model
 
 ---
 
-In `data/outputs` there is a first dataset version generated with OrQA workflow: this dataset contains 1,000 questions created from Canadian and UK Open Data tables.
+In the `dataset` folder there is a first dataset version generated with OrQA workflow: this dataset contains 1,000 questions created from Canadian and UK Open Data tables.
