@@ -42,7 +42,7 @@ Then, launch LiteLLM:
 
 ---
 
-### 🧪 Run the Full Pipeline
+### 🧪 Run the Workflow
 
 Use the following commands to create a new dataset from the first 1000 available packages on the Canadian Open Data portal:
 
@@ -62,3 +62,4 @@ At this stage, customization of the workflow—such as selecting different model
 
 ---
 
+In `data/outputs` there is a first dataset version generated with OrQA workflow: this dataset contains 1,000 questions created from Canadian and UK Open Data tables.
