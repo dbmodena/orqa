@@ -5,10 +5,13 @@ dependencies:
   - pip
   - pip:
     - tqdm==4.67.1
+    - litellm==1.63.11
+    - 'litellm[proxy]'
     - pandas==2.2.3
     - polars==1.24.0
     - duckdb==1.2.1
     - bidict==0.23.1
+    - pyarrow==19.0.1
     - litellm==1.63.11
     - jsonlines==4.0.0
     - inflection==0.5.1

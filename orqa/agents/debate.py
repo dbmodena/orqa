@@ -20,19 +20,17 @@ from autogen_core.models import (
 
 from orqa.agents.utils import (
     IntermediateEvaluatorResponse, Question, Answer, EvaluatorRequest, FinalEvaluatorResponse, ResetOrder,
-    final_join_evaluation_topic_id
+    final_evaluation_topic_id
 )
 
 
-
-
 @default_subscription
-class JoinEvaluator(RoutedAgent):
+class Evaluator(RoutedAgent):
     def __init__(self, model_client: ChatCompletionClient, topic_type: str, 
                  num_neighbors: int, max_rounds: int, 
                  min_score:int = 0, max_score: int = 5, 
                  logger: logging.Logger|None = None):
-        super().__init__("Evaluates candidate joinable tables debating with other agents")
+        super().__init__("Evaluates candidates with other agents")
         self._topic_type = topic_type
         self._model_client = model_client
         self._num_neighbors = num_neighbors
@@ -139,12 +137,10 @@ class JoinEvaluator(RoutedAgent):
         self._buffer = {}
 
 
-
-
 @default_subscription
-class JoinScoreAggregator(RoutedAgent):
+class ScoreAggregator(RoutedAgent):
     def __init__(self, num_solvers: int, min_score:int = 0, max_score:int = 5, logger: logging.Logger|None = None) -> None:
-        super().__init__("A JOIN score aggregator")
+        super().__init__("A score aggregator")
         self._num_solvers = num_solvers
         self._logger = logger
         self._min_score = min_score
@@ -181,7 +177,7 @@ class JoinScoreAggregator(RoutedAgent):
             # Publish the aggregated response.
             await self.publish_message(
                 Answer(score=majority_answer), 
-                topic_id=final_join_evaluation_topic_id
+                topic_id=final_evaluation_topic_id
             )
 
             # Send the reset message to the solvers

@@ -24,14 +24,14 @@ def main(tag: str = "CAN",
     metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
     db_path         = f'{data_path}/datasets/{tag}/database/blend.db'
     valdict_path    = f'{data_path}/datasets/{tag}/database/values_dict.pickle'
-    log_path        = f'{data_path}/log/{tag}/2_join_search.log'
+    log_path        = f'{data_path}/log/{tag}/2_candidates_search.log'
 
-    candidates_path = f'{data_path}/outputs/{tag}/candidate_joins_test.csv'
+    candidates_path = f'{data_path}/outputs/{tag}/candidate_test.csv'
 
 
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
-    logger = logging.getLogger('JoinSearchLogger')
+    logger = logging.getLogger('CandidateSearchLogger')
     logger.setLevel(logging.DEBUG)
 
     handler = RotatingFileHandler(log_path, mode="a", maxBytes=1024 ** 3)
@@ -42,7 +42,7 @@ def main(tag: str = "CAN",
     logger.info("Started Job")
 
     # number of tables for which do the search
-    BUDGET          = 100
+    BUDGET          = 30
 
     # max number of results we want during search
     K               = 50
@@ -63,7 +63,7 @@ def main(tag: str = "CAN",
     MIN_OVERLAP     = 0.3
 
     # more fine grained cleaning to get interesting  
-    CLEAN_MODE = "complex"
+    CLEAN_MODE = "base"
 
     N_BATCH_APPEND  = 20
 
@@ -71,7 +71,7 @@ def main(tag: str = "CAN",
     ACCEPT_SAME_SCHEMA = True
 
     # tokens that we don't want to see in headers
-    # because they may lead to fuzzy joins
+    # because they may lead to fuzzy overlaps
     bad_columns_tokens = {'id', 'date', 'unnamed'}
 
     # pattern for resource name extraction
@@ -175,7 +175,7 @@ def main(tag: str = "CAN",
                     LIMIT {K};
             """).fetchall()
             
-            # for each tuple, check if this is a potentially valid join candidate
+            # for each tuple, check if this is a potentially valid candidate
             for s_tab_id, s_col_id, intersection in results:         
                 # if this candidate is valid, this record will be overriden
                 candidates.append(

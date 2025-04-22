@@ -131,8 +131,8 @@ class NLReviewResult:
 
 # Debating 
 
-JOIN_EVALUATION_TOPIC_TYPE = "evaluation-result"
-final_join_evaluation_topic_id = TopicId(type=JOIN_EVALUATION_TOPIC_TYPE, source="default")
+EVALUATION_TOPIC_TYPE = "evaluation-result"
+final_evaluation_topic_id = TopicId(type=EVALUATION_TOPIC_TYPE, source="default")
 
 @dataclass
 class Question:

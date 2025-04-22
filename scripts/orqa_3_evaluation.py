@@ -12,8 +12,8 @@ import polars as pl
 from autogen_core import ClosureAgent, ClosureContext, DefaultTopicId, MessageContext, SingleThreadedAgentRuntime, TypeSubscription
 
 from orqa.utils import get_all_data
-from orqa.agents.debate import JoinScoreAggregator, JoinEvaluator
-from orqa.agents.utils import Answer, Question, JOIN_EVALUATION_TOPIC_TYPE, get_model_client
+from orqa.agents.debate import ScoreAggregator, Evaluator
+from orqa.agents.utils import Answer, Question, EVALUATION_TOPIC_TYPE, get_model_client
 
 warnings.filterwarnings('ignore')
 
@@ -25,14 +25,17 @@ async def amain(tag: str = "CAN",
     data_path       = f'{os.path.dirname(__file__)}/../data'
     tables_path     = f'{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}'
     metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
-    log_path        = f'{data_path}/log/{tag}/3_join_evaluation_{time.strftime('%y%m%d_%H_%M_%S')}.log'
+    log_path        = f'{data_path}/log/{tag}/3_evaluation_{time.strftime('%y%m%d_%H_%M_%S')}.log'
 
-    candidates_path = f'{data_path}/outputs/{tag}/candidate_joins_test.csv'
-    evaluated_path  = f'{data_path}/outputs/{tag}/evaluated_joins_test.csv'
+    candidates_path = f'{data_path}/outputs/{tag}/candidates_test.csv'
+    evaluated_path  = f'{data_path}/outputs/{tag}/evaluated_test.csv'
 
-    UP_TO_ROW           = 'END'
-    WRITE_BATCH_SIZE    = 100
+    # how many rows are evaluated (if 'END', all)
+    UP_TO_ROW           = 10
 
+    WRITE_BATCH_SIZE    = 1
+
+    # how many columns are kept for the evaluation
     MAX_N_COLUMNS       = 20
 
     # to limit the context passed to the LLM-agent (the "notes" field may be very long)
@@ -41,18 +44,26 @@ async def amain(tag: str = "CAN",
     # number of sampled rows passed to the LLM into the question context
     N_ROWS_SAMPLE       = 5
 
+    # string cleaning strategies
     CLEAN_HEADERS       = "complex"
     CLEAN_ELEMENTS      = None
 
+    # boundaries for the score value
     MIN_SCORE           = 0
     MAX_SCORE           = 10
-    NUM_NEIGHS          = 2
-    MAX_ROUNDS          = 2
+
+    # how many solvers take part
+    # to the debate
     NUM_SOLVERS         = 3
+    
+    # how many neighboors each 
+    # solver has
+    NUM_NEIGHS          = 2
+
+    MAX_ROUNDS          = 2
 
     # the model name (here we will use LiteLLM and Ollama)
     model               = "qwen2.5-7b"
-
 
     # set up the logging
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -66,18 +77,24 @@ async def amain(tag: str = "CAN",
     # log also to stdout
     stdout_hanlder = logging.StreamHandler()
     logger.addHandler(stdout_hanlder)
+
+    # keep only last three log files relative to this part
+    old_dirs =  sorted([d for d in os.listdir(os.path.dirname(log_path)) if d.startswith('3_evaluation')], reverse=True)
+    logs_to_delete = old_dirs[3:] if len(old_dirs) > 3 else []
+    for log_to_delete in logs_to_delete:
+        os.remove(os.path.join(os.path.dirname(log_path), log_to_delete))
     
     # define the runtime
     runtime = SingleThreadedAgentRuntime()
 
     # register three different agents for the debating mechanism
     for solver_id in range(NUM_SOLVERS):
-        await JoinEvaluator.register(
+        await Evaluator.register(
             runtime,
-            f"JoinEvaluator{solver_id}",
-            lambda: JoinEvaluator(
+            f"Evaluator{solver_id}",
+            lambda: Evaluator(
                 get_model_client(model),
-                f"JoinEvaluator{solver_id}",
+                f"Evaluator{solver_id}",
                 NUM_NEIGHS,
                 MAX_ROUNDS,
                 MIN_SCORE, MAX_SCORE, 
@@ -86,14 +103,14 @@ async def amain(tag: str = "CAN",
         )
         
         # now, every agent should subscribe to the right topic(s)
-        await runtime.add_subscription(TypeSubscription(f"JoinEvaluator{solver_id}", f"JoinEvaluator{solver_id - 1 % NUM_SOLVERS}"))
-        await runtime.add_subscription(TypeSubscription(f"JoinEvaluator{solver_id}", f"JoinEvaluator{solver_id + 1 % NUM_SOLVERS}"))
+        await runtime.add_subscription(TypeSubscription(f"Evaluator{solver_id}", f"Evaluator{solver_id - 1 % NUM_SOLVERS}"))
+        await runtime.add_subscription(TypeSubscription(f"Evaluator{solver_id}", f"Evaluator{solver_id + 1 % NUM_SOLVERS}"))
 
     # register also the final score aggregator
-    await JoinScoreAggregator.register(
+    await ScoreAggregator.register(
         runtime, 
-        "JoinScoreAggregator", 
-        lambda: JoinScoreAggregator(NUM_SOLVERS, MIN_SCORE, MAX_SCORE, logger))
+        "ScoreAggregator", 
+        lambda: ScoreAggregator(NUM_SOLVERS, MIN_SCORE, MAX_SCORE, logger))
 
     # setup the mechanism to collect the final answers
     queue = asyncio.Queue[Answer]()
@@ -108,7 +125,7 @@ async def amain(tag: str = "CAN",
         runtime,
         CLOSURE_AGENT_TYPE,
         collect_result,
-        subscriptions=lambda: [TypeSubscription(topic_type=JOIN_EVALUATION_TOPIC_TYPE, agent_type=CLOSURE_AGENT_TYPE)]
+        subscriptions=lambda: [TypeSubscription(topic_type=EVALUATION_TOPIC_TYPE, agent_type=CLOSURE_AGENT_TYPE)]
     )
 
     await runtime.stop_when_idle()
@@ -117,7 +134,7 @@ async def amain(tag: str = "CAN",
     with jsonlines.open(metadata_path) as fr:
         metadata = {rsc['id']: md for md in fr.iter() for rsc in md['resources'] if rsc['format'] == 'CSV'}
 
-    logger.info("Loading Candidate JOINs from CSV")
+    logger.info("Loading Candidates from CSV")
     candidates = pl.read_csv(candidates_path, ignore_errors=True, truncate_ragged_lines=True).drop_nulls()
 
     # add the header row to the output CSV file
@@ -140,10 +157,10 @@ async def amain(tag: str = "CAN",
     score = -1
     start_batch_t = time.time()
 
-    logger.info("Started Agent JOINs Evaluation")
+    logger.info("Started Agent Candidates Evaluation")
     
     for i, row in enumerate(candidates.rows()[:UP_TO_ROW if isinstance(UP_TO_ROW, int) else candidates.shape[0]]):
-        if i % WRITE_BATCH_SIZE == 0:
+        if i % WRITE_BATCH_SIZE == 0 and i > 0:
             logger.info(f'Up to {i}({round(i * 100 / len(candidates), 3)}%);time:{round(time.time() - start_batch_t, 3)}s')
             with open(evaluated_path, "a") as file:
                 wr = csv.writer(file)

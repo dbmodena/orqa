@@ -127,6 +127,12 @@ async def amain(tag: str = "CAN",
     logger.addHandler(handler)
     stdout_hanlder = logging.StreamHandler()
     logger.addHandler(stdout_hanlder)
+    
+    # keep only last three log files
+    old_dirs =  sorted([d for d in os.listdir(os.path.dirname(log_path)) if d.startswith('4_generation')], reverse=True)
+    logs_to_delete = old_dirs[3:] if len(old_dirs) > 3 else []
+    for log_to_delete in logs_to_delete:
+        os.remove(os.path.join(os.path.dirname(log_path), log_to_delete))
 
     logger.info("Loading BIRD mini-dev")
     with open(bird_dev_path) as file:

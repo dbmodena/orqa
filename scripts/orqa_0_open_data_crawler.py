@@ -93,8 +93,12 @@ def download_resource_csv(data: Tuple[urllib3.PoolManager | urllib3.ProxyManager
 
         # download all the resource data at once
         response = http.request('GET', rsc_url, redirect=True)
+        if logger: logger.debug(f"Resource {rsc_name} size: {len(response.data)}")
     except urllib3.exceptions.TimeoutError:
+        if logger: logger.warning(f"Timeout with resource: {rsc_url}")
         return False
+
+    if logger: logger.debug(f"Extracting data from resource {rsc_name}...")
 
     # try each method to get the data
     success = False
@@ -103,7 +107,8 @@ def download_resource_csv(data: Tuple[urllib3.PoolManager | urllib3.ProxyManager
             method()
             success = True
             break
-        except:
+        except Exception as e:
+            if logger: logger.debug(f"Method {method} failed with resource {rsc_name}: {e}")
             continue
     
     if logger: logger.debug(f"{'SUCCESS' if success else 'FAILURE'} download resource {rsc_url}")
@@ -131,7 +136,6 @@ def process_task(
     start_ptask = time.time()
     
     # create the HTTP manager for this process (shared among its threads)
-    # http = urllib3.PoolManager(
     if proxy_kwargs:
         http = urllib3.ProxyManager(
             maxsize=n_workers,
@@ -211,9 +215,9 @@ def download_tables(url_basepoint: str,
                     accepted_formats: list = ["CSV"],
                     logger: logging.Logger|None = None,                    
                     n_workers: int = 10, 
-                    packages_per_worker:int = 1_000,
-                    from_n_package:int|None = None,
-                    to_n_package:int|str = "END",
+                    packages_per_worker: int = 1_000,
+                    from_n_package:int | None = None,
+                    to_n_package: int | str | None = "END",
                     proxy_kwargs: None | dict = None, 
                     keep_logging: bool = True):
     """
@@ -226,17 +230,18 @@ def download_tables(url_basepoint: str,
     Some corner-cases may not be covered by the download logic.
     """
     
-    # instantiate a single connection manager, it should keep 
-    # a single pool for each thread, since they access different hosts
-    assert isinstance(to_n_package, str) or isinstance(to_n_package, int) and to_n_package > from_n_package
-
-
+    try: from_n_package = int(from_n_package)
+    except: pass
+    try: to_n_package = int(to_n_package)
+    except: pass
+    assert isinstance(to_n_package, str) or (isinstance(to_n_package, int) and to_n_package > from_n_package)
+    
     if keep_logging:
         logger, listener = init_logger(log_directory)        
         listener.start()
     else:
         logger = None
-
+    
     # the basepoint available for all the relevant Open Data 
     # portals is "package_search"
     package_search_url = f'{url_basepoint}/package_search'
@@ -325,6 +330,7 @@ def download_tables(url_basepoint: str,
     
     except Exception as e:
         if logger: logger.error(e)
+        raise e
     finally:
         if keep_logging: listener.stop()
 
@@ -375,4 +381,4 @@ def main(country_tag: str = 'CAN',
     # shutil.move(log_dir, f"{log_dir}_{time.strftime('%y%m%d_%H_%M_%S')}")
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    main(*sys.argv[1:])
