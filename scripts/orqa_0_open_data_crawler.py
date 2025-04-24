@@ -7,12 +7,14 @@ import logging
 import urllib3
 import zipfile
 import warnings
+import multiprocessing as mp
+
 from io import BytesIO
+from os.path import join as pjoin
 from typing import Tuple
 from statistics import mean
-import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from logging.handlers import QueueHandler, RotatingFileHandler, QueueListener
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 import tqdm
 import tqdm.auto
@@ -35,12 +37,11 @@ def init_logger(log_directory):
     if root.hasHandlers():
         root.handlers.clear()
 
-    # TODO keep only the 2 most recent log directories
     old_dirs =  sorted([d for d in os.listdir(os.path.dirname(log_directory))], reverse=True)
     dirs_to_delete = old_dirs[3:] if len(old_dirs) > 3 else []
 
     for dir_to_delete in dirs_to_delete:        
-        dir_path = os.path.join(os.path.dirname(log_directory), dir_to_delete)     
+        dir_path = pjoin(os.path.dirname(log_directory), dir_to_delete)     
         shutil.rmtree(dir_path)
     
     if not root.hasHandlers():
@@ -61,11 +62,12 @@ def download_resource_csv(data: Tuple[urllib3.PoolManager | urllib3.ProxyManager
         # and we do not want to start reading zip files here
         assert not rsc_url.endswith('.zip')
         assert 'DOCTYPE' not in response.data[:100].decode('latin-1')
+        path = pjoin(download_directory, f'{rsc_name}.parquet')
         try:
-            pd.read_csv(response.data, **pd_read_csv_kwargs).to_parquet(f'{download_directory}/{rsc_name}.parquet', **pd_to_parquet_kwargs)
+            pd.read_csv(response.data, **pd_read_csv_kwargs).to_parquet(path, **pd_to_parquet_kwargs)
         except:
             # in some cases data are encoded, thus we try again with a byte io stream
-            pd.read_csv(BytesIO(response.data), **pd_read_csv_kwargs).to_parquet(f'{download_directory}/{rsc_name}.parquet', **pd_to_parquet_kwargs)
+            pd.read_csv(BytesIO(response.data), **pd_read_csv_kwargs).to_parquet(path, **pd_to_parquet_kwargs)
             
     def zip():
         # open the donwloaded ZIP
@@ -75,7 +77,7 @@ def download_resource_csv(data: Tuple[urllib3.PoolManager | urllib3.ProxyManager
                 (
                     pd
                     .read_csv(z.open(fname), **pd_read_csv_kwargs)
-                    .to_parquet(f'{download_directory}/{rsc_name}{"" if len(file_names) == 1 else f"_{i}"}.parquet', **pd_to_parquet_kwargs)
+                    .to_parquet(pjoin(download_directory, f'{rsc_name}{"" if len(file_names) == 1 else f"_{i}"}.parquet', **pd_to_parquet_kwargs))
                 )
 
     try:
@@ -124,6 +126,7 @@ def process_task(
         n_workers: int = 10,
         packages_per_worker:int = 1_000,
         accepted_formats: list = ['CSV'],
+        max_package_size: int = 2**29,
         proxy_kwargs: dict | None = None, 
         keep_logging: bool = True):
     
@@ -180,6 +183,7 @@ def process_task(
         packages_metadata = response.json()['result']['results']
         
         # get all the resources metadata
+        # keep only english version
         resources = [
             rsc 
             for pkg in packages_metadata 
@@ -192,7 +196,7 @@ def process_task(
         if logger: logger.info(f'Downloaded packages metadata, from {start=} to {start + len(packages_metadata)}, total resources: {len(res_urls)} (urls={res_urls})')
         
         with ThreadPoolExecutor(max_workers=min(n_workers, MAX_THREADS_NUM)) as thread_executor:
-            success = sum(thread_executor.map(download_resource_csv, [[http, rsc['url'], rsc['id'], download_directory, 2**29, logger] for rsc in resources]))
+            success = sum(thread_executor.map(download_resource_csv, [[http, rsc['url'], rsc['id'], download_directory, max_package_size, logger] for rsc in resources]))
         success_rate = round((success * 100 / len(resources)) if resources else 0, 3)
 
     except Exception as e:
@@ -216,6 +220,7 @@ def download_tables(url_basepoint: str,
                     logger: logging.Logger|None = None,                    
                     n_workers: int = 10, 
                     packages_per_worker: int = 1_000,
+                    max_package_size: int = 2**29,
                     from_n_package:int | None = None,
                     to_n_package: int | str | None = "END",
                     proxy_kwargs: None | dict = None, 
@@ -225,9 +230,9 @@ def download_tables(url_basepoint: str,
 
     It spawns a pool of n_workers processes, and each worker spawns a pool of n_worker threads.
 
-    All the downloaded data are saved to the given download directory.
+    All the downloaded data are saved into the given download directory.
 
-    Some corner-cases may not be covered by the download logic.
+    Some corner-cases may not be covered by the current download logic.
     """
     
     try: from_n_package = int(from_n_package)
@@ -283,9 +288,9 @@ def download_tables(url_basepoint: str,
         n_total_packages    = to_n_package - from_n_package
         packages_per_worker = min(packages_per_worker, to_n_package)
 
-        metadata_jsonl      = f'{download_directory}/metadata/metadata_from{from_n_package}_to{to_n_package if isinstance(to_n_package_usr, int) else to_n_package_usr}.jsonl'
-        download_directory  = f'{download_directory}/tables/tables_from{from_n_package}_to{to_n_package if isinstance(to_n_package_usr, int) else to_n_package_usr}'
-        
+        metadata_jsonl      = pjoin(download_directory, 'metadata', f'from{from_n_package}_to{to_n_package if isinstance(to_n_package_usr, int) else to_n_package_usr}.jsonl')
+        download_directory  = pjoin(download_directory, 'tables', f'from{from_n_package}_to{to_n_package if isinstance(to_n_package_usr, int) else to_n_package_usr}')
+
         # remove old existent data
         shutil.rmtree(download_directory, ignore_errors=True)
         if os.path.exists(metadata_jsonl):
@@ -302,7 +307,7 @@ def download_tables(url_basepoint: str,
         with ProcessPoolExecutor(max_workers=min(n_workers, MAX_PROC_NUM), mp_context=mp.get_context('spawn')) as executor:
             futures = [
                 executor.submit(
-                    process_task, package_search_url, download_directory, temporary_directory, log_directory, i, n_workers, packages_per_worker, accepted_formats, proxy_kwargs, keep_logging)
+                    process_task, package_search_url, download_directory, temporary_directory, log_directory, i, n_workers, packages_per_worker, accepted_formats, max_package_size, proxy_kwargs, keep_logging)
                     for i in range(from_n_package, to_n_package, packages_per_worker)
                 ]
             if logger: logger.debug(f'Total work steps: {len(range(from_n_package, to_n_package, packages_per_worker))}')
@@ -326,8 +331,7 @@ def download_tables(url_basepoint: str,
         if logger: 
             logger.info('Done')
             logger.info(f'Total success downloads: {sum(s[0] for s in total_success)}. Average success rate (per process): {mean(s[1] for s in total_success)}')
-        
-    
+
     except Exception as e:
         if logger: logger.error(e)
         raise e
@@ -335,31 +339,29 @@ def download_tables(url_basepoint: str,
         if keep_logging: listener.stop()
 
 
+# 'CAN'   : 'https://open.canada.ca/data/api/action',
+# 'US'    : 'https://catalog.data.gov/api/3/action',
+# 'UK'    : 'https://data.gov.uk/api/action',
+# 'AFR'   : 'https://open.africa/api/action', # protected with CloudFlare
+# 'SG'    : '???' # different type of API functions
+
+
 def main(country_tag: str = 'CAN',
          from_: int = 0,
          to_: int|str = 'END',
          country_ckan_base_url: str = 'https://open.canada.ca/data/api/action'):
     
-    data_path       = f'{os.path.dirname(__file__)}/../data'
-    tmp_dir         = f'{data_path}/tmp'
-    log_dir         = f'{data_path}/log'
-
+    data_path       = pjoin(os.path.dirname(__file__), '..', 'data')
+    tmp_dir         = pjoin(data_path, 'tmp')
+    download_dir    = pjoin(data_path, 'datasets', country_tag)
+    log_dir         = pjoin(data_path, 'log', country_tag, 'crawling', time.strftime('%y%m%d_%H_%M_%S'))
+    
     # clean and create directories
     # currently is not used, TODO check if is ok
     # to store large files on disk and do then IO 
     shutil.rmtree(tmp_dir, ignore_errors=True)
+    # shutil.rmtree(download_dir, ignore_errors=True)
     os.makedirs(tmp_dir, exist_ok=True)
-
-    # 'CAN'   : 'https://open.canada.ca/data/api/action',
-    # 'US'    : 'https://catalog.data.gov/api/3/action',
-    # 'UK'    : 'https://data.gov.uk/api/action',
-    # 'AFR'   : 'https://open.africa/api/action',
-    # 'SG'    : '???'
-    
-    download_dir = f'{data_path}/datasets/{country_tag}'
-    log_dir = f"{log_dir}/{country_tag}/crawling/{time.strftime('%y%m%d_%H_%M_%S')}"
-
-    shutil.rmtree(download_dir, ignore_errors=True)
     os.makedirs(download_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
 
@@ -378,7 +380,7 @@ def main(country_tag: str = 'CAN',
 
     # remove the temporary directory
     shutil.rmtree(tmp_dir, ignore_errors=True)
-    # shutil.move(log_dir, f"{log_dir}_{time.strftime('%y%m%d_%H_%M_%S')}")
+
 
 if __name__ == '__main__':
     main(*sys.argv[1:])

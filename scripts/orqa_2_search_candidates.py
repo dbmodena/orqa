@@ -5,6 +5,8 @@ import sys
 import time
 import pickle
 import logging
+
+from os.path import join as pjoin
 from logging.handlers import RotatingFileHandler
 
 import duckdb
@@ -19,30 +21,32 @@ def main(tag: str = "CAN",
          from_: int = 0, 
          to_: int = "END"):    
     
-    data_path       = f'{os.path.dirname(__file__)}/../data'
-    tables_path     = f'{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}'
-    metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
-    db_path         = f'{data_path}/datasets/{tag}/database/blend.db'
-    valdict_path    = f'{data_path}/datasets/{tag}/database/values_dict.pickle'
-    log_path        = f'{data_path}/log/{tag}/2_candidates_search.log'
-
-    candidates_path = f'{data_path}/outputs/{tag}/candidate_test.csv'
-
+    data_path       = pjoin(os.path.dirname(__file__), '..', 'data')
+    tables_path     = pjoin(data_path, 'datasets', tag, 'tables', f'from{from_}_to{to_}')
+    metadata_path   = pjoin(data_path, 'datasets', tag, 'metadata', f'from{from_}_to{to_}.jsonl')
+    db_path         = pjoin(data_path, 'datasets', tag, 'database', f'from{from_}_to{to_}', 'blend.db')
+    valdict_path    = pjoin(data_path, 'datasets', tag, 'database', f'from{from_}_to{to_}', 'values_bidict.pickle')
+    log_path        = pjoin(data_path, 'log', tag, f'2_candidates_search_{time.strftime("%y%m%d_%H_%M_%S")}.log')
+    candidates_path = pjoin(data_path, 'outputs', tag, f'from{from_}_to{to_}', 'candidates.csv')
 
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     logger = logging.getLogger('CandidateSearchLogger')
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
 
-    handler = RotatingFileHandler(log_path, mode="a", maxBytes=1024 ** 3)
+    handler = logging.FileHandler(log_path)
     log_formatter = logging.Formatter("%(asctime)s,[%(process)d],[%(levelname)s],%(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(log_formatter)
     logger.addHandler(handler)
 
-    logger.info("Started Job")
+    # keep only last three log files
+    old_logs =  sorted([f for f in os.listdir(os.path.dirname(log_path)) if f.startswith('2_candidates')], reverse=True)
+    log_to_delete = old_logs[3:] if len(old_logs) > 3 else []
+    for log_to_del in log_to_delete:        
+        os.remove(pjoin(os.path.dirname(log_path), log_to_del))
 
-    # number of tables for which do the search
-    BUDGET          = 30
+    # number of tables for which the program do the search
+    BUDGET          = 3
 
     # max number of results we want during search
     K               = 50
@@ -59,7 +63,9 @@ def main(tag: str = "CAN",
     MAX_NULL_RATIO  = 0.2
 
     # minimum threshold for these metrics
-    MIN_JACCARD     = 0.2
+    # in some cases, there is a low jaccard 
+    # with high overlap
+    MIN_JACCARD     = 0.0 # disable jaccard thresh
     MIN_OVERLAP     = 0.3
 
     # more fine grained cleaning to get interesting  
@@ -103,8 +109,8 @@ def main(tag: str = "CAN",
     already_used = set()
 
     # write the header row for the result CSV file
-    with open(candidates_path, 'w') as file:
-        wr = csv.writer(file)
+    with open(candidates_path, 'w', newline='') as file:
+        wr = csv.writer(file, lineterminator='\n')
         wr.writerow([
             'r_rsc_id', 
             's_rsc_id',
@@ -122,7 +128,9 @@ def main(tag: str = "CAN",
             'overlap'
         ])
 
-    start_batch_t = time.time()
+    logger.info("Started Candidates Search")
+
+    start_t = start_batch_t = time.time()
 
     for r_tab_id in tqdm(range(min(BUDGET, len(table_ids))), disable=False):
         # read the relative table from disk        
@@ -239,9 +247,10 @@ def main(tag: str = "CAN",
                 # do not consider this pair if:
                 #   - one of the two columns has only few value;
                 #   - both jaccard and min-overlap are lower than a threshold (not used, to check if really useful);
+                #       seems to be useful, many pairs have overlaps/jaccard ~0.0
                 #   - columns have the same name and have jaccard/overlap==1 (not used, to check if really useful);
-                if len(s_col) < MIN_NUM_VALUES: #  \
-                    # or jaccard < MIN_JACCARD or overlap < MIN_OVERLAP \
+                if len(s_col) < MIN_NUM_VALUES \
+                    or jaccard < MIN_JACCARD or overlap < MIN_OVERLAP: # \
                     # or r_col_name == s_col_name and jaccard == 1 and overlap == 1:
                     continue
                 
@@ -269,19 +278,22 @@ def main(tag: str = "CAN",
         if r_tab_id % N_BATCH_APPEND == 0 and r_tab_id > 0:
             logger.info(f'Up to table {r_tab_id}({round(r_tab_id * 100 / len(table_ids), 3)}%);Current candidates:{len(candidates)};time:{round(time.time() - start_batch_t, 3)}s')
             
-            with open(candidates_path, 'a') as file:
+            with open(candidates_path, 'a', newline='', encoding='utf-8') as file:
                 wr = csv.writer(file)
                 wr.writerows(candidates)
             candidates = []
             start_batch_t = time.time()
 
-
     logger.info(f'Up to table {r_tab_id} ({round(r_tab_id * 100 / len(table_ids), 3)}%);Current candidates:{len(candidates)};time:{round(time.time() - start_batch_t, 3)}s')
-    with open(candidates_path, 'a') as file:
+    with open(candidates_path, 'a', newline='', encoding='utf-8') as file:
         wr = csv.writer(file)
         wr.writerows(candidates)
     
     logger.info("Done")
+    
+    end_t = time.time()
+    total_t = round(end_t - start_t, 3)
+    logger.info(f"Total time: {total_t}s")
 
 
 if __name__ == '__main__':

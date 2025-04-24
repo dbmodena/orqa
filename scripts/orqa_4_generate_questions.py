@@ -7,8 +7,10 @@ import random
 import asyncio
 import logging
 import warnings
+
 from typing import List
 from typing_extensions import Annotated
+from os.path import join as pjoin
 
 import duckdb
 import jsonlines
@@ -66,18 +68,17 @@ async def verify_sql(sql_query: Annotated[str, "A SQL query which represents the
         }
 
 
-async def amain(tag: str = "CAN", 
-                from_: int = 0, 
-                to_: int = "END"):     
-    data_path           = f"{os.path.dirname(__file__)}/../data"
-    tables_path         = f"{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}"
-    metadata_path       = f"{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl"
-    log_path            = f"{data_path}/log/{tag}/4_generation_{time.strftime('%y%m%d_%H_%M_%S')}.log"
-    
-    bird_dev_path       = f"{data_path}/bird-mini-dev/dev.json"
+async def amain(tag: str = "CAN",
+                from_: int = 0,
+                to_: int = "END"):
 
-    evaluated_path      = f"{data_path}/outputs/{tag}/evaluated_joins.csv"
-    queries_path        = f"{data_path}/outputs/{tag}/queries.csv"
+    data_path       = pjoin(os.path.dirname(__file__), '..', 'data')
+    tables_path     = pjoin(data_path, 'datasets', tag, 'tables', f'from{from_}_to{to_}')
+    metadata_path   = pjoin(data_path, 'datasets', tag, 'metadata', f'from{from_}_to{to_}.jsonl')
+    log_path        = pjoin(data_path, 'log', tag, f'4_generation_{time.strftime("%y%m%d_%H_%M_%S")}.log')
+    bird_dev_path   = pjoin(data_path, 'bird-mini-dev', 'dev.json')
+    evaluated_path  = pjoin(data_path, 'outputs', tag, f'from{from_}_to{to_}', 'evaluated.csv')
+    queries_path    = pjoin(data_path, 'outputs', tag, f'from{from_}_to{to_}', 'queries.csv')
 
     # how many pairs from evaluated ones
     # are used for the generation.
@@ -172,6 +173,8 @@ async def amain(tag: str = "CAN",
             description="A tool that checks if the proposed SQL query works."
         )
     ]
+
+    start_t = time.time()
 
     # create the agent runtime
     runtime = SingleThreadedAgentRuntime()
@@ -629,6 +632,10 @@ async def amain(tag: str = "CAN",
 
 
     logger.info("Done")
+
+    end_t = time.time()
+    total_t = round(end_t - start_t, 3)
+    logger.info(f"Total time: {total_t}s")
 
 
 if __name__ == '__main__':

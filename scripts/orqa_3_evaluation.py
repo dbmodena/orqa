@@ -5,6 +5,7 @@ import time
 import asyncio
 import warnings
 import logging
+from os.path import join as pjoin
 
 import jsonlines
 import polars as pl
@@ -22,13 +23,12 @@ async def amain(tag: str = "CAN",
                 from_: int = 0, 
                 to_: int = 'END'):
 
-    data_path       = f'{os.path.dirname(__file__)}/../data'
-    tables_path     = f'{data_path}/datasets/{tag}/tables/tables_from{from_}_to{to_}'
-    metadata_path   = f'{data_path}/datasets/{tag}/metadata/metadata_from{from_}_to{to_}.jsonl'
-    log_path        = f'{data_path}/log/{tag}/3_evaluation_{time.strftime('%y%m%d_%H_%M_%S')}.log'
-
-    candidates_path = f'{data_path}/outputs/{tag}/candidates_test.csv'
-    evaluated_path  = f'{data_path}/outputs/{tag}/evaluated_test.csv'
+    data_path       = pjoin(os.path.dirname(__file__), '..', 'data')
+    tables_path     = pjoin(data_path, 'datasets', tag, 'tables', f'from{from_}_to{to_}')
+    metadata_path   = pjoin(data_path, 'datasets', tag, 'metadata', f'from{from_}_to{to_}.jsonl')
+    log_path        = pjoin(data_path, 'log', tag, f'3_evaluation_{time.strftime("%y%m%d_%H_%M_%S")}.log')
+    candidates_path = pjoin(data_path, 'outputs', tag, f'from{from_}_to{to_}', 'candidates.csv')
+    evaluated_path  = pjoin(data_path, 'outputs', tag, f'from{from_}_to{to_}', 'evaluated.csv')
 
     # how many rows are evaluated (if 'END', all)
     UP_TO_ROW           = 10
@@ -48,19 +48,19 @@ async def amain(tag: str = "CAN",
     CLEAN_HEADERS       = "complex"
     CLEAN_ELEMENTS      = None
 
-    # boundaries for the score value
+    # score value range
     MIN_SCORE           = 0
     MAX_SCORE           = 10
 
     # how many solvers take part
     # to the debate
-    NUM_SOLVERS         = 3
+    NUM_SOLVERS         = 1
     
     # how many neighboors each 
     # solver has
-    NUM_NEIGHS          = 2
+    NUM_NEIGHS          = 1
 
-    MAX_ROUNDS          = 2
+    MAX_ROUNDS          = 1
 
     # the model name (here we will use LiteLLM and Ollama)
     model               = "qwen2.5-7b"
@@ -79,11 +79,13 @@ async def amain(tag: str = "CAN",
     logger.addHandler(stdout_hanlder)
 
     # keep only last three log files relative to this part
-    old_dirs =  sorted([d for d in os.listdir(os.path.dirname(log_path)) if d.startswith('3_evaluation')], reverse=True)
-    logs_to_delete = old_dirs[3:] if len(old_dirs) > 3 else []
-    for log_to_delete in logs_to_delete:
-        os.remove(os.path.join(os.path.dirname(log_path), log_to_delete))
+    old_logs =  sorted([f for f in os.listdir(os.path.dirname(log_path)) if f.startswith('3_evaluation')], reverse=True)
+    logs_to_delete = old_logs[3:] if len(old_logs) > 3 else []
+    for log_to_del in logs_to_delete:
+        os.remove(os.path.join(os.path.dirname(log_path), log_to_del))
     
+    start_t = time.time()
+
     # define the runtime
     runtime = SingleThreadedAgentRuntime()
 
@@ -207,8 +209,8 @@ async def amain(tag: str = "CAN",
                         f"Example rows: {s_df_str}"
                         f"\n{'-' * 50}\n"
                         "Define a relationship quality score for the two tables. "
-                        "Focus on the meaningfulness of a potential operation between the given tables. "
-                    )                   
+                        "Focus on the meaningfulness of a potential operation between them."
+                    )
                 ),
                 topic_id=DefaultTopicId()
             )
@@ -239,10 +241,14 @@ async def amain(tag: str = "CAN",
 
     logger.info(f"{i}({round(i * 100 / len(candidates), 3)}%);time:{round(time.time() - start_batch_t, 3)}s")
     with open(evaluated_path, "a") as file:
-        wr = csv.writer(file)
+        wr = csv.writer(file, lineterminator='\n')
         wr.writerows(evaluations)
 
     logger.info(f"Done.")
+    
+    end_t = time.time()
+    total_t = round(end_t - start_t, 3)
+    logger.info(f"Total time: {total_t}s")
 
 
 if __name__ == '__main__':

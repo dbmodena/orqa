@@ -6,6 +6,7 @@
 job*.sh
 .venv
 *tmp
+.env
 
 *.ipynb_checkpoints
 data

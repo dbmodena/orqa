@@ -2,6 +2,12 @@ model_list:
   # with model: ollama_chat/* the options are correctly 
   # set (like keep_alive and num_ctx)
 
+  # Groq
+  - model_name: groq-llama3-8b-8192
+    litellm_params:
+      model: groq/llama3-8b-8192
+      api_key: "os.environ/GROQ_API_KEY"
+
   # Llama Family (different types)
   - model_name: llama3.3
     litellm_params:

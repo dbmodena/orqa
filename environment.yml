@@ -6,7 +6,7 @@ dependencies:
   - pip:
     - tqdm==4.67.1
     - litellm==1.63.11
-    - 'litellm[proxy]'
+    # - 'litellm[proxy]'
     - pandas==2.2.3
     - polars==1.24.0
     - duckdb==1.2.1
