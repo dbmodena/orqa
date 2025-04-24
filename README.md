@@ -24,6 +24,11 @@ Install the required Python packages via Conda:
 $ conda env create -f environment.yml
 ```
 
+and manually install LiteLLM proxy:
+```sh
+$ pip install 'litellm[proxy]'
+```
+
 ---
 
 ### 🚀 Starting the Services
