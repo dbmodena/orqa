@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import sys
 import yaml
 import time
@@ -73,6 +74,7 @@ async def amain(tag: str = "CAN",
                 to_: int = "END"):
 
     conf_path       = pjoin(os.path.dirname(__file__), '..', 'conf', 'configuration.yml')
+    duckdb_tmp_path = pjoin(os.path.dirname(__file__), '..', '.tmp')
     data_path       = pjoin(os.path.dirname(__file__), '..', 'data')
     tables_path     = pjoin(data_path, 'datasets', tag, 'tables', f'from{from_}_to{to_}')
     metadata_path   = pjoin(data_path, 'datasets', tag, 'metadata', f'from{from_}_to{to_}.jsonl')
@@ -137,8 +139,6 @@ async def amain(tag: str = "CAN",
             description="A tool that checks if the proposed SQL query works."
         )
     ]
-
-    sys.exit()
 
     start_t = time.time()
 
@@ -601,6 +601,9 @@ async def amain(tag: str = "CAN",
     total_t = round(end_t - start_t, 3)
     logger.info(f"Total time: {total_t}s")
 
+    if os.path.isdir(duckdb_tmp_path):
+        logger.info("Deleting DuckDB tmp directory")
+        shutil.rmtree(duckdb_tmp_path)
 
 if __name__ == '__main__':
     asyncio.run(amain(*sys.argv[1:4]))
