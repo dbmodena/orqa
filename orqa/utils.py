@@ -1,3 +1,5 @@
+import logging
+import os
 import re
 import unicodedata
 from typing import Literal
@@ -171,4 +173,32 @@ def get_all_data(rsc_id, tables_path, metadata, col_name: str,
         org_name, org_title, org_desc, jur,
         col_name, df, df_str, sql_schema, columns_dtypes
     )
+
+
+def setup_logger(log_path: str, logger_name: str, on_file: bool = True, on_stdout: bool = True, level: int | str = logging.INFO, keep_last: int | None = 3):
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
+
+    log_formatter = logging.Formatter("%(asctime)s,[%(process)d],[%(levelname)s],%(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    
+    if on_file:
+        handler = logging.FileHandler(log_path)
+        handler.setFormatter(log_formatter)
+        logger.addHandler(handler)
+
+    if on_stdout:
+        stdout_hanlder = logging.StreamHandler()
+        logger.addHandler(stdout_hanlder)
+
+    if keep_last:
+        # keep only last n log files
+        old_logs =  sorted([f for f in os.listdir(os.path.dirname(log_path)) 
+                            if f.startswith(os.path.basename(log_path)[:5])], reverse=True)
+        log_to_delete = old_logs[3:] if len(old_logs) > keep_last else []
+        for log_to_del in log_to_delete:        
+            os.remove(os.path.join(os.path.dirname(log_path), log_to_del))
+
+    return logger
 

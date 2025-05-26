@@ -2,25 +2,27 @@ import re
 import os
 import csv
 import sys
+import yaml
 import time
 import pickle
 import logging
+import argparse
 
 from os.path import join as pjoin
-from logging.handlers import RotatingFileHandler
 
 import duckdb
 import jsonlines
 import polars as pl
 from tqdm import tqdm
 
-from orqa.utils import sanitize_string
+from orqa.utils import sanitize_string, setup_logger
 
 
 def main(tag: str = "CAN", 
          from_: int = 0, 
          to_: int = "END"):    
     
+    conf_path       = pjoin(os.path.dirname(__file__), '..', 'conf', 'configuration.yml')
     data_path       = pjoin(os.path.dirname(__file__), '..', 'data')
     tables_path     = pjoin(data_path, 'datasets', tag, 'tables', f'from{from_}_to{to_}')
     metadata_path   = pjoin(data_path, 'datasets', tag, 'metadata', f'from{from_}_to{to_}.jsonl')
@@ -29,57 +31,31 @@ def main(tag: str = "CAN",
     log_path        = pjoin(data_path, 'log', tag, f'2_candidates_search_{time.strftime("%y%m%d_%H_%M_%S")}.log')
     candidates_path = pjoin(data_path, 'outputs', tag, f'from{from_}_to{to_}', 'candidates.csv')
 
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    with open(conf_path, 'r') as file:
+        raw = file.read()
+        cfg = argparse.Namespace(**{**yaml.safe_load(raw)['general'], **yaml.safe_load(raw)['generation']})
 
-    logger = logging.getLogger('CandidateSearchLogger')
-    logger.setLevel(logging.INFO)
+    CLEAN_HEADERS       = cfg.string_cleaning['headers']
+    CLEAN_ELEMENTS      = cfg.string_cleaning['elements']
 
-    handler = logging.FileHandler(log_path)
-    log_formatter = logging.Formatter("%(asctime)s,[%(process)d],[%(levelname)s],%(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    handler.setFormatter(log_formatter)
-    logger.addHandler(handler)
+    BUDGET          = cfg.budget
+    K               = cfg.k
 
-    # keep only last three log files
-    old_logs =  sorted([f for f in os.listdir(os.path.dirname(log_path)) if f.startswith('2_candidates')], reverse=True)
-    log_to_delete = old_logs[3:] if len(old_logs) > 3 else []
-    for log_to_del in log_to_delete:        
-        os.remove(pjoin(os.path.dirname(log_path), log_to_del))
+    MIN_NUM_VALUES  = cfg.min_num_distinct_values_per_column
+    MIN_HEIGHT      = cfg.min_height
+    MAX_NULL_RATIO  = cfg.max_null_ratio_per_column
 
-    # number of tables for which the program do the search
-    BUDGET          = 3
+    MIN_JACCARD     = cfg.min_jaccard
+    MIN_OVERLAP     = cfg.min_overlap
+    
+    ACCEPT_SAME_SCHEMA = cfg.accept_same_schema
+    bad_header_tokens = cfg.bad_header_tokens
 
-    # max number of results we want during search
-    K               = 50
+    WRITE_BATCH_SIZE  = cfg.write_batch_size
 
-    # the minimum number of distinct values a column must have
-    MIN_NUM_VALUES  = 10
-
-    # minimum height for a table
-    MIN_HEIGHT      = 30
-
-    # maximum number of null values (ratio) allowed in
-    # one column to be accepted as candidate, i.e. drop
-    # columns with a lot of nulls
-    MAX_NULL_RATIO  = 0.2
-
-    # minimum threshold for these metrics
-    # in some cases, there is a low jaccard 
-    # with high overlap
-    MIN_JACCARD     = 0.0 # disable jaccard thresh
-    MIN_OVERLAP     = 0.3
-
-    # more fine grained cleaning to get interesting  
-    CLEAN_MODE = "base"
-
-    N_BATCH_APPEND  = 20
-
-    # if we accept or not tables with the same schema
-    ACCEPT_SAME_SCHEMA = True
-
-    # tokens that we don't want to see in headers
-    # because they may lead to fuzzy overlaps
-    bad_columns_tokens = {'id', 'date', 'unnamed'}
-
+    # set up logging
+    logger = setup_logger(log_path, "candidates_search_logger", on_file=True, on_stdout=False)
+    
     # pattern for resource name extraction
     file_pattern    = re.compile(r'(_\d+)?.parquet$')
 
@@ -143,7 +119,7 @@ def main(tag: str = "CAN",
         if not re.sub(file_pattern, '', table_ids[r_tab_id]) in metadata:
             continue
         r_pkg_id = metadata[re.sub(file_pattern, '', table_ids[r_tab_id])]['id']
-        r_column_names = set(map(lambda v: sanitize_string(v, CLEAN_MODE), r_df.columns))
+        r_column_names = set(map(lambda v: sanitize_string(v, CLEAN_HEADERS), r_df.columns))
         
         # for each col, if it is not supposed to be an ID
         # or a date column, query the index to find potentially 
@@ -154,7 +130,7 @@ def main(tag: str = "CAN",
                 continue
             
             # check if any token like "id" or "date" is inside the column name
-            if any(tok in r_df.columns[r_col_id].lower() for tok in bad_columns_tokens):
+            if any(tok in r_df.columns[r_col_id].lower() for tok in bad_header_tokens):
                 continue
 
             # check the number of null values
@@ -164,7 +140,7 @@ def main(tag: str = "CAN",
             # extract the unique and cleaned values from the column 
             r_col = set(
                 filter(lambda v: v in values, 
-                    map(lambda v: sanitize_string(v, CLEAN_MODE), r_df.to_series(r_col_id))
+                    map(lambda v: sanitize_string(v, CLEAN_ELEMENTS), r_df.to_series(r_col_id))
                 )
             )
 
@@ -217,7 +193,7 @@ def main(tag: str = "CAN",
                     continue
                 already_used.add(candidate_id)
 
-                s_columns_names = set(map(lambda v: sanitize_string(v, CLEAN_MODE), 
+                s_columns_names = set(map(lambda v: sanitize_string(v, CLEAN_HEADERS), 
                                           pl.scan_parquet(f"{tables_path}/{table_ids[s_tab_id]}").collect_schema().names()))
                 if not ACCEPT_SAME_SCHEMA and r_column_names == s_columns_names:
                     continue 
@@ -233,7 +209,7 @@ def main(tag: str = "CAN",
             
                 s_col = set(
                     filter(lambda v: v in values, 
-                        map(lambda v: sanitize_string(v, CLEAN_MODE), 
+                        map(lambda v: sanitize_string(v, CLEAN_ELEMENTS), 
                             s_col_series
                             )
                         )
@@ -275,7 +251,7 @@ def main(tag: str = "CAN",
                     ]
                 )
 
-        if r_tab_id % N_BATCH_APPEND == 0 and r_tab_id > 0:
+        if r_tab_id % WRITE_BATCH_SIZE == 0 and r_tab_id > 0:
             logger.info(f'Up to table {r_tab_id}({round(r_tab_id * 100 / len(table_ids), 3)}%);Current candidates:{len(candidates)};time:{round(time.time() - start_batch_t, 3)}s')
             
             with open(candidates_path, 'a', newline='', encoding='utf-8') as file:

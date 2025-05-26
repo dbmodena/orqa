@@ -1,12 +1,12 @@
 import os
 import re
 import sys
-import json
+import yaml
 import time
-import random
 import asyncio
 import logging
 import warnings
+import argparse
 
 from typing import List
 from typing_extensions import Annotated
@@ -22,7 +22,7 @@ from autogen_core import ClosureAgent, ClosureContext, MessageContext, SingleThr
 from orqa.agents.utils import *
 from orqa.agents.reviewer import ReviewerAgent
 from orqa.agents.question_generator import NLQuestionGeneratorAgent, SQLQueryGeneratorAgent
-from orqa.utils import get_all_data
+from orqa.utils import get_all_data, setup_logger
 
 
 warnings.filterwarnings("ignore")
@@ -72,80 +72,44 @@ async def amain(tag: str = "CAN",
                 from_: int = 0,
                 to_: int = "END"):
 
+    conf_path       = pjoin(os.path.dirname(__file__), '..', 'conf', 'configuration.yml')
     data_path       = pjoin(os.path.dirname(__file__), '..', 'data')
     tables_path     = pjoin(data_path, 'datasets', tag, 'tables', f'from{from_}_to{to_}')
     metadata_path   = pjoin(data_path, 'datasets', tag, 'metadata', f'from{from_}_to{to_}.jsonl')
-    log_path        = pjoin(data_path, 'log', tag, f'4_generation_{time.strftime("%y%m%d_%H_%M_%S")}.log')
-    bird_dev_path   = pjoin(data_path, 'bird-mini-dev', 'dev.json')
+    log_path        = pjoin(data_path, 'log', tag, f'4_generation_{time.strftime("%y%m%d_%H_%M_%S")}.log')    
     evaluated_path  = pjoin(data_path, 'outputs', tag, f'from{from_}_to{to_}', 'evaluated.csv')
     queries_path    = pjoin(data_path, 'outputs', tag, f'from{from_}_to{to_}', 'queries.csv')
 
-    # how many pairs from evaluated ones
-    # are used for the generation.
-    UP_TO_ROW           = 10_000
+    with open(conf_path, 'r') as file:
+        raw = file.read()
+        cfg = argparse.Namespace(**{**yaml.safe_load(raw)['general'], **yaml.safe_load(raw)['generation']})
 
-    # maximum numbers of reviews
-    MAX_REVIEWS         = 3
+    MAX_N_COLUMNS       = cfg.max_columns_number
+    MAX_LENGTH_NOTES    = cfg.max_notes_length
+    N_ROWS_SAMPLE       = cfg.rows_for_sampling
 
-    # in some cases tables have many columns
-    # to generate questions, we may use only
-    # a subset, plus the join column 
-    MAX_N_COLUMNS       = 20
+    CLEAN_HEADERS       = cfg.string_cleaning['headers']
+    CLEAN_ELEMENTS      = cfg.string_cleaning['elements']
 
-    # to limit the context passed to the LLM-agent 
-    # from the metadata notes
-    MAX_LENGTH_NOTES    = 1000
+    BUDGET              = cfg.budget
     
-    # number of sampled rows passed to the LLM into the question context
-    N_ROWS_SAMPLE       = 5
+    MAX_REVIEWS         = cfg.max_reviews
+    MIN_SCORE           = cfg.min_score
 
-    # minimum score from the evaluation stage
-    MIN_SCORE           = 8
+    DO_SINGLE_TABLE     = 'single' in cfg.types
+    DO_JOIN             = 'join' in cfg.types
+    DO_UNION            = 'union' in cfg.types
 
-    # if we apply string cleaning on
-    # table headers and elemnents 
-    # (and which type of cleaning) or not
-    SANITIZE_HEADERS    = "complex"
-    SANITIZE_ELEMENTS   = "base"
+    sql_gen_model       = cfg.models["sql_gen"]
+    sql_rev_model       = cfg.models["sql_rev"]
+    nl_gen_model        = cfg.models["nl_gen"]
+    nl_rev_model        = cfg.models["nl_rev"]
 
-    DO_SINGLE_TABLE     = True
-    DO_JOIN             = True
-    DO_UNION            = True
-
-    # the model name (here we will use LiteLLM and Ollama models)
-    sql_gen_model       = "qwen2.5-coder-32b"
-    sql_rev_model       = "qwen2.5-coder-32b"
-    nl_gen_model        = "qwen2.5-32b"
-    nl_rev_model        = "qwen2.5-32b"
+    levels              = cfg.levels
 
     # set up the logging
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    logger = logging.getLogger("agent_logger_generation")
-    logger.setLevel(logging.INFO)
-    handler = logging.FileHandler(log_path)
-    log_formatter = logging.Formatter("%(asctime)s,[%(levelname)s],%(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    handler.setFormatter(log_formatter)
-    logger.addHandler(handler)
-    stdout_hanlder = logging.StreamHandler()
-    logger.addHandler(stdout_hanlder)
+    logger = setup_logger(log_path, "generation_logger", on_file=True, on_stdout=True)
     
-    # keep only last three log files
-    old_dirs =  sorted([d for d in os.listdir(os.path.dirname(log_path)) if d.startswith('4_generation')], reverse=True)
-    logs_to_delete = old_dirs[3:] if len(old_dirs) > 3 else []
-    for log_to_delete in logs_to_delete:
-        os.remove(os.path.join(os.path.dirname(log_path), log_to_delete))
-
-    logger.info("Loading BIRD mini-dev")
-    with open(bird_dev_path) as file:
-        bird_dev = json.load(file)
-    
-    # take the three subsets of questions from BIRD, grouped by their difficulty
-    # (not used now)
-    bird_questions = {
-        d: list(filter(lambda q: q['difficulty'] == d, bird_dev)) 
-        for d in ['simple', 'moderate', 'challenging']
-    }
-
     # load the table IDs 
     table_ids = list(sorted(os.listdir(tables_path), reverse=True))
     
@@ -173,6 +137,8 @@ async def amain(tag: str = "CAN",
             description="A tool that checks if the proposed SQL query works."
         )
     ]
+
+    sys.exit()
 
     start_t = time.time()
 
@@ -254,7 +220,7 @@ async def amain(tag: str = "CAN",
 
     n_id = 0
     start = 0
-    rows = joins.rows()[start:UP_TO_ROW if isinstance(UP_TO_ROW, int) else joins.shape[0]]
+    rows = joins.rows()[start:BUDGET if isinstance(BUDGET, int) else joins.shape[0]]
     for i, row in enumerate(rows, start=start):
         start_step_t = time.time()
         try:
@@ -270,12 +236,12 @@ async def amain(tag: str = "CAN",
             (
                 r_rsc_id, r_rsc_name, r_pkg_name, r_pkg_notes, r_pkg_keywords, r_pkg_tags, r_org_name, r_org_title, r_org_desc, r_jur,
                 r_col_name, r_df, r_df_str, r_sql_schema, r_columns_dtypes
-            ) = get_all_data(r_rsc_id, tables_path, metadata, original_r_col_name, MAX_LENGTH_NOTES, MAX_N_COLUMNS, N_ROWS_SAMPLE, 'R', SANITIZE_HEADERS, SANITIZE_ELEMENTS)
+            ) = get_all_data(r_rsc_id, tables_path, metadata, original_r_col_name, MAX_LENGTH_NOTES, MAX_N_COLUMNS, N_ROWS_SAMPLE, 'R', CLEAN_HEADERS, CLEAN_ELEMENTS)
 
             (
                 s_rsc_id, s_rsc_name, s_pkg_name, s_pkg_notes, s_pkg_keywords, s_pkg_tags, s_org_name, s_org_title, s_org_desc, s_jur,
                 s_col_name, s_df, s_df_str, s_sql_schema, s_columns_dtypes
-            ) = get_all_data(s_rsc_id, tables_path, metadata, original_s_col_name, MAX_LENGTH_NOTES, MAX_N_COLUMNS, N_ROWS_SAMPLE, 'S', SANITIZE_HEADERS, SANITIZE_ELEMENTS)            
+            ) = get_all_data(s_rsc_id, tables_path, metadata, original_s_col_name, MAX_LENGTH_NOTES, MAX_N_COLUMNS, N_ROWS_SAMPLE, 'S', CLEAN_HEADERS, CLEAN_ELEMENTS)            
 
         except Exception as e:
             logger.error(f"Error in query preparation: >>>{e}<<< ")
@@ -302,7 +268,7 @@ async def amain(tag: str = "CAN",
                 prev_sql.clear() 
                 prev_nl.clear()
 
-                for nq, (difficulty, bird_q) in enumerate(bird_questions.items()):            
+                for nq, difficulty in enumerate(levels):            
                     logger.info(f"{i=}, step {nq} - SINGLE TABLE")
                     
                     # reset to default values
@@ -481,11 +447,9 @@ async def amain(tag: str = "CAN",
             # get pairs of (colname, dtype) in common
             matches = list(zip(*(set(r_columns_dtypes) & set(s_columns_dtypes))))
 
-            for nq, (difficulty, bird_q) in enumerate(bird_questions.items()):            
+            for nq, difficulty in enumerate(levels):            
                 logger.info(f"{i=}, step {nq} - MULTI TABLE - {task.upper()}")
 
-                sql_examples, nl_examples = zip(*[(q['SQL'], q['question']) for q in random.sample(bird_q, k=3)])
-                
                 # reset to default values
                 sql = nl = "ERROR"
                 sql_time = nl_time = -1

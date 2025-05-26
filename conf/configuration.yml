@@ -1,0 +1,151 @@
+# General Configuration
+general:
+  # Cleaning option for string values.
+  # If specified in one specific step configuration,
+  # the values below will be discharged
+  # Possible modes:
+  #   - null:   conversion from any to string
+  #   - base:   conversion from any to string;
+  #             lowercasing
+  #   - complex:conversion from any to string;
+  #             lowercasing;
+  #             inflection correction;
+  #             UNICODE NFKD normalizations;
+  #             specific characters replacement
+  string_cleaning:
+    headers: complex
+    elements: null
+  
+  # max length of notes used when passing 
+  # context to LLMs
+  max_notes_length: 1000
+
+  # max number of columns passed as context 
+  # to LLMs
+  max_columns_number: 20
+
+  # max number of rows passed as context
+  # to LLMs
+  rows_for_sampling: 5
+
+  # num of processes used for multi-processing
+  num_workers: 10
+
+
+
+# Configuration for the Open Data Crawling step
+crawling:
+  # how many packages each worker has to process
+  packages_per_worker: 10
+
+  accepted_formats:
+    - CSV
+
+  # whenever a proxy is needed, add its configuration
+  # here (urllib3.ProxyManager)
+  proxy_configuration:
+
+
+
+# Configuration for the BLEND Index Creation step
+index_creation:
+  # number of tables to insert into database in batch
+  batch_size: 100
+
+
+
+# Configuration for the Candidate Pairs Search step
+candidates_search:
+  # number of tables for which doing the search
+  budget: 100
+
+  # number of results to retrieve during search
+  k: 50
+
+  # minimum height 
+  min_height: 30
+  
+  # minimum number of distinct values a column must have
+  min_num_distinct_values_per_column: 10
+
+  # maximum number of null values (as ratio) allowed
+  # in one column (filter columns with a lot of nulls)
+  max_null_ratio_per_column: 0.2
+
+  # wether or not keep pairs of tables with the
+  # same schema (to be refined)
+  accept_same_schema: true
+
+  # columns whose name include any of these tokens 
+  # will be discharged
+  bad_header_tokens: 
+    - id
+    - date
+    - unnamed
+
+  # minimum values for jaccard and overlap metrics
+  # for columns pairs
+  min_jaccard: 0.2
+  min_overlap: 0.2
+
+  write_batch_size: 20
+
+
+
+# Configuration for the Evaluation step
+evaluation:
+  # evaluation will be between these values, as integer 
+  min_score: 0
+  max_score: 10
+  
+  # how many participants will be used in 
+  # the debate mechanism
+  num_solvers: 3
+  
+  # maximum number of rounds for each evaluation
+  max_rounds: 2
+
+  # number of participants a solver talks with
+  neighbors_per_solver: 2
+
+  # how many records from previous step
+  # are evaluated
+  budget: 10000
+
+  # how many records to process before 
+  # saving intermediate results
+  write_batch_size: 10
+
+  solver_model: qwen2.5-7b
+
+
+# configuration for the Generation step
+generation:
+  models:
+    sql_gen: qwen2.5-coder-32b
+    sql_rev: qwen2.5-coder-32b
+    nl_gen: qwen2.5-32b
+    nl_rev: qwen2.5-32b
+  
+  # difficulty levels for SQL generation
+  levels:
+    - simple
+    - moderate
+    - challenging
+
+  # query classes 
+  types:
+    - single
+    - join
+    - union
+
+  # maximum number of review cycles allowed
+  max_reviews: 3
+
+  # only records from evaluation step 
+  # with score>=min_score are accepted
+  min_score: 8
+
+  # how many record from previous step
+  # are used as seed for generation
+  budget: 10000

@@ -1,12 +1,14 @@
 import os
 import sys
 import time
+import yaml
 import queue
 import shutil
 import logging
 import urllib3
 import zipfile
 import warnings
+import argparse
 import multiprocessing as mp
 
 from io import BytesIO
@@ -218,7 +220,7 @@ def download_tables(url_basepoint: str,
                     log_directory: str,
                     accepted_formats: list = ["CSV"],
                     logger: logging.Logger|None = None,                    
-                    n_workers: int = 10, 
+                    num_workers: int = 10, 
                     packages_per_worker: int = 1_000,
                     max_package_size: int = 2**29,
                     from_n_package:int | None = None,
@@ -304,10 +306,10 @@ def download_tables(url_basepoint: str,
         if logger: logger.info(f'Submitting download tasks for {n_total_packages=}, from {from_n_package} to {to_n_package}...')
 
         # start the process pool
-        with ProcessPoolExecutor(max_workers=min(n_workers, MAX_PROC_NUM), mp_context=mp.get_context('spawn')) as executor:
+        with ProcessPoolExecutor(max_workers=min(num_workers, MAX_PROC_NUM), mp_context=mp.get_context('spawn')) as executor:
             futures = [
                 executor.submit(
-                    process_task, package_search_url, download_directory, temporary_directory, log_directory, i, n_workers, packages_per_worker, accepted_formats, max_package_size, proxy_kwargs, keep_logging)
+                    process_task, package_search_url, download_directory, temporary_directory, log_directory, i, num_workers, packages_per_worker, accepted_formats, max_package_size, proxy_kwargs, keep_logging)
                     for i in range(from_n_package, to_n_package, packages_per_worker)
                 ]
             if logger: logger.debug(f'Total work steps: {len(range(from_n_package, to_n_package, packages_per_worker))}')
@@ -351,11 +353,16 @@ def main(country_tag: str = 'CAN',
          to_: int|str = 'END',
          country_ckan_base_url: str = 'https://open.canada.ca/data/api/action'):
     
+    conf_path       = pjoin(os.path.dirname(__file__), '..', 'conf', 'configuration.yml')
     data_path       = pjoin(os.path.dirname(__file__), '..', 'data')
     tmp_dir         = pjoin(data_path, 'tmp')
     download_dir    = pjoin(data_path, 'datasets', country_tag)
     log_dir         = pjoin(data_path, 'log', country_tag, 'crawling', time.strftime('%y%m%d_%H_%M_%S'))
     
+    with open(conf_path, 'r') as file:
+        raw = file.read()
+        cfg = argparse.Namespace(**{**yaml.safe_load(raw)['general'], **yaml.safe_load(raw)['generation']})
+
     # clean and create directories
     # currently is not used, TODO check if is ok
     # to store large files on disk and do then IO 
@@ -370,11 +377,12 @@ def main(country_tag: str = 'CAN',
         download_dir, 
         tmp_dir, 
         log_dir, 
-        ['CSV'], 
-        n_workers=10,
-        packages_per_worker=10,
+        cfg.accepted_formats, 
+        num_workers=cfg.num_workers,
+        packages_per_worker=cfg.packages_per_worker,
         from_n_package=from_,
         to_n_package=to_,
+        proxy_kwargs=cfg.proxy_configuration,
         keep_logging=True
     )
 

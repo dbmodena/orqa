@@ -1,10 +1,13 @@
 import os
 import csv
 import sys
+import yaml
 import time
 import asyncio
-import warnings
 import logging
+import argparse
+import warnings
+
 from os.path import join as pjoin
 
 import jsonlines
@@ -12,7 +15,7 @@ import polars as pl
 
 from autogen_core import ClosureAgent, ClosureContext, DefaultTopicId, MessageContext, SingleThreadedAgentRuntime, TypeSubscription
 
-from orqa.utils import get_all_data
+from orqa.utils import get_all_data, setup_logger
 from orqa.agents.debate import ScoreAggregator, Evaluator
 from orqa.agents.utils import Answer, Question, EVALUATION_TOPIC_TYPE, get_model_client
 
@@ -23,6 +26,7 @@ async def amain(tag: str = "CAN",
                 from_: int = 0, 
                 to_: int = 'END'):
 
+    conf_path       = pjoin(os.path.dirname(__file__), '..', 'conf', 'configuration.yml')
     data_path       = pjoin(os.path.dirname(__file__), '..', 'data')
     tables_path     = pjoin(data_path, 'datasets', tag, 'tables', f'from{from_}_to{to_}')
     metadata_path   = pjoin(data_path, 'datasets', tag, 'metadata', f'from{from_}_to{to_}.jsonl')
@@ -30,59 +34,31 @@ async def amain(tag: str = "CAN",
     candidates_path = pjoin(data_path, 'outputs', tag, f'from{from_}_to{to_}', 'candidates.csv')
     evaluated_path  = pjoin(data_path, 'outputs', tag, f'from{from_}_to{to_}', 'evaluated.csv')
 
-    # how many rows are evaluated (if 'END', all)
-    UP_TO_ROW           = 10
+    with open(conf_path, 'r') as file:
+        raw = file.read()
+        cfg = argparse.Namespace(**{**yaml.safe_load(raw)['general'], **yaml.safe_load(raw)['generation']})
 
-    WRITE_BATCH_SIZE    = 1
+    MAX_N_COLUMNS       = cfg.max_columns_number
+    MAX_LENGTH_NOTES    = cfg.max_notes_length
+    N_ROWS_SAMPLE       = cfg.rows_for_sampling
 
-    # how many columns are kept for the evaluation
-    MAX_N_COLUMNS       = 20
+    CLEAN_HEADERS       = cfg.string_cleaning['headers']
+    CLEAN_ELEMENTS      = cfg.string_cleaning['elements']
 
-    # to limit the context passed to the LLM-agent (the "notes" field may be very long)
-    MAX_LENGTH_NOTES    = 500
-    
-    # number of sampled rows passed to the LLM into the question context
-    N_ROWS_SAMPLE       = 5
+    BUDGET              = cfg.budget
+    WRITE_BATCH_SIZE    = cfg.write_batch_size
 
-    # string cleaning strategies
-    CLEAN_HEADERS       = "complex"
-    CLEAN_ELEMENTS      = None
+    MIN_SCORE           = cfg.min_score
+    MAX_SCORE           = cfg.max_score
 
-    # score value range
-    MIN_SCORE           = 0
-    MAX_SCORE           = 10
+    NUM_SOLVERS         = cfg.num_solvers
+    NUM_NEIGHS          = cfg.neighbors_per_solver
+    MAX_ROUNDS          = cfg.max_rounds
 
-    # how many solvers take part
-    # to the debate
-    NUM_SOLVERS         = 1
-    
-    # how many neighboors each 
-    # solver has
-    NUM_NEIGHS          = 1
-
-    MAX_ROUNDS          = 1
-
-    # the model name (here we will use LiteLLM and Ollama)
-    model               = "qwen2.5-7b"
+    model               = cfg.solver_model
 
     # set up the logging
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    logger = logging.getLogger(f'evaluationLogger')
-    logger.setLevel(logging.INFO)
-    handler = logging.FileHandler(log_path)
-    log_formatter = logging.Formatter("%(asctime)s,[%(process)d],[%(levelname)s],%(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    handler.setFormatter(log_formatter)
-    logger.addHandler(handler)
-
-    # log also to stdout
-    stdout_hanlder = logging.StreamHandler()
-    logger.addHandler(stdout_hanlder)
-
-    # keep only last three log files relative to this part
-    old_logs =  sorted([f for f in os.listdir(os.path.dirname(log_path)) if f.startswith('3_evaluation')], reverse=True)
-    logs_to_delete = old_logs[3:] if len(old_logs) > 3 else []
-    for log_to_del in logs_to_delete:
-        os.remove(os.path.join(os.path.dirname(log_path), log_to_del))
+    logger = setup_logger(log_path, "evaluation_logger", on_file=True, on_stdout=True)
     
     start_t = time.time()
 
@@ -161,7 +137,7 @@ async def amain(tag: str = "CAN",
 
     logger.info("Started Agent Candidates Evaluation")
     
-    for i, row in enumerate(candidates.rows()[:UP_TO_ROW if isinstance(UP_TO_ROW, int) else candidates.shape[0]]):
+    for i, row in enumerate(candidates.rows()[:BUDGET if isinstance(BUDGET, int) else candidates.shape[0]]):
         if i % WRITE_BATCH_SIZE == 0 and i > 0:
             logger.info(f'Up to {i}({round(i * 100 / len(candidates), 3)}%);time:{round(time.time() - start_batch_t, 3)}s')
             with open(evaluated_path, "a") as file:

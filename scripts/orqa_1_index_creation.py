@@ -1,8 +1,10 @@
 import os
 import sys
 import time
+import yaml
 import pickle
 import logging
+import argparse
 
 from itertools import chain
 from os.path import join as pjoin
@@ -13,11 +15,11 @@ import duckdb
 import polars as pl
 import polars.selectors as cs
 
-from orqa.utils import sanitize_string, is_num
+from orqa.utils import sanitize_string, is_num, setup_logger
 
 
 def get_table_values(table_id):
-    global clean_mode, tables_path, values_bd
+    global clean_values, tables_path, values_bd
     
     try:
         df = pl.read_parquet(pjoin(tables_path, table_id))
@@ -41,7 +43,7 @@ def get_table_values(table_id):
             filter(
                 lambda v: not is_num(v), 
                 map(
-                    lambda s: sanitize_string(s, clean_mode), 
+                    lambda s: sanitize_string(s, clean_values), 
                     chain(*(
                         df.select(col).drop_nans().drop_nulls().unique().get_column(col).to_list() 
                         for col in df.select(cs.exclude(cs.numeric(), cs.boolean())).columns
@@ -55,7 +57,7 @@ def get_table_values(table_id):
 
 
 def collect_table_records(data):
-    global clean_mode, tables_path, values_bd
+    global clean_values, tables_path, values_bd
     table_idx, table_id = data
     df = pl.read_parquet(pjoin(tables_path, table_id))
 
@@ -74,20 +76,20 @@ def collect_table_records(data):
         except: continue
 
     return [
-        [table_idx, col_idx, row_idx, values_bd[sanitize_string(cell, clean_mode)]]
+        [table_idx, col_idx, row_idx, values_bd[sanitize_string(cell, clean_values)]]
         for col_idx, col in enumerate(df.columns)
         if not df.get_column(col).null_count() == df.height \
             and not df.get_column(col).dtype.is_numeric()
         # all columns are considered here to keep the right index
         # (TODO optimize and more consistent with other df handling parts)
         for row_idx, cell in enumerate(df.select(col).get_column(col).to_list())
-        if sanitize_string(cell, clean_mode) in values_bd
+        if sanitize_string(cell, clean_values) in values_bd
     ]
 
 
-def initializer(_clean_mode, _tables_path, _values):
-    global clean_mode, tables_path, values_bd
-    clean_mode = _clean_mode
+def initializer(_clean_values, _tables_path, _values):
+    global clean_values, tables_path, values_bd
+    clean_values = _clean_values
     tables_path = _tables_path
     values_bd = _values
 
@@ -95,38 +97,26 @@ def initializer(_clean_mode, _tables_path, _values):
 def main(tag: str = 'CAN',
          from_: int = 0,
          to_: int|str = 'END'):
+    
+    conf_path       = pjoin(os.path.dirname(__file__), '..', 'conf', 'configuration.yml')
     data_path       = pjoin(os.path.dirname(__file__), '..', 'data')
     tables_path     = pjoin(data_path, 'datasets', tag, 'tables', f'from{from_}_to{to_}' )
     db_path         = pjoin(data_path, 'datasets', tag, 'database', f'from{from_}_to{to_}', 'blend.db')
     values_path     = pjoin(data_path, 'datasets', tag, 'database', f'from{from_}_to{to_}', 'values_bidict.pickle')
     log_path        = pjoin(data_path, 'log', tag, f'1_blend_indexing_{time.strftime("%y%m%d_%H_%M_%S")}.log')
 
-    # num of processes spawned
-    num_workers     = 10
-
-    # string cleaning mode
-    CLEAN_MODE      = "base"
     
-    # update size for both values bidict
-    # and BLEND index creation
-    step            = 10
+    with open(conf_path, 'r') as file:
+        raw = file.read()
+        cfg = argparse.Namespace(**{**yaml.safe_load(raw)['general'], **yaml.safe_load(raw)['generation']})
+
+    CLEAN_ELEMENTS      = cfg.string_cleaning['elements']
+    BATCH_SIZE          = cfg.WRITE_BATCH_SIZE
+    num_workers         = cfg.num_workers
 
     # set up logging
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-
-    logger = logging.getLogger(f'indexerLogger')
-    logger.setLevel(logging.DEBUG)
-    handler = logging.FileHandler(log_path)
-    log_formatter = logging.Formatter("%(asctime)s,[%(process)d],[%(levelname)s],%(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    handler.setFormatter(log_formatter)
-    logger.addHandler(handler)
-
-    # keep only last three log files
-    old_logs =  sorted([f for f in os.listdir(os.path.dirname(log_path)) if f.startswith('1_blend')], reverse=True)
-    log_to_delete = old_logs[3:] if len(old_logs) > 3 else []
-    for log_to_del in log_to_delete:        
-        os.remove(pjoin(os.path.dirname(log_path), log_to_del))
-
+    logger = setup_logger(log_path, "index_creation_logger", on_file=True, on_stdout=False)
+    
     # create the directory for the blend database
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
@@ -162,9 +152,9 @@ def main(tag: str = 'CAN',
     if not os.path.exists(values_path):
         logger.info('Create values dictionary')
 
-        with ProcessPoolExecutor(num_workers, initializer=initializer, initargs=(CLEAN_MODE, tables_path, values_bidict)) as executor:
-            for ntab in range(0, len(table_ids) + step, step):
-                results = executor.map(get_table_values, table_ids[ntab:ntab + step])
+        with ProcessPoolExecutor(num_workers, initializer=initializer, initargs=(CLEAN_ELEMENTS, tables_path, values_bidict)) as executor:
+            for ntab in range(0, len(table_ids) + BATCH_SIZE, BATCH_SIZE):
+                results = executor.map(get_table_values, table_ids[ntab:ntab + BATCH_SIZE])
                 if ntab > 0:
                     logger.debug(f"Obtained values up to table {ntab}/{len(table_ids)} ({round(ntab * 100 / len(table_ids), 3)}%)")
                 
@@ -188,9 +178,9 @@ def main(tag: str = 'CAN',
     logger.info(f'{len(values_bidict)=}')
 
     logger.info('Start insert values into duckdb')
-    with ProcessPoolExecutor(num_workers, initializer=initializer, initargs=(CLEAN_MODE, tables_path, values_bidict)) as executor:
-        for ntab in range(0, len(table_ids) + step, step):        
-            results = executor.map(collect_table_records, enumerate(table_ids[ntab:ntab + step], start=ntab))
+    with ProcessPoolExecutor(num_workers, initializer=initializer, initargs=(CLEAN_ELEMENTS, tables_path, values_bidict)) as executor:
+        for ntab in range(0, len(table_ids) + BATCH_SIZE, BATCH_SIZE):        
+            results = executor.map(collect_table_records, enumerate(table_ids[ntab:ntab + BATCH_SIZE], start=ntab))
             records = []
             for table in results:
                 records += table
@@ -201,7 +191,7 @@ def main(tag: str = 'CAN',
             con.commit()
             con.close()
                 
-            logger.debug(f"Inserting batch tables {ntab + step}/{len(table_ids)} ({round(ntab * 100 / len(table_ids), 3)}%), inserted records: {rec_df.shape[0]}")
+            logger.debug(f"Inserting batch tables {ntab + BATCH_SIZE}/{len(table_ids)} ({round(ntab * 100 / len(table_ids), 3)}%), inserted records: {rec_df.shape[0]}")
 
     con = duckdb.connect(db_path)
     
