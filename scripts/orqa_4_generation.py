@@ -29,6 +29,161 @@ from orqa.utils import get_all_data, setup_logger
 warnings.filterwarnings("ignore")
 
 
+SQL_GEN_SYSTEM_PROMPT = """
+# SQL GENERATOR OVERVIEW
+You are a SQL coder assistant. 
+Your task is to generate SQL queries of different difficult levels on Open Data tables.
+
+### Specifications
+- Use the given tool to validate your SQL query: your response must be only a valid function call.
+- You are using DuckDB: if necessary, put column names inside double-quotes, like "column_name". 
+
+### Difficulty Levels
+A 'simple' query involves just basic operations, like simple WHERE clauses. 
+A 'moderate' query could use also casting, string replacement, grouping functions and other forms of aggregations.
+A 'challenging' query may require window functions, subqueries and other complex operations. 
+
+### Casting and Regex
+Do not cast FLOAT to REAL. 
+If a VARCHAR attribute is similar to a datetime, try to cast it to DATE or DATETIME. 
+When using regex operations, use proper options. 
+"""
+
+TABLE_SHORT_DESCR = """
+### TABLE
+Table {table_name}.
+Schema: 
+{sql_schema}
+Example rows:
+{df_str}
+"""
+
+TABLE_FULL_DESCR = """
+### TABLE
+Table '{rsc_name}' from the package '{pkg_name}'. 
+Organization name: '{org_name}', 
+Organization title: '{org_title}' 
+Organization {org_desc} (jurisdiction '{jur}').
+Table description: '{notes}'.
+Keywords and tags about it: {keywords}, {tags}.
+Example rows:{df_str}
+"""
+
+
+SQL_SINGLE_PROMPT = """
+### SQL BASE TASK
+Generate a {difficulty} SQL query based on the given table.
+The new query must be different from previous queries: {prev_sql}
+"""
+
+SQL_JOIN_PROMPT = """
+### SQL JOIN TASK
+Generate a {difficulty} JOIN SQL query based on the given tables.
+The query must include a JOIN on each of this column pairs {join_columns_list}. 
+The new query must be different from previous queries: {prev_sql}. 
+"""
+
+SQL_UNION_PROMPT = """
+### SQL UNION TASK
+Generate a {difficulty} UNION SQL query based on the given tables.. 
+The query must be on these attributes that the tables have in common: {union_columns}. 
+The new query must be different from previous queries: {prev_sql}. 
+"""
+
+
+NL_GEN_SYSTEM_PROMPT = """
+# NL GENERATOR OVERVIEW
+Assume the role of a typical user exploring Open Data portals. 
+Your task is to generate natural language questions that could be answered with the results of a given SQL query.
+
+### Specifications
+- The questions you create must be fluent and human-like: avoid SQL-like words, such as null or select.
+- Focus on JOIN and UNION operations between tables, where specified.
+- Imagine you're seeing the final results for the first time: you have no knowledge of table structures or column names. 
+  Avoid any mention of terms like records, tables, columns, datasets, CSV, resources, or packages.
+- If specific values are used inside the SQL query, try to infer their meaning from the context:
+  for example, 'ref' may mean 'refused' in a column about orders status.
+- Your response must be only the question, nothing else
+"""
+
+
+NL_GEN_TASK_PROMPT = """
+### NL GENERATION TASK
+Generate a natural language question which represents the SQL query {sql} on the given table(s)."
+The new question must be different from previous: {prev_nl}. 
+Pay attention to all the clauses used into the query. 
+You must introduce into the question remainders to keywords, organization and other metadata.
+"""
+
+
+REV_SYSTEM_PROMPT = """
+# REVIEWER OVERVIEW
+You are a query and question reviewer.
+You focus on the correctness of proposed SQL queries or Natural Language Questions (mapped on SQL queries)
+in a multi-step review cycle.
+
+### Specifications
+- For the SQL, focus on the query syntax. Analyze errors raised from query execution and suggest changes
+  Consider that is used DuckDB syntax.
+- For the Natural Language, focus on the correspondence between query and question.
+- Be sure that previous feedback has been correctly addressed, if any.
+"""
+
+
+REV_SQL_TASK_PROMPT = """
+### SQL REVIEW TASK
+The problem statement is:
+{message.sql_task}
+The proposed SQL query is:
+{message.sql_query}
+The execution of this query is:
+{message.execution_result}
+Previous feedback:
+{previous_feedback}
+
+### Checkpoints
+Revise the query if the execution was not successful. Check that:
+- the query does not involve required columns (if any).
+- the query is identical to any previously generated query.
+
+### Output format
+```json
+{
+    "correctness": "<Your comments>",
+    "approval": "<APPROVE or REVISE>",
+    "suggested_changes": "<Your comments>"
+}```
+"""
+
+
+REV_NL_TASK_PROMPT = """
+### NL REVIEW TASK
+The problem statement is:
+{message.nl_task}
+The proposed Natural Language Question is:
+{message.nl_question}
+Previous feedback:
+{previous_feedback}
+
+### Checkpoints
+- the question is uncorrelated to the current task.
+- the question is too generic (like 'What is the average value?') or simple (like 'Where is Canada?').
+- columns required by the user are not correctly used (if any).
+- columns and tables names are explicitly present into the question.
+- the question use too specific terms, like 'tables', 'datasets', 'packages', 'data', 'records'.
+
+### Output format
+```json
+{
+    "correctness": "<Your comments>",
+    "approval": "<APPROVE or REVISE>",
+    "suggested_changes": "<Your comments>"
+}```
+"""
+
+
+
+
 async def verify_sql(sql_query: Annotated[str, "A SQL query which represents the natural language question."]):
     error = results  = None
     
@@ -44,7 +199,12 @@ async def verify_sql(sql_query: Annotated[str, "A SQL query which represents the
         results = str(results)
     except Exception as e:
         error = str(e)
-        logging.getLogger("agent_logger").debug(f'{sql_query=}\n{error=}')
+        logging.getLogger("generation_logger").debug(f'{sql_query=}\n{error=}')
+    finally:
+        # reset global variables to prevent errors
+        # in future operations (TO CHECK)
+        del globals()['R']
+        del globals()['S']
     
     if error:
         return {
@@ -119,7 +279,7 @@ async def amain(tag: str = "CAN",
     with jsonlines.open(metadata_path) as fr:
         metadata = {rsc['id']: md for md in fr.iter() for rsc in md['resources'] if rsc['format'] == 'CSV'}
 
-    logger.info("Loading evaluated JOIN pairs")
+    logger.info("Loading evaluated pairs")
     joins = (
         pl
         .read_csv(evaluated_path)
@@ -151,22 +311,22 @@ async def amain(tag: str = "CAN",
     
     await SQLQueryGeneratorAgent.register(
         runtime, "sql_generator_agent",
-        lambda: SQLQueryGeneratorAgent(get_model_client(sql_gen_model), tools, MAX_REVIEWS, logger)
+        lambda: SQLQueryGeneratorAgent(get_model_client(sql_gen_model), tools, SQL_GEN_SYSTEM_PROMPT, MAX_REVIEWS, logger)
     )
 
     await NLQuestionGeneratorAgent.register(
         runtime, "nl_generator_agent",
-        lambda: NLQuestionGeneratorAgent(get_model_client(nl_gen_model), MAX_REVIEWS, logger)
+        lambda: NLQuestionGeneratorAgent(get_model_client(nl_gen_model), NL_GEN_SYSTEM_PROMPT, MAX_REVIEWS, logger)
     )
 
     await ReviewerAgent.register(
         runtime, "sql_reviewer_agent",
-        lambda: ReviewerAgent(get_model_client(sql_rev_model), MAX_REVIEWS, logger)
+        lambda: ReviewerAgent(get_model_client(sql_rev_model), REV_SYSTEM_PROMPT, REV_SQL_TASK_PROMPT, MAX_REVIEWS, logger)
     )
     
     await ReviewerAgent.register(
         runtime, "nl_reviewer_agent",
-        lambda: ReviewerAgent(get_model_client(nl_rev_model), MAX_REVIEWS, logger)
+        lambda: ReviewerAgent(get_model_client(nl_rev_model), REV_SYSTEM_PROMPT, REV_NL_TASK_PROMPT, MAX_REVIEWS, logger)
     )
 
     # add subscriptions for pub/sub communications
@@ -250,6 +410,8 @@ async def amain(tag: str = "CAN",
         #############################################
         ###### Generate Single-Table queries ########
         #############################################
+        
+
         if DO_SINGLE_TABLE:
             for rsc_id, pkg_id, pkg_name, rsc_name, df, df_str, sql_schema, notes, keywords, tags, org_name, org_title, org_desc, jur in [
                 (r_rsc_id, r_pkg_id, r_pkg_name, r_rsc_name, r_df, r_df_str, r_sql_schema, r_pkg_notes, r_pkg_keywords, r_pkg_tags, r_org_name, r_org_title, r_org_desc, r_jur),
@@ -285,15 +447,9 @@ async def amain(tag: str = "CAN",
                         runtime.start()
                         sql_start_t = time.time()
                         await runtime.publish_message(                    
-                            SQLGenerationTask(sql_task=(
-                                "Given the following information:\n"                        
-                                "Use 'R' to indicate the given table. "
-                                f'Its schema is: {sql_schema}\n'
-                                f"Example rows of the table:\n{df_str}"
-                                f"\n{'-' * 50}\n"
-                                f"Generate a {difficulty} SQL query based on the given table. "
-                                f"The new query must be different from previous queries: {prev_sql}. "                                
-                                )
+                            SQLGenerationTask(sql_task=
+                                TABLE_SHORT_DESCR.format('R', sql_schema, df_str) + \
+                                SQL_SINGLE_PROMPT.format(difficulty, prev_sql)
                             ),
                             topic_id=sql_generation_topic_id
                         )
@@ -319,19 +475,12 @@ async def amain(tag: str = "CAN",
                         nl_start_t = time.time()
                         await runtime.publish_message(
                             NLGenerationTask(
-                                nl_task=(                                                        
-                                    "Consider the following information:\n"
-                                    f"The table '{rsc_name}' belongs to the package '{pkg_name}'. "
-                                    f"This package is published by the organisaztion '{org_name}', titled as '{org_title}' that is about {org_desc}, under the jurisdiction '{jur}'. "
-                                    f"The table description is: '{notes}'.\n"
-                                    f"Keywords and tags about it are: {keywords}, {tags}.\n"
-                                    f"Example rows with schema:\n{df_str}"
-                                    f"\n{'-' * 50}\n"
-                                    f"Generate a natural language question which represents the SQL query {sql} on the given table."                                    
-                                    f"The new question must be different from previous: {prev_nl}. "
-                                    "Pay attention to all the clauses used into the query. "
-                                    "You must introduce into the question remainders to keywords, organization and other metadata."
-                                )
+                                nl_task=
+                                    TABLE_FULL_DESCR.format(rsc_name, pkg_name, 
+                                                            org_name, org_title, org_desc, jur,
+                                                            notes, keywords, tags, 
+                                                            df_str) + \
+                                    NL_GEN_TASK_PROMPT.format(sql, prev_nl)
                             ),
                             topic_id=nl_generation_topic_id
                         )
@@ -399,34 +548,6 @@ async def amain(tag: str = "CAN",
         ####### Generate Multi-Table queries #######
         ############################################
 
-        multi_table_sql_base_prompt = (
-            "Given the following information:\n"
-            "Use 'R' to indicate the first table. "
-            f'Its schema is: {r_sql_schema}\n'
-            f"Example rows of R table:\n{r_df_str}"
-            f"\n{'-' * 50}\n"
-            "Use 'S' to indicate the second table. "
-            f"Its schema is: {s_sql_schema}\n"
-            f"Example rows of S table: {s_df_str}"
-            f"\n{'-' * 50}\n" 
-        )
-
-        multi_table_nl_base_prompt = (
-            "Consider the following information:\n"
-            f"The table '{r_rsc_name}' belongs to the package '{r_pkg_name}'. "
-            f"This package is published by the organisaztion '{r_org_name}', titled as '{r_org_title}' that is about '{r_org_desc}', under the jurisdiction '{r_jur}'. "
-            f"The table description is: {r_pkg_notes}.\n"
-            f"Keywords and tags about it are: {r_pkg_keywords}, {r_pkg_tags}.\n"
-            f"Example rows with schema:\n{r_df_str}"
-            f"\n{'-' * 50}\n"
-            f"The table '{s_rsc_name}' belongs to the package '{s_pkg_name}'. "
-            f"This package is published by the organisaztion '{s_org_name}', titled as '{s_org_title}' that is about {s_org_desc}, under the jurisdiction '{s_jur}'. "
-            f"The table description is: {s_pkg_notes}.\n"
-            f"Keywords and tags about it are: {s_pkg_keywords}, {s_pkg_tags}.\n"
-            f"Example rows: {s_df_str}"
-            f"\n{'-' * 50}\n"
-        )
-
         for task in ["JOIN", "UNION"]:
             # do join when tables do not share the identical schema, and union
             # in the opposite case (for simplicity now)
@@ -459,27 +580,19 @@ async def amain(tag: str = "CAN",
                 sql_success = False
                 sql_review = nl_review = "NOREVIEW"
 
-                sql_join_prompt = (
-                    f"Generate a {difficulty} SQL query based on the given tables. Use only 'R' and 'S' to reference the tables. "
-                    f"The query must include a JOIN on the R column {r_col_name} and on the S column {s_col_name}. "
-                    f"The new query must be different from previous queries: {prev_sql}. "
-                )
-
-                sql_union_prompt = (
-                    f"Generate a {difficulty} UNION SQL query based on the given tables. Use only 'R' and 'S' to reference the tables. "
-                    f"The two tables have in common these attribtues: {matches[0] if matches else []}. "
-                    f"The new query must be different from previous queries: {prev_sql}. "
-                )
+                join_list = [(f'R.{a}', f'S.{b}') for a, b in  [[r_col_name, s_col_name]]]
+                common_union_attributes = matches[0] if matches else []
 
                 try:
                     logger.debug("Generating SQL query")
                     runtime.start()
                     sql_start_t = time.time()
                     await runtime.publish_message(                    
-                        SQLGenerationTask(sql_task=(
-                            multi_table_sql_base_prompt + \
-                            sql_join_prompt if task == "JOIN" else sql_union_prompt
-                            )
+                        SQLGenerationTask(sql_task=
+                            TABLE_SHORT_DESCR.format('R', r_sql_schema, r_df_str) + \
+                            TABLE_SHORT_DESCR.format('S', s_sql_schema, s_df_str) + \
+                            SQL_JOIN_PROMPT.format(difficulty, join_list, prev_sql) if task == "JOIN" else \
+                            SQL_UNION_PROMPT.format(difficulty, common_union_attributes, prev_sql)
                         ),
                         topic_id=sql_generation_topic_id
                     )
@@ -505,12 +618,16 @@ async def amain(tag: str = "CAN",
                     nl_start_t = time.time()
                     await runtime.publish_message(
                         NLGenerationTask(
-                            nl_task=(                            
-                                    multi_table_nl_base_prompt + 
-                                    f"Generate a natural language question which accurately represents the SQL query {sql} on the given tables and its aim."                    
-                                    "Pay attention to all the clauses used into the query. "
-                                    "You must introduce into the question remainders to keywords, organization and other metadata."
-                            )
+                            nl_task=
+                                TABLE_FULL_DESCR.format(r_rsc_name, r_pkg_name, 
+                                                        r_org_name, r_org_title, r_org_desc, r_jur,
+                                                        r_pkg_notes, r_pkg_keywords, r_pkg_tags, 
+                                                        r_df_str) + \
+                                TABLE_FULL_DESCR.format(s_rsc_name, s_pkg_name, 
+                                                        s_org_name, s_org_title, s_org_desc, s_jur,
+                                                        s_pkg_notes, s_pkg_keywords, s_pkg_tags, 
+                                                        s_df_str) + \
+                                NL_GEN_TASK_PROMPT.format(sql, prev_nl)
                         ),
                         topic_id=nl_generation_topic_id
                     )

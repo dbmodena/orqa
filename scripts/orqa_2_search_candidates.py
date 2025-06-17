@@ -5,7 +5,6 @@ import sys
 import yaml
 import time
 import pickle
-import logging
 import argparse
 
 from os.path import join as pjoin
@@ -15,7 +14,7 @@ import jsonlines
 import polars as pl
 from tqdm import tqdm
 
-from orqa.utils import sanitize_string, setup_logger
+from orqa.utils import clean_string, setup_logger
 
 
 def main(tag: str = "CAN", 
@@ -38,18 +37,18 @@ def main(tag: str = "CAN",
     CLEAN_HEADERS       = cfg.string_cleaning['headers']
     CLEAN_ELEMENTS      = cfg.string_cleaning['elements']
 
-    BUDGET          = cfg.budget
-    K               = cfg.k
+    BUDGET              = cfg.budget
+    K                   = cfg.k
 
-    MIN_NUM_VALUES  = cfg.min_num_distinct_values_per_column
-    MIN_HEIGHT      = cfg.min_height
-    MAX_NULL_RATIO  = cfg.max_null_ratio_per_column
+    MIN_NUM_VALUES      = cfg.min_num_distinct_values_per_column
+    MIN_HEIGHT          = cfg.min_height
+    MAX_NULL_RATIO      = cfg.max_null_ratio_per_column
 
-    MIN_JACCARD     = cfg.min_jaccard
-    MIN_OVERLAP     = cfg.min_overlap
+    MIN_JACCARD         = cfg.min_jaccard
+    MIN_OVERLAP         = cfg.min_overlap
     
-    ACCEPT_SAME_SCHEMA = cfg.accept_same_schema
-    bad_header_tokens = cfg.bad_header_tokens
+    ACCEPT_SAME_SCHEMA  = cfg.accept_same_schema
+    bad_header_tokens   = cfg.bad_header_tokens
 
     WRITE_BATCH_SIZE  = cfg.write_batch_size
 
@@ -119,7 +118,7 @@ def main(tag: str = "CAN",
         if not re.sub(file_pattern, '', table_ids[r_tab_id]) in metadata:
             continue
         r_pkg_id = metadata[re.sub(file_pattern, '', table_ids[r_tab_id])]['id']
-        r_column_names = set(map(lambda v: sanitize_string(v, CLEAN_HEADERS), r_df.columns))
+        r_column_names = set(map(lambda v: clean_string(v, CLEAN_HEADERS), r_df.columns))
         
         # for each col, if it is not supposed to be an ID
         # or a date column, query the index to find potentially 
@@ -140,7 +139,7 @@ def main(tag: str = "CAN",
             # extract the unique and cleaned values from the column 
             r_col = set(
                 filter(lambda v: v in values, 
-                    map(lambda v: sanitize_string(v, CLEAN_ELEMENTS), r_df.to_series(r_col_id))
+                    map(lambda v: clean_string(v, CLEAN_ELEMENTS), r_df.to_series(r_col_id))
                 )
             )
 
@@ -193,7 +192,7 @@ def main(tag: str = "CAN",
                     continue
                 already_used.add(candidate_id)
 
-                s_columns_names = set(map(lambda v: sanitize_string(v, CLEAN_HEADERS), 
+                s_columns_names = set(map(lambda v: clean_string(v, CLEAN_HEADERS), 
                                           pl.scan_parquet(f"{tables_path}/{table_ids[s_tab_id]}").collect_schema().names()))
                 if not ACCEPT_SAME_SCHEMA and r_column_names == s_columns_names:
                     continue 
@@ -209,7 +208,7 @@ def main(tag: str = "CAN",
             
                 s_col = set(
                     filter(lambda v: v in values, 
-                        map(lambda v: sanitize_string(v, CLEAN_ELEMENTS), 
+                        map(lambda v: clean_string(v, CLEAN_ELEMENTS), 
                             s_col_series
                             )
                         )

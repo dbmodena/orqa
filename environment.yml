@@ -15,6 +15,6 @@ dependencies:
     - litellm==1.63.11
     - jsonlines==4.0.0
     - inflection==0.5.1
-    - autogen_core==0.4.9
-    - autogen_agentchat==0.4.9
-    - autogen-ext==0.4.9
+    - autogen_core==0.5.7
+    - autogen_agentchat==0.5.7
+    - autogen-ext==0.5.7

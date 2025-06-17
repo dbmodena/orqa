@@ -31,6 +31,8 @@ general:
   # num of processes used for multi-processing
   num_workers: 10
 
+  # logging level (from logging module)
+  log_level: info
 
 
 # Configuration for the Open Data Crawling step
@@ -48,16 +50,23 @@ crawling:
 
 
 # Configuration for the BLEND Index Creation step
-index_creation:
+indexing:
   # number of tables to insert into database in batch
   batch_size: 100
+
+  # here a more fine-grained cleaning can be a better choice
+  string_cleaning:
+    headers: complex
+    elements: complex
+
+  log_level: debug
 
 
 
 # Configuration for the Candidate Pairs Search step
 candidates_search:
   # number of tables for which doing the search
-  budget: 100
+  budget: 10
 
   # number of results to retrieve during search
   k: 50

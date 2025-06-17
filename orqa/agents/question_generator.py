@@ -33,7 +33,7 @@ __all__ = ['SQLQueryGeneratorAgent', 'NLQuestionGeneratorAgent']
 
 @default_subscription
 class SQLQueryGeneratorAgent(RoutedAgent):
-    def __init__(self, model_client: ChatCompletionClient, tool_schema: List[Tool], max_num_revisions: int = 3, logger: Logger|None = None) -> None:
+    def __init__(self, model_client: ChatCompletionClient, tool_schema: List[Tool],  system_prompt: str, max_num_revisions: int = 3, logger: Logger|None = None) -> None:
         super().__init__("SQL query generator assistant")
         self._model_client      : ChatCompletionClient  = model_client
         self._tools             : List[Tool] = tool_schema
@@ -44,22 +44,7 @@ class SQLQueryGeneratorAgent(RoutedAgent):
         self._output_tokens     : int = 0
         self._session_memory    : List[SQLGenerationTask| SQLReviewTask | SQLReviewResult] = []
         self._num_sql_revisions : str = -1
-        self._system_messages   : List[LLMMessage] = [
-            SystemMessage(content=(
-                    "You are a SQL coder assistant. "
-                    "Your task is to generate SQL queries of different difficult levels. "
-                    "A 'simple' query involves just basic operations, like simple WHERE clauses. "
-                    "A 'moderate' query could use also casting, string replacement, grouping functions and other forms of aggregations."
-                    "A 'challenging' query may require window functions, subqueries and other complex operations. "
-                    "You are using DuckDB: if necessary, put column names inside double-quotes, like \"column_name\". "
-                    "Do not cast FLOAT to REAL. "
-                    "If a VARCHAR attribute is similar to a datetime, try to cast it to DATE or DATETIME. "
-                    "When using regex operations, use proper options. "
-                    "Use the given tool to validate your SQL query: your response must be only a valid function call."
-                )
-            )
-        ]
-
+        self._system_messages   : List[LLMMessage] = [SystemMessage(content=system_prompt)]
 
     @message_handler
     async def handle_sql_task(self, message: SQLGenerationTask | SQLReviewResult, ctx: MessageContext) -> None:    
@@ -216,7 +201,7 @@ class SQLQueryGeneratorAgent(RoutedAgent):
 
 @default_subscription
 class NLQuestionGeneratorAgent(RoutedAgent):
-    def __init__(self, model_client: ChatCompletionClient, max_num_revisions: int = 3, logger: Logger|None = None) -> None:
+    def __init__(self, model_client: ChatCompletionClient, system_prompt: str, max_num_revisions: int = 3, logger: Logger|None = None) -> None:
         super().__init__("Natural Language generator assistant")
         self._model_client      : ChatCompletionClient  = model_client
         self.max_num_revisions  : int = max_num_revisions
@@ -226,21 +211,7 @@ class NLQuestionGeneratorAgent(RoutedAgent):
         self._output_tokens     : int = 0
         self._session_memory    : List[NLGenerationTask | NLReviewTask | NLReviewResult] = []
         self._num_nl_revisions  : int = 0
-        self._system_messages   : List[LLMMessage] = [
-            SystemMessage(content=(
-                "Your task is to generate natural language questions, related to table from Open Data, from a given SQL query. "
-                "Pretend to be a user that is using Open Data search portals and needs to get answers that's inside the results of that query. "
-                "The questions you create must be fluent and human-like: do not use SQL-like words, such as null or select. "
-                "Keep focus on join and union operations between tables, if any. "
-                "Because a common Open Data user (as you, in this case) does not know anything in advance about the final result, "
-                "you can't use terms like records, data, datasets, tables, csv, packages and resources. "
-                "If values are used inside the SQL query, try to understand what they means based on the given context: "
-                "for example, 'ref' may mean 'refused' in a column about orders status. "
-                "You must not use explicit table or column names into the question. "
-                "Your response must be only the question, nothing else."
-                )
-            )
-        ]
+        self._system_messages   : List[LLMMessage] = [SystemMessage(content=system_prompt)]
     
     @message_handler
     async def handle_nl_task(self, message: NLGenerationTask | NLReviewResult, ctx: MessageContext) -> None:
