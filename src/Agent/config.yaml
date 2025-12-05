@@ -1,0 +1,42 @@
+# LLM Configuration File
+
+# Model to use (any LiteLLM-supported model)
+# Examples:
+#   - groq/llama-3.1-8b-instant
+#   - groq/llama-3.1-70b-versatile
+#   - openai/gpt-4
+#   - anthropic/claude-3-sonnet
+model: "groq/llama-3.1-8b-instant"
+
+# Temperature (0.0 = deterministic, 2.0 = very creative)
+temperature: 0.2
+
+# Maximum number of retry attempts on failure
+max_retries: 3
+
+# Delay in seconds between retry attempts
+retry_delay: 1.0
+
+# Enable JSON mode for structured outputs
+# (requires model support for response_format)
+enable_json_mode: true
+
+# Prompt identifier
+prompt: "column_inference"
+
+# Optional: API keys (if not set in environment variables)
+# Uncomment and fill in as needed:
+api_keys:
+   GROQ_API_KEY: "your api key :)"
+
+# Optional: Additional model parameters
+# max_tokens: 1000
+# top_p: 1.0
+# frequency_penalty: 0.0
+# presence_penalty: 0.0
+
+
+# Response model configuration
+response_model:
+  module: "structured_outputs"  # Python module where the model is defined
+  class: "Result"  # Pydantic model class name
