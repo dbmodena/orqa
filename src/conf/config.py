@@ -37,6 +37,11 @@ class PandasOpts:
 
 @dataclass
 class Crawling:
+    """
+    Configuration class for the Open Data datasets
+    crawling stage.
+    """
+
     max_datasets: int
     from_dataset_index: int
     batch_fetch_metadata: int
@@ -51,6 +56,10 @@ class Crawling:
 
 @dataclass
 class Indexing:
+    """
+    Configuration class for the Indexing stage
+    """
+
     xash_size: Literal[64, 128, 256, 512]
     index_folder_path: Path
     index_database_path: Path

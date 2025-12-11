@@ -2,8 +2,9 @@ import os
 from pathlib import Path
 
 from conf import load_config
-from crawling import crawl_canada
-from indexing import create_blend_index
+
+from orqa.crawling import crawl_canada
+from orqa.indexing import create_blend_index
 
 
 def canada():
