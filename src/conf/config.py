@@ -1,4 +1,3 @@
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +23,7 @@ class PandasOpts:
                 "encoding_errors": "ignore",
                 "on_bad_lines": "skip",
                 "engine": "python",
+                "nrows": 1_000,
             },
             "parquet": {},
             "json": {},
@@ -130,12 +130,3 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     return OrQAConfig(
         crawling=Crawling(**crawling_task), indexing=indexing, data_path=data_path
     )
-
-
-if __name__ == "__main__":
-    yaml_path = Path(os.path.dirname(__file__), "..", "..", "conf", "crawling.yml")
-    data_path = Path(os.environ["DATADIR"], "open_data")
-
-    crawling = load_config(yaml_path, data_path)
-
-    print(crawling)

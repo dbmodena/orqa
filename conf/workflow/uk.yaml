@@ -1,0 +1,22 @@
+tasks:
+  crawling:
+    max_datasets: 50
+    from_dataset_index: 0
+    batch_fetch_metadata: 10
+    accept_zip: True
+    download_format: csv 
+    engine: pandas
+    max_resource_size: 20MB
+    max_process_workers: 2
+    max_thread_workers: 1
+    verbose: True
+
+  indexing:
+    xash_size: 128
+    max_process_workers: 2
+    clean_func_args:
+      level: 1
+    top_k: 10
+    verbose: True
+
+
