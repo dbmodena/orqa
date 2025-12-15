@@ -44,7 +44,7 @@ def load_csv_info(csv_path: Path) -> dict:
 
 if __name__ == "__main__":
     # Example: analyze a CSV file
-    csv_file = Path("your_data.csv")  # Replace with your CSV path
+    csv_file = Path("table.csv")  # Replace with your CSV path
     config_path = Path("config.yaml")
     prompt_path=Path("prompt.md")
     # Create sample CSV
@@ -72,8 +72,8 @@ if __name__ == "__main__":
         print("="*60)
         print(result)
         
-    except FileNotFoundError:
-        print(f"Error: CSV file '{csv_file.name}' not found")
+    except FileNotFoundError as e:
+        print(f"Error: '{e}'")
         print("\nTo test this code, create a sample CSV first:")
     except Exception as e:
         print(f"\n❌ Analysis failed: {e}")
