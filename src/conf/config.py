@@ -19,7 +19,8 @@ class PandasOpts:
         default_factory=lambda: {
             "csv": {
                 "sep": None,
-                "encoding": "latin-1",
+                # "encoding": "latin-1",
+                "encoding": "utf-8",  # avoid BOM in many files
                 "encoding_errors": "ignore",
                 "on_bad_lines": "skip",
                 "engine": "python",
@@ -52,6 +53,7 @@ class Crawling:
     max_process_workers: int
     max_thread_workers: int
     verbose: bool
+    search_filters: dict = field(default_factory=lambda: {})
 
 
 @dataclass

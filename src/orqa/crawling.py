@@ -26,6 +26,30 @@ def _canada_filter_resource_metadata(metadata: dict[str, Any]) -> bool:
     return True
 
 
+def _uk_filter_resource_metadata(metadata: dict[str, Any]) -> bool:
+    if metadata["format"].lower() not in ["csv"]:
+        return False
+    # TODO: UK tarif datasets have many many many different
+    # versions for the same data, thus is not easy to work
+    # on them for OrQA aim. For now, we skip them. In future,
+    # we might be interested into more fine-grained tasks
+    # about selecting some specific version of a dataset.
+    if metadata["name"] and re.match(r"v\d+", metadata["name"]):
+        return False
+
+    # NOTE: UK Contracts Finder datasets have a very bad formatting,
+    # something that have maybe taken from XML files to CSV without a
+    # proper handling. We can't work on them, since their informative
+    # content is not easy to catch.
+    if metadata["name"] and re.match(r"Contracts Finder", metadata["name"]):
+        return False
+
+    # related to the tarif datasets
+    # if "ODS" in metadata["name"]:
+    #     return False
+    return True
+
+
 def _canada_create_links_for_unzipped_folder(datasets_path: Path, cfg: OrQAConfig):
     for dataset_file in os.listdir(datasets_path):
         dataset_path = datasets_path.joinpath(dataset_file)
@@ -90,6 +114,8 @@ def crawl_uk(cfg: OrQAConfig):
         max_datasets=cfg.crawling.max_datasets,
         from_dataset_index=cfg.crawling.from_dataset_index,
         batch_fetch_metadata=cfg.crawling.batch_fetch_metadata,
+        search_filters=cfg.crawling.search_filters,
+        filter_resource_metadata=_uk_filter_resource_metadata,
         download_format=cfg.crawling.download_format,
         http_headers=headers,
         read_dataset_kwargs=cfg.pandas_opts.read[cfg.crawling.download_format],
