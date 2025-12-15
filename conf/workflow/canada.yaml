@@ -1,3 +1,10 @@
+pandas:
+  read:
+    csv:
+      nrows: 10_000
+    json:
+      nrows: 10_000
+
 tasks:
   crawling:
     max_datasets: 50

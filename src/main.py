@@ -1,3 +1,4 @@
+import sys
 import os
 from pathlib import Path
 
@@ -34,8 +35,15 @@ def uk():
 
 
 def main():
-    canada()
-    uk()
+    assert len(sys.argv) == 2, "Usage is: python main.py <canada | uk>"
+
+    match sys.argv[1]:
+        case "canada":
+            canada()
+        case "uk":
+            uk()
+        case _:
+            raise ValueError("Usage is: python main.py <canada | uk>")
 
 
 if __name__ == "__main__":

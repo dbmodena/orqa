@@ -15,51 +15,45 @@ All scripts needed to run your own experiments are located in the `scripts` fold
 
 ### 🧰 Requirements
 
-OrQA is built on top of [Ollama](https://ollama.com/download) and [LiteLLM](https://docs.litellm.ai/docs/).  
-You will need to manually install Ollama before running the scripts.
-
+- Python environment
 Install the required Python packages via Conda:
 
 ```sh
-$ conda env create -f environment.yml
+$ conda env create -f env.yaml
 ```
 
----
-
-### 🚀 Starting the Services
-
-Before running the evaluation and generation scripts, start the Ollama server:
+- Define a "DATADIR" environment variable path. This will be the base path for OrQA and all the stages.
 
 ```sh
-$ ollama serve 
+$ export DATADIR=/path/to/your/data/directory
 ```
 
-Then, launch LiteLLM:
+### OrQA Files Organization
+
+OrQA organizes its data under the environment variable path "DATADIR". 
+
+DATADIR/open_data/ckan/<tag>/datasets/<format> --> here will be stored all the crawled datasets, with the given format.
+
+                            /metadata/ --> here will be saved metadata JSON files about datasets fetched in the initial crawling stage.
+                            /log/ --> logfiles for all the stages are here.
+                            /BLEND/index.db --> here will be saved the BLEND index after creation.
+
+-  Apache Solr Installation
+A local installation of Apache Solr search engine allows us to simulate a CKAN Open Data endpoint against which we can make query.
+
+After you have downloaded an Apache Solr release (OrQA is tested on [9.10][https://www.apache.org/dyn/closer.lua/solr/solr/9.10.0/solr-9.10.0.tgz?action=download]),
+you can load the metadata fetched during the crawling stage to the Apache Solr server with the Python class "src/solr/solr.py:Solr".
+
+---
+
+### Run the Workflow
+
+In conf/workflow there are the workflow configuration files for UK and Canada (.yaml). You can customize them in order to modify, for instance,
+the number of datasets fetched during the initial crawling stage and their sizes.
+
+To run a workflow, you can call:
 
 ```sh
-(orqa) $ litellm --config litell_config.yml 
+$ python main.py <canada | uk>
 ```
 
----
-
-### 🧪 Run the Workflow
-
-Use the following commands to create a new dataset from the first 1000 available packages on the Canadian Open Data portal:
-
-```sh
-(orqa) $ python orqa_0_open_data_crawler.py CAN 0 1000 https://open.canada.ca/data/api/action
-(orqa) $ python orqa_1_create_blend_index.py CAN 0 1000
-(orqa) $ python orqa_2_search_candidates.py CAN 0 1000
-(orqa) $ python orqa_3_evaluation.py CAN 0 1000
-(orqa) $ python orqa_4_generate_questions.py CAN 0 1000
-```
-
----
-
-### ⚙️ Customization
-
-At this stage, customization of the workflow—such as selecting different models for question generation—is not yet available via command-line arguments or external config files. These settings must be hardcoded directly into the scripts.
-
----
-
-In the `dataset` folder there is a first dataset version generated with OrQA workflow: this dataset contains 1,000 questions created from Canadian and UK Open Data tables.

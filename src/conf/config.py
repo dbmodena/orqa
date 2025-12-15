@@ -26,7 +26,7 @@ class PandasOpts:
                 "nrows": 1_000,
             },
             "parquet": {},
-            "json": {},
+            "json": {"nrows": 1_000},
         }
     )
 
@@ -127,6 +127,34 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         index_database_path=index_database_path,
     )
 
-    return OrQAConfig(
+    orqa_cfg = OrQAConfig(
         crawling=Crawling(**crawling_task), indexing=indexing, data_path=data_path
     )
+
+    for engine in ["pandas", "polars"]:
+        if engine not in parsed:
+            continue
+        engine_cfg = parsed[engine]
+        for op in ["read", "write"]:
+            if op not in engine_cfg:
+                continue
+            for format in ["csv", "parquet", "json"]:
+                match (engine, op):
+                    case ("pandas", "read"):
+                        orqa_cfg.pandas_opts.read[format] = orqa_cfg.pandas_opts.read[
+                            format
+                        ] | engine_cfg[op].pop(format, {})
+                    case ("pandas", "write"):
+                        orqa_cfg.pandas_opts.write[format] = orqa_cfg.pandas_opts.write[
+                            format
+                        ] | engine_cfg[op].pop(format, {})
+                    case ("polars", "read"):
+                        orqa_cfg.polars_opts.read[format] = orqa_cfg.polars_opts.read[
+                            format
+                        ] | engine_cfg[op].pop(format, {})
+                    case ("pandas", "read"):
+                        orqa_cfg.polars_opts.read[format] = orqa_cfg.polars_opts.read[
+                            format
+                        ] | engine_cfg[op].pop(format, {})
+
+    return orqa_cfg

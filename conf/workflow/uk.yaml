@@ -1,14 +1,21 @@
+pandas:
+  read:
+    csv:
+      nrows: 10_000
+    json:
+      nrows: 10_000
+
 tasks:
   crawling:
-    max_datasets: 50
+    max_datasets: 1000
     from_dataset_index: 0
-    batch_fetch_metadata: 10
+    batch_fetch_metadata: 100
     accept_zip: True
     download_format: csv 
     engine: pandas
     max_resource_size: 20MB
     max_process_workers: 2
-    max_thread_workers: 1
+    max_thread_workers: 2
     verbose: True
 
   indexing:
