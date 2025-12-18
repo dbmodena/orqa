@@ -7,15 +7,15 @@ pandas:
 
 tasks:
   crawling:
-    max_datasets: 1000
-    from_dataset_index: 0
-    batch_fetch_metadata: 100
-    accept_zip: True
+    max_datasets: 2000
+    from_dataset_index: 5000
+    batch_fetch_metadata: 500
+    accept_zip: False
     download_format: csv 
     engine: pandas
     max_resource_size: 20MB
-    max_process_workers: 2
-    max_thread_workers: 2
+    max_process_workers: 6
+    max_thread_workers: 4
     verbose: True
 
   indexing:
