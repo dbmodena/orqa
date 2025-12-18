@@ -212,8 +212,60 @@ class LLMClient:
         
         return formatted_error
 
+    def _value_validation_error(self, content: dict, schema: list) -> tuple[bool, str | None]:
+        """
+        Validate that all columns in the content exist in the schema.
+        Works generically with any task structure.
+        Returns (has_error, error_message)
+        """
+        hallucinated_cols = set()
+        
+        def extract_columns(obj):
+            """Recursively extract all column values from nested structures"""
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    # Check if this is a column-related field
+                    if key in ['columns', 'join_column', 'correlation_column']:
+                        if isinstance(value, list):
+                            for col in value:
+                                if col not in schema:
+                                    hallucinated_cols.add(col)
+                        elif isinstance(value, str):
+                            if value not in schema:
+                                hallucinated_cols.add(value)
+                    else:
+                        # Recurse into nested structures
+                        extract_columns(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    extract_columns(item)
+        
+        # Extract all columns from the content
+        extract_columns(content)
+        
+        # If hallucinations found, return error
+        if hallucinated_cols:
+            formatted_error = (
+                "❌ Hallucination ERROR - Your response contains columns that do not exist.\n\n"
+                f"The following columns do not exist: {sorted(hallucinated_cols)}\n\n"
+                "Please generate ONLY a valid JSON object that contains only the following real columns:\n"
+                f"{schema}\n"
+            )
+            return True, formatted_error
+        
+        return False, None
+
+
+
+
+
+
+
+
+
+
     def complete(
-        self, prompt:str,
+        self, prompt:str, schema = None,
         reply_model: Optional[Type[BaseModel]] = None,
         temperature: Optional[float] = None,
         max_retries: Optional[int] = None,
@@ -235,6 +287,11 @@ class LLMClient:
         """
         temp = temperature if temperature is not None else self.temperature
         retries = max_retries if max_retries is not None else self.max_retries
+        usage_total = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
         messages = [
             {"role": "system", "content": prompt}
         ]
@@ -256,24 +313,37 @@ class LLMClient:
                 print(f"Attempt {attempt + 1}/{retries}...")
                 
                 response = completion(**completion_args)
+                usage = response["usage"]
+                usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
+                usage_total["completion_tokens"] += usage.get("completion_tokens", 0)
+                usage_total["total_tokens"] += usage.get("total_tokens", 0)
                 content = response["choices"][0]["message"]["content"]
 
                 # If no response model, return raw content
                 if self.raw:
                     print(f"✓ Success on attempt {attempt + 1}\n")
-                    return content
+                    return content,usage_total
                 
                 # Parse structured output
                 last_content = content
                 cleaned_content = self._clean_json_response(content)
-                print(cleaned_content)
                 try:
                     # First try to parse as JSON
                     json_data = json.loads(cleaned_content)
                     # Then validate with Pydantic
                     result = self.response_model.model_validate(json_data)
+                    result = result.model_dump()
+                    print(result)
+                    if schema is not None:
+                        invalid, error_msg = self._value_validation_error( result,schema)
+                        if invalid:
+                            messages.append({
+                            "role": "user",
+                            "content": error_msg
+                            })
+                            continue
                     print(f"✓ Success on attempt {attempt + 1}\n")
-                    return result.model_dump()
+                    return result,usage_total
                 except json.JSONDecodeError as e:
                     # JSON parsing failed
                     last_error = e
@@ -331,7 +401,7 @@ class LLMClient:
         if last_content and not self.raw:
             print(f"\nLast response preview:\n{last_content[:300]}...\n")
         
-        return self.response_model().model_dump_json(indent=2)
+        return self.response_model().model_dump_json(indent=2),usage_total
                 
 
         
