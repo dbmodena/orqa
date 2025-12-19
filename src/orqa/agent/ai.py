@@ -212,6 +212,7 @@ class LLMClient:
         
         return formatted_error
 
+
     def _value_validation_error(self, content: dict, schema: list) -> tuple[bool, str | None]:
         """
         Validate that all columns in the content exist in the schema.
@@ -262,10 +263,8 @@ class LLMClient:
 
 
 
-
-
     def complete(
-        self, prompt:str, schema = None,
+        self, prompt:str, schema = None, column_typings = None,
         reply_model: Optional[Type[BaseModel]] = None,
         temperature: Optional[float] = None,
         max_retries: Optional[int] = None,
@@ -342,6 +341,25 @@ class LLMClient:
                             "content": error_msg
                             })
                             continue
+                        elif column_typings is not None:
+                             for tasks in result['join_correlation_tasks']:
+                                if tasks['correlation_column']:
+                                    if not column_typings[tasks['correlation_column']]:
+                                        error_msg = (
+                                            "❌ Correlation ERROR - Non-numerical column used.\n\n"
+                                            f"The result:{result}\n\n"
+                                            f"The column '{ tasks['correlation_column']}' has dtype '{column_typings[tasks['correlation_column']]}', "
+                                            "which is not numerical.\n\n"
+                                            "Correlation can only be computed on numerical columns "
+                                            "(Int*, UInt*, Float*).\n"
+                                        )
+                                        messages.append({
+                                            "role": "user",
+                                            "content": error_msg
+                                            })
+                                        
+                                        continue
+
                     print(f"✓ Success on attempt {attempt + 1}\n")
                     return result,usage_total
                 except json.JSONDecodeError as e:

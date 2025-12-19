@@ -10,12 +10,11 @@ import re
 import time
 
 class agent:
-    def __init__(self):
-        self.config_path = Path("config.yaml")
-        self.prompt_path=Path("prompt.md")
+    def __init__(self,prompt_path:Path,config_path:Path,metadata:Path):
+        self.config_path = config_path
+        self.prompt_path= prompt_path
         self.client = LLMClient(self.config_path)
-        self.json_file = Path(r"D:\uk_small\uk_small\metadata\metadata.json")
-
+        self.json_file = metadata
 
 
     def create_analysis_prompt(self,csv_info: dict, prompt_path: Path,section_str: str= None) -> str:
@@ -27,13 +26,12 @@ class agent:
 
     def analyze(self,csv_file:Path):
         try:
-            csv_info = self.load_csv_info(csv_file)
+            csv_info,column_typings = self.load_csv_info(csv_file)
             if csv_info["numrows"] == 0 or csv_info["numcolumns"] == 0:
                 return 0,{}
             print(f"Loading CSV: {csv_file.name}")
             prompt = self.create_analysis_prompt(csv_info,self.prompt_path,"Analyze")
-            print(prompt)
-            result,tokens = self.client.complete(prompt,schema=csv_info["columns"])
+            result,tokens = self.client.complete(prompt,schema=csv_info["columns"],column_typings=column_typings)
             print("="*60)
             print("ANALYSIS RESULTS")
             print("="*60)
@@ -119,15 +117,19 @@ class agent:
         # Read CSV with only the selected columns
         df = pl.read_csv(csv_path, columns=columns_to_read)
         # Build detailed column information string
+        column_typings = {}
         coldetails = ""
         for col in df.columns:
             coldetails += f"\n- {col}:"
             coldetails += f"\n  Type: {df[col].dtype}"
             coldetails += f"\n  Unique values: {df[col].n_unique()}"
             coldetails += f"\n  Null count: {df[col].null_count()}"
+            column_typings[col]=df[col].dtype.is_numeric() #isinstance(df[col].dtype, pl.datatypes.NumericType)
+            # pl.datatypes.is_numeric(df[col].dtype)
         
         # Return dictionary with keys matching load_prompt parameters
         info = {
+            "id":csv_path.name,
             "filename": csv_path.name,
             "numrows": len(df),
             "numcolumns": len(df.columns),
@@ -148,32 +150,20 @@ class agent:
                             print(file_id)
                             metadata = self.find_json_metadata_by_resource(json_data, file_id)
                             if metadata:
-                                # Add metadata fields to info
-                                #info['metadata'] = metadata
-                                info['title'] = metadata['title']
-                                info['notes'] = metadata['notes']  # Cleaned HTML notes
+                                info['metadata'] = f"notes:{metadata['notes']}"
                                 info["id"] = file_id
-                                #info['organization'] = metadata['organization']
-                                #info['tags'] = metadata['tags']
-                                #info['created'] = metadata['metadata_created']
-                                #info['modified'] = metadata['metadata_modified']
-                                #info['license'] = metadata['license']
-                                #info['dataset_url'] = metadata['url']
-                            #else:
+                            else:
+                                info['metadata'] = "None"
                                 #info['metadata'] = None
                                 #info['note'] = f"No metadata found for resource ID: {file_id}"
-                        #else:
-                        #    info['metadata'] = None
-                        #    info['note'] = "Could not extract ID from filename"
-                            
-
-                        #info['metadata'] = None
-                        #info['error'] = f"Error loading JSON metadata: {str(e)}"
-                #else:
-                    #info['metadata'] = None
-        except: 
+                        else:
+                             info['metadata'] = "None"
+            else:
+                    info['metadata'] = "None"
+        except Exception as e: 
+            info['metadata'] = "None"
             return info
-        return info
+        return info,column_typings
 
 
 if __name__ == "__main__":
@@ -192,7 +182,8 @@ if __name__ == "__main__":
          r"D:\uk_small\uk_small\datasets\csv\2020-June-Return---Forestry-England__1d790441-f671-4e38-b92e-5196c762ea45.csv",
          r"D:\uk_small\uk_small\datasets\csv\2023-12-31-Organogram-(Senior)__86b38dcc-8047-4e0e-ac56-d80d3cf913f9.csv"
     ]
-    my_agent = agent()
+
+    my_agent = agent(Path("prompt.md"),Path("config.yaml"),Path(r"D:\uk_small\uk_small\metadata\metadata.json"))
     file_path="results.json"
     for document in documents:
         id,result=my_agent.analyze(Path(document))

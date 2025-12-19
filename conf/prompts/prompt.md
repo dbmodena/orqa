@@ -1,13 +1,17 @@
 ## Analyze
-Analyze this CSV file and identify columns for UNION and JOIN operations.
-            CSV Information:
+Analyze this Dataset and identify columns for UNION and JOIN operations.
+            Dataset Information:
             - Filename: {filename}
             - Rows: {numrows}
             - Columns: {numcolumns}
 
-            Column Details: {coldetails}
+
+Dataset Metadata:
+{metadata}
+Column Details: 
+{coldetails}
 Sample Data (first 5 rows):
-    {sample}
+{sample}
 
 Task Instructions:
 
@@ -24,6 +28,7 @@ Task Instructions:
    - Identify pairs where one column is a join key and another correlates with it
    - Each entry: {{"join_column": "id_col", "correlation_column": "metric_col"}}
    - Examples: user_id with total_purchases, product_id with price
+   - The correlation column MUST be numeric (e.g., amount, price, quantity, score, balance)
 
 CRITICAL RULES:
 1. Your response must be a SINGLE JSON OBJECT (not an array)
@@ -32,4 +37,3 @@ CRITICAL RULES:
 4. DO NOT include a "task" field in any object
 5. DO NOT wrap your response in an array
 6. Column names must exactly match those in the CSV
-
