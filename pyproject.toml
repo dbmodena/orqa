@@ -1,0 +1,24 @@
+[project]
+name = "orqa"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "bidict>=0.23.1",
+    "blend",
+    "duckdb>=1.4.3",
+    "inflection>=0.5.1",
+    "jsonlines>=4.0.0",
+    "litellm>=1.80.10",
+    "pandas>=2.3.3",
+    "polars>=1.36.1",
+    "pyarrow>=22.0.0",
+    "pyyaml>=6.0.3",
+    "tqdm>=4.67.1",
+    "ulod",
+]
+
+[tool.uv.sources]
+ulod = { git = "https://github.com/nanni00/ULOD" }
+blend = { git = "https://github.com/nanni00/Blend" }
