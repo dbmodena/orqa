@@ -1,4 +1,4 @@
-from blend.blend import BLEND
+from blend import BLEND
 
 from conf import OrQAConfig
 
@@ -12,8 +12,12 @@ def create_blend_index(cfg: OrQAConfig):
         xash_size=cfg.indexing.xash_size,
     )
 
+    logging_path = cfg.logging_path.joinpath("indexing")
+    logging_path.mkdir(parents=True, exist_ok=True)
+
     index.create_index(
         cfg.datasets_path,
+        logdir_path=logging_path,
         scan_table_opts=cfg.polars_opts.scan[cfg.crawling.download_format],
         max_workers=cfg.indexing.max_process_workers,
         verbose=cfg.indexing.verbose,

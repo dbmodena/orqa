@@ -73,6 +73,24 @@ class Indexing:
 
 
 @dataclass
+class CandidatesDiscovery:
+    """
+    Configuration class for the Candidates Discovery stage.
+
+    An agent evaluates a randomly sampled subset of all the available
+    datasets; for each of them, propose a list of tasks (join, union
+    or join-correlation discovery) based on available metadata and
+    a sample of the dataset's rows.
+
+    Each proposed task is then validated, to assure whether the
+    proposed columns to work on actually exists and that it returns
+    at least one result.
+    """
+
+    candidate_tasks_path: Path
+
+
+@dataclass
 class OrQAConfig:
     crawling: Crawling
     indexing: Indexing
