@@ -1,5 +1,7 @@
-from pydantic import BaseModel, Field, field_validator
-from typing import List
+from pydantic import BaseModel, Field, field_validator, conint, model_validator
+from typing import List,Set, Tuple
+from itertools import combinations
+
 
 class CSVAnalysisResult(BaseModel):
     """Result of CSV analysis with UNION and JOIN suggestions"""
@@ -118,3 +120,63 @@ class Result(BaseModel):
                 seen.add(col_pair)
                 unique_tasks.append(task)
         return unique_tasks
+
+
+
+
+
+class TablePairScore(BaseModel):
+    left_table_id: str = Field(..., description="First table identifier")
+    right_table_id: str = Field(..., description="Second table identifier")
+    score: conint(ge=1, le=10)
+
+    def normalized_pair(self) -> Tuple[str, str]:
+        if self.left_table_id == self.right_table_id:
+            raise ValueError("Self-pairs are not allowed")
+        return tuple(sorted((self.left_table_id, self.right_table_id)))
+
+
+class Match(BaseModel):
+    table_ids: List[str] = Field(
+        ...,
+        description="List of all tables participating in the match"
+    )
+    table_pair_scores: List[TablePairScore] = Field(
+        default_factory=list,
+        description="Pairwise match scores between tables"
+    )
+
+    @model_validator(mode="after")
+    def validate_all_pairs_present(self):
+        tables: Set[str] = set(self.table_ids)
+
+        if len(tables) < 2:
+            raise ValueError("At least two distinct tables are required")
+
+        # Expected unordered pairs
+        expected_pairs: Set[Tuple[str, str]] = {
+            tuple(sorted(pair)) for pair in combinations(tables, 2)
+        }
+
+        # Provided pairs
+        provided_pairs: Set[Tuple[str, str]] = set()
+        for pair_score in self.table_pair_scores:
+            pair = pair_score.normalized_pair()
+            if pair in provided_pairs:
+                raise ValueError(f"Duplicate score provided for pair {pair}")
+            provided_pairs.add(pair)
+
+        missing = expected_pairs - provided_pairs
+        extra = provided_pairs - expected_pairs
+
+        if missing:
+            raise ValueError(
+                f"Missing scores for table pairs: {sorted(missing)}"
+            )
+
+        if extra:
+            raise ValueError(
+                f"Unexpected pairs provided: {sorted(extra)}"
+            )
+
+        return self

@@ -28,11 +28,12 @@ class LLMClient:
         self.retry_delay = self.config.get("retry_delay", 1.0)
         self.enable_json_mode = self.config.get("enable_json_mode", True)
         #self.prompt_key = self.config.get("prompt","You are an helpful assistant")
-        self.response_model = self._load_response_model()
-        if self.response_model is not None:
-            self.raw=False
-        else:
-            self.raw=True
+        #self.response_model = response_model #self._load_response_model()
+        #reply_model = matching_model #self._load_matching_model()
+        #if self.response_model is not None:
+        #    self.raw=False
+        #else:
+        #    self.raw=True
         api_keys = self.config.get("api_keys", {})
         if api_keys:
             for key_name, key_value in api_keys.items():
@@ -105,52 +106,9 @@ class LLMClient:
         
         return content.strip()
 
-    def _load_response_model(self) -> Optional[Type[BaseModel]]:
-            """
-            Dynamically load Pydantic model from config.
-            
-            Returns:
-                Pydantic model class or None if not specified
-            """
-            response_model_config = self.config.get("response_model")
-            
-            if not response_model_config:
-                return None
-            
-            module_name = response_model_config.get("module")
-            class_name = response_model_config.get("class")
-            
-            if not module_name or not class_name:
-                raise ValueError(
-                    "response_model must specify both 'module' and 'class'"
-                )
-            
-            try:
-                # Import the module
-                module = importlib.import_module(module_name)
-                
-                # Get the class from the module
-                model_class = getattr(module, class_name)
-                
-                # Verify it's a Pydantic model
-                if not issubclass(model_class, BaseModel):
-                    raise TypeError(
-                        f"{class_name} is not a Pydantic BaseModel"
-                    )
-                
-                return model_class
-                
-            except ImportError as e:
-                raise ImportError(
-                    f"Could not import module '{module_name}': {e}"
-                )
-            except AttributeError as e:
-                raise AttributeError(
-                    f"Could not find class '{class_name}' in module '{module_name}': {e}"
-                )
 
 
-    def _format_json_error(self, content: str, error: Exception) -> str:
+    def _format_json_error(self, content: str, error: Exception,reply_model) -> str:
         """
         Format JSON parsing error with context.
         
@@ -162,14 +120,14 @@ class LLMClient:
             Human-readable error message for the LLM
         """
         # Show a snippet of the problematic content
-        snippet = content[:200] + "..." if len(content) > 200 else content
+        #snippet = content[:200] + "..." if len(content) > 200 else content
         
         formatted_error = (
             "❌ JSON PARSING ERROR - Your response is not valid JSON.\n\n"
             f"Error: {str(error)}\n\n"
             #f"Your response (first 200 chars):\n{snippet}\n\n"
             "Required schema:\n"
-            f"{json.dumps(self.response_model.model_json_schema(), indent=2)}\n\n"
+            f"{json.dumps(reply_model_json_schema(), indent=2)}\n\n"
             "⚠️ Common issues:\n"
             "  • Missing quotes around strings\n"
             "  • Trailing commas\n"
@@ -180,7 +138,7 @@ class LLMClient:
         
         return formatted_error
     
-    def _format_validation_error(self, error: ValidationError) -> str:
+    def _format_validation_error(self, error: ValidationError,reply_model) -> str:
         """
         Format Pydantic validation error in a clear, actionable way.
         
@@ -204,7 +162,7 @@ class LLMClient:
         formatted_error = (
             "❌ VALIDATION ERROR - Your JSON response does not match the required schema.\n\n"
             "Required schema:\n"
-            f"{json.dumps(self.response_model.model_json_schema(), indent=2)}\n\n"
+            f"{json.dumps(reply_model.model_json_schema(), indent=2)}\n\n"
             "Validation errors found:\n" +
             "\n".join(error_messages) +
             "\n\n⚠️ Please fix these issues and generate a valid JSON response."
@@ -256,14 +214,23 @@ class LLMClient:
         
         return False, None
 
+    #### generic completion method
+    def complete(self, completion_args,usage_actual):
+        response = completion(**completion_args)
+        usage_total = usage_actual
+        usage = response["usage"]
+        usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
+        usage_total["completion_tokens"] += usage.get("completion_tokens", 0)
+        usage_total["total_tokens"] += usage.get("total_tokens", 0)
+        content = response["choices"][0]["message"]["content"]
+        return content, usage_total
 
 
 
 
 
 
-
-    def complete(
+    def complete_analysis(
         self, prompt:str, schema = None, column_typings = None,
         reply_model: Optional[Type[BaseModel]] = None,
         temperature: Optional[float] = None,
@@ -275,15 +242,16 @@ class LLMClient:
         
         Args:
             prompt: The prompt to send to the model
-            response_model: Optional Pydantic model for structured output
+            reply_model: Optional Pydantic model for structured output
             temperature: Override default temperature
             max_retries: Override default max_retries
             **kwargs: Additional arguments to pass to litellm.completion
         
         Returns:
-            If response_model is provided: instance of the Pydantic model
+            If reply_model is provided: instance of the Pydantic model
             Otherwise: raw string response
         """
+        last_content = None
         temp = temperature if temperature is not None else self.temperature
         retries = max_retries if max_retries is not None else self.max_retries
         usage_total = {
@@ -300,26 +268,19 @@ class LLMClient:
             "temperature": temp,
             **kwargs
         }
+        raw = True
         # Enable JSON mode if we have a response model
         if reply_model and self.enable_json_mode:
             completion_args["response_format"] = {"type": "json_object"}
-            self.response_model = reply_model
-            self.raw = False    
+            raw = False    
         # Retry loop
         last_error = None
         for attempt in range(retries):
             try:
                 print(f"Attempt {attempt + 1}/{retries}...")
-                
-                response = completion(**completion_args)
-                usage = response["usage"]
-                usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
-                usage_total["completion_tokens"] += usage.get("completion_tokens", 0)
-                usage_total["total_tokens"] += usage.get("total_tokens", 0)
-                content = response["choices"][0]["message"]["content"]
-
+                content,usage_total = self.complete(completion_args,usage_total)
                 # If no response model, return raw content
-                if self.raw:
+                if raw:
                     print(f"✓ Success on attempt {attempt + 1}\n")
                     return content,usage_total
                 
@@ -330,7 +291,7 @@ class LLMClient:
                     # First try to parse as JSON
                     json_data = json.loads(cleaned_content)
                     # Then validate with Pydantic
-                    result = self.response_model.model_validate(json_data)
+                    result = reply_model.model_validate(json_data)
                     result = result.model_dump()
                     print(result)
                     if schema is not None:
@@ -365,7 +326,7 @@ class LLMClient:
                 except json.JSONDecodeError as e:
                     # JSON parsing failed
                     last_error = e
-                    error_msg = self._format_json_error(cleaned_content, e)
+                    error_msg = self._format_json_error(cleaned_content, e,reply_model)
                     print(f"⚠️ JSON parsing error on attempt {attempt + 1}")
                     
                     if attempt < retries - 1:
@@ -385,7 +346,7 @@ class LLMClient:
                 except ValidationError as e:
                     # Pydantic validation failed
                     last_error = e
-                    error_msg = self._format_validation_error(e)
+                    error_msg = self._format_validation_error(e,reply_model)
                     print(f"⚠️ Validation error on attempt {attempt + 1}")
                     
                     if attempt < retries - 1:
@@ -416,16 +377,139 @@ class LLMClient:
         # All retries exhausted
         print(f"\n❌ Failed after {retries} attempts")
         print(f"Last error: {last_error}")
-        if last_content and not self.raw:
+        if last_content and not raw:
             print(f"\nLast response preview:\n{last_content[:300]}...\n")
         
-        return self.response_model().model_dump_json(indent=2),usage_total
+        return reply_model().model_dump_json(indent=2),usage_total
                 
 
         
         
     
-
+    def complete_match(
+        self, prompt:str, tables = None, column_typings = None,
+        reply_model: Optional[Type[BaseModel]] = None,
+        temperature: Optional[float] = None,
+        max_retries: Optional[int] = None,
+        **kwargs
+    ) -> Any:
+        """
+        Make a completion request with optional structured output.
+        
+        Args:
+            prompt: The prompt to send to the model
+            matching: Optional Pydantic model for structured output
+            temperature: Override default temperature
+            max_retries: Override default max_retries
+            **kwargs: Additional arguments to pass to litellm.completion
+        
+        Returns:
+            If matching is provided: instance of the Pydantic model
+            Otherwise: raw string response
+        """
+        last_content = None
+        temp = temperature if temperature is not None else self.temperature
+        retries = max_retries if max_retries is not None else self.max_retries
+        usage_total = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+        messages = [
+            {"role": "system", "content": prompt}
+        ]
+        completion_args = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temp,
+            **kwargs
+        }
+        raw = True
+        # Enable JSON mode if we have a response model
+        if reply_model and self.enable_json_mode:
+            completion_args["response_format"] = {"type": "json_object"}
+            raw = False    
+        # Retry loop
+        last_error = None
+        for attempt in range(retries):
+            try:
+                print(f"Attempt {attempt + 1}/{retries}...")
+                content,usage_total = self.complete(completion_args,usage_total )
+                # If no response model, return raw content
+                if raw:
+                    print(f"✓ Success on attempt {attempt + 1}\n")
+                    return content,usage_total
+                
+                # Parse structured output
+                last_content = content
+                cleaned_content = self._clean_json_response(content)
+                try:
+                    # First try to parse as JSON
+                    json_data = json.loads(cleaned_content)
+                    # Then validate with Pydantic
+                    result = reply_model.model_validate(json_data)
+                    result = result.model_dump()
+                    print(result)
+                    print(f"✓ Success on attempt {attempt + 1}\n")
+                    return result,usage_total
+                except json.JSONDecodeError as e:
+                    # JSON parsing failed
+                    last_error = e
+                    error_msg = self._format_json_error(cleaned_content, e,reply_model)
+                    print(f"⚠️ JSON parsing error on attempt {attempt + 1}")
+                    
+                    if attempt < retries - 1:
+                        # Add assistant's failed response
+                        messages.append({
+                            "role": "assistant",
+                            "content": content
+                        })
+                        # Add error feedback as user message
+                        messages.append({
+                            "role": "user",
+                            "content": error_msg
+                        })
+                        print(f"💬 Sending error feedback to LLM...\n")
+                        time.sleep(self.retry_delay)
+                        continue
+                except ValidationError as e:
+                    # Pydantic validation failed
+                    last_error = e
+                    error_msg = self._format_validation_error(e,reply_model)
+                    print(f"⚠️ Validation error on attempt {attempt + 1}")
+                    
+                    if attempt < retries - 1:
+                        # Add assistant's failed response
+                        messages.append({
+                            "role": "assistant",
+                            "content": content
+                        })
+                        # Add error feedback as user message
+                        messages.append({
+                            "role": "user",
+                            "content": error_msg
+                        })
+                        print(f"💬 Sending validation errors to LLM...\n")
+                        time.sleep(self.retry_delay)
+                        continue
+                
+            except Exception as e:
+                last_error = e
+                print(f"✗ Error on attempt {attempt + 1}: {e}")
+                
+                # Wait before retry
+                if attempt < retries - 1:
+                    print(f"Retrying in {self.retry_delay} seconds...\n")
+                    time.sleep(self.retry_delay)
+        
+        # All retries failed
+        # All retries exhausted
+        print(f"\n❌ Failed after {retries} attempts")
+        print(f"Last error: {last_error}")
+        if last_content and not raw:
+            print(f"\nLast response preview:\n{last_content[:300]}...\n")
+        
+        return reply_model().model_dump_json(indent=2),usage_total
 
     
 

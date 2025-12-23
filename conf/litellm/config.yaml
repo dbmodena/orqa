@@ -6,7 +6,7 @@
 #   - groq/llama-3.1-70b-versatile
 #   - openai/gpt-4
 #   - anthropic/claude-3-sonnet
-model: "groq/llama-3.1-8b-instant"
+model: "groq/llama-3.3-70b-versatile"
 
 # Temperature (0.0 = deterministic, 2.0 = very creative)
 temperature: 0.2
@@ -22,12 +22,12 @@ retry_delay: 1.0
 enable_json_mode: true
 
 # Prompt identifier
-prompt: "column_inference"
+#prompt: "column_inference"
 
 # Optional: API keys (if not set in environment variables)
 # Uncomment and fill in as needed:
 api_keys:
-   GROQ_API_KEY: "your api key :)"
+   GROQ_API_KEY: "eh....volevi!!!!!"
 
 # Optional: Additional model parameters
 # max_tokens: 1000
@@ -40,3 +40,7 @@ api_keys:
 response_model:
   module: "structured_outputs"  # Python module where the model is defined
   class: "Result"  # Pydantic model class name
+
+matching_model:
+  module: "structured_outputs"  # Python module where the model is defined
+  class: "Match"  # Pydantic model class name
