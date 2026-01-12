@@ -21,20 +21,11 @@ retry_delay: 1.0
 # (requires model support for response_format)
 enable_json_mode: true
 
-# Prompt identifier
-prompt: "column_inference"
-
-# Optional: API keys (if not set in environment variables)
-# Uncomment and fill in as needed:
-api_keys:
-   GROQ_API_KEY: "your api key :)"
-
 # Optional: Additional model parameters
 # max_tokens: 1000
 # top_p: 1.0
 # frequency_penalty: 0.0
 # presence_penalty: 0.0
-
 
 # Response model configuration
 response_model:

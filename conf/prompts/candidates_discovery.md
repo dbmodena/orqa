@@ -1,24 +1,14 @@
-## Analyze
-Analyze this Dataset and identify columns for UNION and JOIN operations.
-            Dataset Information:
-            - Filename: {filename}
-            - Rows: {numrows}
-            - Columns: {numcolumns}
+# Analyze
+Analyze the given dataset and identify columns for UNION, JOIN and JOIN-CORRELATION discovery operations over a data lake. 
 
+{query_dataset_description}
 
-Dataset Metadata:
-{metadata}
-Column Details: 
-{coldetails}
-Sample Data (first 5 rows):
-{sample}
-
-Task Instructions:
+### Task Instructions:
 
 1. **UNION TASKS** (union_tasks):
    - Identify groups of columns that could be combined with similar columns from other datasets
    - Look for columns with similar names, types, or semantic meaning
-   - Each entry: {{"columns": ["col1", "col2"]}}
+   - Each entry: {{"columns": ["col1", "col2", "col3", "col4"]}}
 
 2. **JOIN TASKS** (join_tasks):
    - Identify columns that could serve as join keys (unique identifiers or foreign keys)
@@ -30,8 +20,14 @@ Task Instructions:
    - Examples: user_id with total_purchases, product_id with price
    - The correlation column MUST be numeric (e.g., amount, price, quantity, score, balance)
 
-CRITICAL RULES:
-1. Your response must be a SINGLE JSON OBJECT (not an array)
+### Notes
+
+1. Do not focus on correctness of numerical values: for instance, 6,124.45 is as correct as 6124.45
+2. Propose **at most 5** tasks for each task type.
+
+### Critical Rules:
+
+1. Your response must be a single JSON object (not an array)
 2. The object must have exactly these 3 fields: "union_tasks", "join_tasks", "join_correlation_tasks"
 3. Each field is an ARRAY of objects
 4. DO NOT include a "task" field in any object

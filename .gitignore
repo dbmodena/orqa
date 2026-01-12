@@ -12,5 +12,5 @@ data
 prev*
 **.jsonl
 *.lock
-
+.env
 __pycache__

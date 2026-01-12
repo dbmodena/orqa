@@ -8,9 +8,17 @@ import yaml
 
 @dataclass
 class PolarsOpts:
-    read: dict = field(default_factory=lambda: {"csv": {}, "parquet": {}, "json": {}})
+    read: dict = field(
+        default_factory=lambda: {
+            "csv": {"ignore_errors": True},
+            "parquet": {},
+            "json": {},
+        }
+    )
     write: dict = field(default_factory=lambda: {"csv": {}, "parquet": {}, "json": {}})
-    scan: dict = field(default_factory=lambda: {"csv": {}, "parquet": {}})
+    scan: dict = field(
+        default_factory=lambda: {"csv": {"ignore_errors": True}, "parquet": {}}
+    )
 
 
 @dataclass
@@ -87,18 +95,57 @@ class CandidatesDiscovery:
     at least one result.
     """
 
+    # Where the discovered candidates are stored as
+    # possible executable tasks
     candidate_tasks_path: Path
+
+    # How many datasets we will randomly sample as
+    # seeds for the discovery task
+    n_random_dataset_seeds: int
+
+    # Many datasets have just 1 or very few rows
+    # and usually are not very interesting
+    min_dataset_height: int
+
+    # Some datasets have a lot of columns. We might
+    # limit our tasks to a smaller subset
+    limit_to_n_columns: int
+
+    # The number of randomly sampled rows we'll pass to the LLM
+    # as snapshot of a dataset
+    sample_size: int
 
 
 @dataclass
 class OrQAConfig:
+    seed: int
     crawling: Crawling
     indexing: Indexing
+    candidates_discovery: CandidatesDiscovery
+
+    # Dataframe tools configurations for read/write ops
     polars_opts: PolarsOpts = field(init=False)
     pandas_opts: PandasOpts = field(init=False)
+
+    # The base path where OrQA data is stored
     data_path: Path
+
+    # Where all the datasets are stored once downloaded
     datasets_path: Path = field(init=False)
+
+    # Where the datasets metadata are stored once downloaded
     metadata_path: Path = field(init=False)
+
+    # Where all the default prompts are stored
+    # This path is not under the main data_path of OrQA,
+    # but in the configuration directory already present
+    # in the repository
+    prompts_path: Path = field(init=False)
+
+    # Where the LiteLLM and other LLM-related config things
+    # are kept
+    llm_config_path: Path = field(init=False)
+
     logging_path: Path = field(init=False)
 
     def __post_init__(self):
@@ -108,6 +155,14 @@ class OrQAConfig:
 
         self.metadata_path = Path(self.data_path, "metadata")
         self.logging_path = Path(self.data_path, "logging_path")
+        self.prompts_path = Path(__file__).parent.parent.parent.joinpath(
+            "conf", "prompts"
+        )
+        assert self.prompts_path.exists()
+
+        self.llm_config_path = Path(__file__).parent.parent.parent.joinpath(
+            "conf", "llm"
+        )
 
         self.pandas_opts = PandasOpts()
         self.polars_opts = PolarsOpts()
@@ -134,12 +189,14 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     with open(yaml_path, "r") as file:
         parsed = yaml.safe_load(file)
 
+    seed = int(parsed["seed"])
+
     crawling_task = parsed["tasks"]["crawling"]
     crawling_task["max_resource_size"] = to_bytes(crawling_task["max_resource_size"])
+    crawling = Crawling(**crawling_task)
 
     indexing_task = parsed["tasks"]["indexing"]
-
-    index_folder_path = data_path.joinpath("BLEND")
+    index_folder_path = data_path.joinpath("blend")
     index_database_path = index_folder_path.joinpath("index.db")
     indexing = Indexing(
         **indexing_task,
@@ -147,8 +204,18 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         index_database_path=index_database_path,
     )
 
+    candidates_discovery_task = parsed["tasks"]["candidates_discovery"]
+    candidate_tasks_path = data_path.joinpath("candidate_tasks.json")
+    candidates_discovery = CandidatesDiscovery(
+        candidate_tasks_path, **candidates_discovery_task
+    )
+
     orqa_cfg = OrQAConfig(
-        crawling=Crawling(**crawling_task), indexing=indexing, data_path=data_path
+        seed=seed,
+        crawling=crawling,
+        indexing=indexing,
+        candidates_discovery=candidates_discovery,
+        data_path=data_path,
     )
 
     for engine in ["pandas", "polars"]:

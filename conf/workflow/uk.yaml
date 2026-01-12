@@ -1,3 +1,5 @@
+seed: 0
+
 pandas:
   read:
     csv:
@@ -26,4 +28,9 @@ tasks:
     top_k: 10
     verbose: True
 
+  candidates_discovery:
+    n_random_dataset_seeds: 5
+    min_dataset_height: 10
+    limit_to_n_columns: 15
+    sample_size: 5
 

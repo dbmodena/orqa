@@ -1,3 +1,4 @@
+from orqa.search_candidates import candidates_discovery
 import sys
 import os
 from pathlib import Path
@@ -30,8 +31,9 @@ def uk():
 
     cfg = load_config(uk_yaml_path, data_path)
 
-    crawl_uk(cfg)
-    create_blend_index(cfg)
+    # crawl_uk(cfg)
+    # create_blend_index(cfg)
+    candidates_discovery(cfg)
 
 
 def main():
