@@ -23,7 +23,9 @@ Analyze the given dataset and identify columns for UNION, JOIN and JOIN-CORRELAT
 ### Notes
 
 1. Do not focus on correctness of numerical values: for instance, 6,124.45 is as correct as 6124.45
-2. Propose **at most 5** tasks for each task type.
+2. For Union tasks, is preferable to include more columns instead than just 1 or 2.
+3. For Join tasks, ignore those columns with few unique value (<3).
+4. Propose **at most 5** tasks for each task type.
 
 ### Critical Rules:
 

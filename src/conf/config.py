@@ -99,6 +99,10 @@ class CandidatesDiscovery:
     # possible executable tasks
     candidate_tasks_path: Path
 
+    # Where results computed with BLEND are stored
+    # as a CSV
+    candidates_results_path: Path
+
     # How many datasets we will randomly sample as
     # seeds for the discovery task
     n_random_dataset_seeds: int
@@ -114,6 +118,10 @@ class CandidatesDiscovery:
     # The number of randomly sampled rows we'll pass to the LLM
     # as snapshot of a dataset
     sample_size: int
+
+    # Candidates per task, i.e. how many results we'll fetch
+    # with the BLEND index
+    candidates_per_task: int
 
 
 @dataclass
@@ -147,6 +155,9 @@ class OrQAConfig:
     llm_config_path: Path = field(init=False)
 
     logging_path: Path = field(init=False)
+
+    # The format with which datasets are stored locally
+    datasets_format: str
 
     def __post_init__(self):
         self.datasets_path = Path(
@@ -206,8 +217,9 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
 
     candidates_discovery_task = parsed["tasks"]["candidates_discovery"]
     candidate_tasks_path = data_path.joinpath("candidate_tasks.json")
+    candidates_list_path = data_path.joinpath("candidates.csv")
     candidates_discovery = CandidatesDiscovery(
-        candidate_tasks_path, **candidates_discovery_task
+        candidate_tasks_path, candidates_list_path, **candidates_discovery_task
     )
 
     orqa_cfg = OrQAConfig(
@@ -216,6 +228,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         indexing=indexing,
         candidates_discovery=candidates_discovery,
         data_path=data_path,
+        datasets_format=crawling.download_format,
     )
 
     for engine in ["pandas", "polars"]:

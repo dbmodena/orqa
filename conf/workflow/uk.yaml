@@ -33,4 +33,5 @@ tasks:
     min_dataset_height: 10
     limit_to_n_columns: 15
     sample_size: 5
+    candidates_per_task: 5
 

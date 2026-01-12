@@ -2,8 +2,8 @@ from pydantic import BaseModel, Field, field_validator
 from typing import List
 
 
-class CSVAnalysisResult(BaseModel):
-    """Result of CSV analysis with UNION and JOIN suggestions"""
+class DatasetAnalysisResult(BaseModel):
+    """Result of dataset analysis with UNION and JOIN suggestions"""
 
     UNION: List[str] = Field(
         description="List of column names that should be combined using UNION (similar columns across datasets)"
@@ -126,4 +126,3 @@ class Result(BaseModel):
                 seen.add(col_pair)
                 unique_tasks.append(task)
         return unique_tasks
-

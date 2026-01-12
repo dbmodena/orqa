@@ -2,10 +2,33 @@ import copy
 import json
 import re
 from pathlib import Path
-from typing import Optional
 
 import polars as pl
 from bs4 import BeautifulSoup
+
+
+def pl_read_dataset(dataset_path: Path, opts) -> pl.DataFrame:
+    match dataset_path.suffix:
+        case ".csv":
+            return pl.read_csv(dataset_path, **opts.get("csv", {}))
+        case ".parquet":
+            return pl.read_parquet(dataset_path, **opts.get("parquet", {}))
+        case _:
+            raise ValueError(
+                f"Unknown dataset format for file {dataset_path.absolute()}"
+            )
+
+
+def pl_scan_dataset(dataset_path: Path, opts) -> pl.LazyFrame:
+    match dataset_path.suffix:
+        case ".csv":
+            return pl.scan_csv(dataset_path, **opts.get("csv", {}))
+        case ".parquet":
+            return pl.scan_parquet(dataset_path, **opts.get("parquet", {}))
+        case _:
+            raise ValueError(
+                f"Unknown dataset format for file {dataset_path.absolute()}"
+            )
 
 
 def remove_file_extension(filename: str) -> str:
@@ -83,8 +106,7 @@ def load_datasets_metadata(
 
 def load_dataset_info(
     dataset_path: Path,
-    format: str = "csv",
-    polars_cfg: Optional[dict] = None,
+    polars_opts: dict = {},
     limit_to_n_columns: int = 20,
     sample_size: int = 5,
     seed: int = 0,
@@ -93,22 +115,11 @@ def load_dataset_info(
     Load CSV and extract relevant information for the LLM.
     Returns a dict ready to be unpacked as kwargs for load_prompt.
     """
-    polars_cfg = polars_cfg if polars_cfg else {}
+    lf = pl_scan_dataset(dataset_path, polars_opts)
 
-    match format:
-        case "csv":
-            df = pl.scan_csv(dataset_path, **polars_cfg)
-        case "parquet":
-            df = pl.scan_parquet(dataset_path, **polars_cfg)
-        case _:
-            raise ValueError(f"Unknown dataset format: {format}")
-
-    assert isinstance(df, pl.LazyFrame)
-
-    # Get first 20 columns (or all if fewer)
-    schema = df.collect_schema()
-    df = df.select(schema.names()[:limit_to_n_columns]).collect()
-    assert isinstance(df, pl.DataFrame)
+    # Get first N columns (or all if fewer)
+    schema = lf.collect_schema()
+    df = lf.select(schema.names()[:limit_to_n_columns]).collect()
 
     # Build detailed column information string
     column_typings = {}

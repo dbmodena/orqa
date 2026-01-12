@@ -16,17 +16,16 @@ class CandidatesDiscoveryAgent:
         dataset_path: Path,
         dataset_format: str,
         metadata: dict,
-        polars_cfg: dict,
+        polars_opts: dict,
         min_dataset_height: int = 10,
         limit_to_n_columns: int = 20,
         sample_size: int = 5,
         seed: int = 0,
-    ):
+    ) -> dict | None:
         try:
             dataset_info, column_typings = utils.load_dataset_info(
                 dataset_path,
-                dataset_format,
-                polars_cfg,
+                polars_opts,
                 limit_to_n_columns,
                 sample_size,
                 seed,
@@ -36,7 +35,7 @@ class CandidatesDiscoveryAgent:
                 dataset_info["num_rows"] < min_dataset_height
                 or dataset_info["num_columns"] == 0
             ):
-                return {}
+                return
 
             prompt_str = self.prompt.update(
                 dataset_info["dataset_name"],
@@ -62,17 +61,16 @@ class CandidatesDiscoveryAgent:
             print("=" * 60)
             print(tokens)
 
-            return dataset_info["id"], {
+            return {
                 "dataset": dataset_info["dataset_name"],
-                "result": result,
+                "tasks": result,
                 "token_usage": tokens,
             }
         except FileNotFoundError as e:
             print(f"Error: '{e}'")
-            return {}
         except Exception as e:
             print(f"\n❌ Analysis failed: {e}")
-            return {}
+            raise e
 
 
 # if __name__ == "__main__":

@@ -12,6 +12,8 @@ are proposed through an agentic step.
 
 """
 
+from orqa.utils import pl_read_dataset
+
 import json
 import os
 import random
@@ -19,11 +21,13 @@ import time
 from pathlib import Path
 
 import dotenv
+from tqdm import tqdm
 
 from conf import OrQAConfig
+from blend import BLEND
 
 from .agent import agent
-from .utils import load_datasets_metadata, remove_file_extension
+from .utils import load_datasets_metadata, remove_file_extension, pl_read_dataset
 
 # make the API key for LLM available
 dotenv.load_dotenv(Path(__file__).parent.parent.joinpath(".env"))
@@ -56,7 +60,7 @@ def sample_seed_datasets(
     return sample  # ty: ignore
 
 
-def candidates_discovery(cfg: OrQAConfig):
+def generate_tasks(cfg: OrQAConfig):
     datasets_path = cfg.datasets_path
 
     # sample dataset seeds for the candidates discovery step
@@ -91,15 +95,99 @@ def candidates_discovery(cfg: OrQAConfig):
             dataset_path,
             _format,
             _metadata,
-            cfg.polars_opts.scan[_format],
+            cfg.polars_opts.scan,
             cfg.candidates_discovery.min_dataset_height,
             cfg.candidates_discovery.limit_to_n_columns,
             cfg.candidates_discovery.sample_size,
             seed=cfg.seed,
         )
-        time.sleep(10)
+        time.sleep(5)
 
     with open(
         cfg.candidates_discovery.candidate_tasks_path, "w", encoding="utf-8"
     ) as file:
         json.dump(results, file, indent=4, ensure_ascii=False)
+
+    return results
+
+
+def execute_tasks(cfg: OrQAConfig, tasks: dict):
+    datasets_path = cfg.datasets_path
+    _format = cfg.datasets_format
+
+    # instantiate the BLEND index
+    index = BLEND(
+        cfg.indexing.index_database_path,
+        clean_function_args=cfg.indexing.clean_func_args,
+        xash_size=cfg.indexing.xash_size,
+    )
+
+    top_k = cfg.candidates_discovery.candidates_per_task
+
+    # a collection where we will store our effective candidates
+    # as dictionaries
+    candidates = []
+
+    # for each task, execute it over the index
+    for dataset_id, task_set in tqdm(tasks.items(), desc="Executing tasks: "):
+        dataset_filename = task_set["dataset"]
+        dataset_path = datasets_path.joinpath(f"{dataset_filename}.{_format}")
+
+        _tasks = task_set["tasks"]
+
+        union_tasks = _tasks["union_tasks"]
+        join_tasks = _tasks["join_tasks"]
+        join_correlation = _tasks["join_correlation_tasks"]
+
+        df = pl_read_dataset(dataset_path, cfg.polars_opts.read)
+
+        for task in tqdm(union_tasks, desc="Union tasks: ", position=1, leave=False):
+            columns = task["columns"]
+            _df = df.select(columns)
+
+            top_res = index.union_search(_df.to_pandas(), top_k)
+
+            for cand_id, _, _, _ in top_res:
+                candidates.append(
+                    {
+                        "Q": dataset_filename,
+                        "R": cand_id,
+                        "task": "U",
+                    }
+                )
+
+        for task in tqdm(join_tasks, desc="Join tasks: ", position=1, leave=False):
+            columns = task["columns"]
+            if len(columns) == 1:
+                values = df.get_column(columns[0])
+                top_res = index.single_column_join_search(values, top_k)
+            else:
+                _df = df.select(columns)
+                # columns = [_df.get_column(c).to_list() for c in _df.columns]
+                columns = _df.rows()
+                import pandas as pd
+
+                pd_df = pd.DataFrame(columns)
+                print("\n\n>>> ", pd_df.shape, "\n\n\n")
+                top_res = index.multi_column_join_search(columns, top_k)
+
+            for cand_id in top_res:
+                cand_id = cand_id[0]
+
+                candidates.append(
+                    {
+                        "Q": dataset_filename,
+                        "R": cand_id,
+                        "task": "U",
+                    }
+                )
+
+
+def candidates_discovery(cfg: OrQAConfig):
+    # generated_tasks = generate_tasks(cfg)
+    with open(
+        cfg.candidates_discovery.candidate_tasks_path, "r", encoding="utf-8"
+    ) as file:
+        generated_tasks = json.load(file)
+
+    execute_tasks(cfg, generated_tasks)

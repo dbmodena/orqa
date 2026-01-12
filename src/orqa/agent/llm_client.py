@@ -29,7 +29,8 @@ class LLMClient:
         self.retry_delay = self.config.get("retry_delay", 1.0)
         self.enable_json_mode = self.config.get("enable_json_mode", True)
         # self.prompt_key = self.config.get("prompt","You are an helpful assistant")
-        self.response_model = self._load_response_model()
+        self.response_model = self._load_pydantic_response_model()
+        assert self.response_model is not None
         if self.response_model is not None:
             self.raw = False
         else:
@@ -101,7 +102,7 @@ class LLMClient:
 
         return content.strip()
 
-    def _load_response_model(self) -> Optional[Type[BaseModel]]:
+    def _load_pydantic_response_model(self) -> Optional[Type[BaseModel]]:
         """
         Dynamically load Pydantic model from config.
 
@@ -143,16 +144,10 @@ class LLMClient:
         """
         Format JSON parsing error with context.
 
-        Args:
-            content: The content that failed to parse
-            error: The JSON parsing exception
-
-        Returns:
-            Human-readable error message for the LLM
+        :param content: The content that failed to parse
+        :param error: The JSON parsing exception
+        :return: Human-readable error message for the LLM
         """
-        # Show a snippet of the problematic content
-        snippet = content[:200] + "..." if len(content) > 200 else content
-
         formatted_error = (
             "❌ JSON PARSING ERROR - Your response is not valid JSON.\n\n"
             f"Error: {str(error)}\n\n"
@@ -160,10 +155,10 @@ class LLMClient:
             "Required schema:\n"
             f"{json.dumps(self.response_model.model_json_schema(), indent=2)}\n\n"
             "⚠️ Common issues:\n"
-            "  • Missing quotes around strings\n"
-            "  • Trailing commas\n"
-            "  • Unescaped special characters\n"
-            "  • Text before or after the JSON object\n\n"
+            "  - Missing quotes around strings\n"
+            "  - Trailing commas\n"
+            "  - Unescaped special characters\n"
+            "  - Text before or after the JSON object\n\n"
             "Please generate ONLY a valid JSON object matching the schema above."
         )
 
@@ -173,11 +168,8 @@ class LLMClient:
         """
         Format Pydantic validation error in a clear, actionable way.
 
-        Args:
-            error: Pydantic ValidationError
-
-        Returns:
-            Human-readable error message for the LLM
+        :param error: Pydantic ValidationError
+        :return: Human-readable error message for the LLM
         """
         error_messages = []
 
@@ -259,16 +251,14 @@ class LLMClient:
         """
         Make a completion request with optional structured output.
 
-        Args:
-            prompt: The prompt to send to the model
-            response_model: Optional Pydantic model for structured output
-            temperature: Override default temperature
-            max_retries: Override default max_retries
-            **kwargs: Additional arguments to pass to litellm.completion
+        :param prompt: The prompt to send to the model
+        :param response_model: Optional Pydantic model for structured output
+        :param temperature: Override default temperature
+        :param max_retries: Override default max_retries
+        :param **kwargs: Additional arguments to pass to litellm.completion
 
-        Returns:
-            If response_model is provided: instance of the Pydantic model
-            Otherwise: raw string response
+        :return: If response_model is provided, instance of the Pydantic model,
+                otherwise a raw string response
         """
         temp = temperature if temperature is not None else self.temperature
         retries = max_retries if max_retries is not None else self.max_retries
@@ -291,6 +281,8 @@ class LLMClient:
             self.response_model = reply_model
             self.raw = False
 
+        assert self.response_model is not None
+
         # Retry loop
         last_error = None
         for attempt in range(retries):
@@ -312,13 +304,15 @@ class LLMClient:
                 # Parse structured output
                 last_content = content
                 cleaned_content = self._clean_json_response(content)
+
                 try:
                     # First try to parse as JSON
                     json_data = json.loads(cleaned_content)
+
                     # Then validate with Pydantic
                     result = self.response_model.model_validate(json_data)
                     result = result.model_dump()
-                    print(result)
+
                     if schema is not None:
                         invalid, error_msg = self._value_validation_error(
                             result, schema
@@ -332,7 +326,7 @@ class LLMClient:
                                     if not column_typings[tasks["correlation_column"]]:
                                         error_msg = (
                                             "❌ Correlation ERROR - Non-numerical column used.\n\n"
-                                            f"The result:{result}\n\n"
+                                            f"The result: {result}\n\n"
                                             f"The column '{tasks['correlation_column']}' has dtype '{column_typings[tasks['correlation_column']]}', "
                                             "which is not numerical.\n\n"
                                             "Correlation can only be computed on numerical columns "
@@ -357,7 +351,7 @@ class LLMClient:
                         messages.append({"role": "assistant", "content": content})
                         # Add error feedback as user message
                         messages.append({"role": "user", "content": error_msg})
-                        print(f"💬 Sending error feedback to LLM...\n")
+                        print("💬 Sending error feedback to LLM...\n")
                         time.sleep(self.retry_delay)
                         continue
                 except ValidationError as e:
@@ -371,7 +365,7 @@ class LLMClient:
                         messages.append({"role": "assistant", "content": content})
                         # Add error feedback as user message
                         messages.append({"role": "user", "content": error_msg})
-                        print(f"💬 Sending validation errors to LLM...\n")
+                        print("💬 Sending validation errors to LLM...\n")
                         time.sleep(self.retry_delay)
                         continue
 
