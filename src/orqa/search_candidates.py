@@ -12,8 +12,6 @@ are proposed through an agentic step.
 
 """
 
-from orqa.utils import pl_read_dataset
-
 import json
 import os
 import random
@@ -22,9 +20,11 @@ from pathlib import Path
 
 import dotenv
 from tqdm import tqdm
+import polars as pl
 
 from conf import OrQAConfig
 from blend import BLEND
+from blend.utils import clean, remove_null_rows, remove_null_columns
 
 from .agent import agent
 from .utils import load_datasets_metadata, remove_file_extension, pl_read_dataset
@@ -111,25 +111,26 @@ def generate_tasks(cfg: OrQAConfig):
     return results
 
 
-def execute_tasks(cfg: OrQAConfig, tasks: dict):
+def execute_tasks(cfg: OrQAConfig, tasks: dict) -> list[dict]:
     datasets_path = cfg.datasets_path
     _format = cfg.datasets_format
 
     # instantiate the BLEND index
     index = BLEND(
         cfg.indexing.index_database_path,
-        clean_function_args=cfg.indexing.clean_func_args,
+        clean_args=cfg.indexing.clean_args,
         xash_size=cfg.indexing.xash_size,
     )
 
     top_k = cfg.candidates_discovery.candidates_per_task
 
-    # a collection where we will store our effective candidates
-    # as dictionaries
+    # a collection where we will store our effective candidates as dictionaries
     candidates = []
 
     # for each task, execute it over the index
     for dataset_id, task_set in tqdm(tasks.items(), desc="Executing tasks: "):
+        if not task_set:
+            continue
         dataset_filename = task_set["dataset"]
         dataset_path = datasets_path.joinpath(f"{dataset_filename}.{_format}")
 
@@ -141,13 +142,14 @@ def execute_tasks(cfg: OrQAConfig, tasks: dict):
 
         df = pl_read_dataset(dataset_path, cfg.polars_opts.read)
 
-        for task in tqdm(union_tasks, desc="Union tasks: ", position=1, leave=False):
+        for task in tqdm(union_tasks, desc="Union tasks", position=1, leave=False):
             columns = task["columns"]
-            _df = df.select(columns)
+            table = df.select(columns).rows()
 
-            top_res = index.union_search(_df.to_pandas(), top_k)
+            top_res = index.union_search(table, top_k)
 
-            for cand_id, _, _, _ in top_res:
+            for candidate in top_res:
+                cand_id = candidate[0]
                 candidates.append(
                     {
                         "Q": dataset_filename,
@@ -156,21 +158,20 @@ def execute_tasks(cfg: OrQAConfig, tasks: dict):
                     }
                 )
 
-        for task in tqdm(join_tasks, desc="Join tasks: ", position=1, leave=False):
+        for task in tqdm(join_tasks, desc="Join tasks", position=1, leave=False):
             columns = task["columns"]
             if len(columns) == 1:
-                values = df.get_column(columns[0])
-                top_res = index.single_column_join_search(values, top_k)
+                column = df.get_column(columns[0]).to_list()
+                top_res = index.single_column_join_search(column, top_k)
             else:
-                _df = df.select(columns)
-                # columns = [_df.get_column(c).to_list() for c in _df.columns]
-                columns = _df.rows()
-                import pandas as pd
+                table = df.select(columns).unique().rows()
 
-                pd_df = pd.DataFrame(columns)
-                print("\n\n>>> ", pd_df.shape, "\n\n\n")
-                top_res = index.multi_column_join_search(columns, top_k)
-
+                # print(table)
+                # import pandas as pd
+                #
+                # pd_df = pd.DataFrame(table)
+                # print("\n\n>>> ", pd_df.head(), "\n\n\n")
+                top_res = index.multi_column_join_search(table, top_k, verbose=False)
             for cand_id in top_res:
                 cand_id = cand_id[0]
 
@@ -178,9 +179,32 @@ def execute_tasks(cfg: OrQAConfig, tasks: dict):
                     {
                         "Q": dataset_filename,
                         "R": cand_id,
-                        "task": "U",
+                        "task": "J",
                     }
                 )
+
+        for task in tqdm(
+            join_correlation, desc="Join-Correlation tasks", position=1, leave=False
+        ):
+            # get the column names
+            key_column = task["join_column"]
+            target_column = task["correlation_column"]
+
+            # get the actual column
+            keys = df.get_column(key_column)
+            targets = df.get_column(target_column)
+
+            continue
+            # TODO: check dtype for targets
+            top_res = index.join_correlation_search(
+                keys, targets, top_k, hash_size=cfg.indexing.hash_size
+            )
+
+            for candidate in top_res:
+                cand_id = candidate[0]
+                candidates.append({"Q": dataset_filename, "R": cand_id, "task": "JC"})
+
+    return candidates
 
 
 def candidates_discovery(cfg: OrQAConfig):
@@ -190,4 +214,8 @@ def candidates_discovery(cfg: OrQAConfig):
     ) as file:
         generated_tasks = json.load(file)
 
-    execute_tasks(cfg, generated_tasks)
+    discovered_candidates = execute_tasks(cfg, generated_tasks)
+    discovered_candidates = pl.from_records(discovered_candidates, orient="row")
+    discovered_candidates.write_csv(cfg.candidates_discovery.candidates_results_path)
+    # with open(cfg.candidates_discovery.candidates_results_path, "w") as file:
+    #     json.dump(discovered_candidates, file)

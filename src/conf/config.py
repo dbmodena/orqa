@@ -75,8 +75,7 @@ class Indexing:
     index_database_path: Path
     max_process_workers: int
 
-    clean_func_args: Optional[dict]
-    top_k: int
+    clean_args: dict
     verbose: bool
 
 
@@ -156,6 +155,8 @@ class OrQAConfig:
 
     logging_path: Path = field(init=False)
 
+    tmp_path: Path = field(init=False)
+
     # The format with which datasets are stored locally
     datasets_format: str
 
@@ -166,6 +167,7 @@ class OrQAConfig:
 
         self.metadata_path = Path(self.data_path, "metadata")
         self.logging_path = Path(self.data_path, "logging_path")
+        self.tmp_path = Path(self.data_path, "tmp")
         self.prompts_path = Path(__file__).parent.parent.parent.joinpath(
             "conf", "prompts"
         )
@@ -207,6 +209,10 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     crawling = Crawling(**crawling_task)
 
     indexing_task = parsed["tasks"]["indexing"]
+    indexing_task["clean_args"] = indexing_task.get("clean_args", {})
+    indexing_task["clean_args"]["bad_tokens"] = tuple(
+        indexing_task["clean_args"].get("bad_tokens", [])
+    )
     index_folder_path = data_path.joinpath("blend")
     index_database_path = index_folder_path.joinpath("index.db")
     indexing = Indexing(

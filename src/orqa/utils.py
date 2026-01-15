@@ -31,6 +31,14 @@ def pl_scan_dataset(dataset_path: Path, opts) -> pl.LazyFrame:
             )
 
 
+def remove_null_rows(df: pl.DataFrame, *exclude_columns) -> pl.DataFrame:
+    return df.filter(~pl.all_horizontal(pl.all().exclude(*exclude_columns).is_null()))
+
+
+def remove_null_columns(df: pl.DataFrame) -> pl.DataFrame:
+    return df[[s.name for s in df if not (s.null_count() == df.height)]]
+
+
 def remove_file_extension(filename: str) -> str:
     # convert to Path object and stem it
     return Path(filename).stem
@@ -115,11 +123,13 @@ def load_dataset_info(
     Load CSV and extract relevant information for the LLM.
     Returns a dict ready to be unpacked as kwargs for load_prompt.
     """
-    lf = pl_scan_dataset(dataset_path, polars_opts)
+    df = pl_read_dataset(dataset_path, polars_opts)
+
+    df = remove_null_columns(df)
+    df = remove_null_rows(df)
 
     # Get first N columns (or all if fewer)
-    schema = lf.collect_schema()
-    df = lf.select(schema.names()[:limit_to_n_columns]).collect()
+    df = df.select(df.columns[:limit_to_n_columns])
 
     # Build detailed column information string
     column_typings = {}
