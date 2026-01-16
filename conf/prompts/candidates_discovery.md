@@ -18,12 +18,13 @@ Analyze the given dataset and identify columns for UNION, JOIN and JOIN-CORRELAT
    - Identify pairs where one column is a join key and another correlates with it
    - Each entry: {{"join_column": "id_col", "correlation_column": "metric_col"}}
    - Examples: user_id with total_purchases, product_id with price
-   - The correlation column MUST be numeric (e.g., amount, price, quantity, score, balance)
+   - The correlation column MUST be numeric (e.g., amount, price, quantity, score, balance).
+     Do not consider categorical columns (e.g. with boolean "yes/no", with categoricals "small/medium/large", ...)
 
 ### Notes
 
 1. Do not focus on correctness of numerical values: for instance, 6,124.45 is as correct as 6124.45
-2. For Union tasks, is preferable to include more columns instead than just 1 or 2.
+2. For Union tasks is better to consider wider set of columns.
 3. For Join tasks, ignore those columns with few unique value (<3).
 4. Propose **at most 5** tasks for each task type.
 

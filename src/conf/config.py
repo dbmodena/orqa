@@ -57,7 +57,9 @@ class Crawling:
     accept_zip: bool
     download_format: Literal["csv", "parquet", "json"]
     engine: Literal["pandas", "polars"]
-    max_resource_size: int
+    max_resource_size: int  # CKAN-only
+    max_rows_per_dataset: int  # Socrata-only
+    batch_rows_per_dataset: int  # Socrata-only
     max_process_workers: int
     max_thread_workers: int
     verbose: bool
@@ -121,6 +123,9 @@ class CandidatesDiscovery:
     # Candidates per task, i.e. how many results we'll fetch
     # with the BLEND index
     candidates_per_task: int
+
+    # Hash size for the QCR schema used by BLEND
+    qcr_hash_size: int
 
 
 @dataclass
@@ -205,7 +210,23 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     seed = int(parsed["seed"])
 
     crawling_task = parsed["tasks"]["crawling"]
+
+    # For the Crawling stage, set to default values to deal with CKAN/Socrata differences
+    # CKAN-only parameters
+    crawling_task["max_resource_size"] = crawling_task.get("max_resource_size", "1MB")
     crawling_task["max_resource_size"] = to_bytes(crawling_task["max_resource_size"])
+    crawling_task["batch_fetch_metadata"] = crawling_task.get(
+        "batch_fetch_metadata", 100
+    )
+
+    # Socrata-only parameters
+    crawling_task["max_rows_per_dataset"] = crawling_task.get(
+        "max_rows_per_dataset", 100_000
+    )
+    crawling_task["batch_rows_per_dataset"] = crawling_task.get(
+        "batch_rows_per_dataset", 10_000
+    )
+
     crawling = Crawling(**crawling_task)
 
     indexing_task = parsed["tasks"]["indexing"]
@@ -223,7 +244,8 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
 
     candidates_discovery_task = parsed["tasks"]["candidates_discovery"]
     candidate_tasks_path = data_path.joinpath("candidate_tasks.json")
-    candidates_list_path = data_path.joinpath("candidates.csv")
+    # candidates_list_path = data_path.joinpath("candidates.csv")
+    candidates_list_path = data_path.joinpath("candidates.json")
     candidates_discovery = CandidatesDiscovery(
         candidate_tasks_path, candidates_list_path, **candidates_discovery_task
     )

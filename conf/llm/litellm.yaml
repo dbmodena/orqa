@@ -7,6 +7,7 @@
 #   - openai/gpt-4
 #   - anthropic/claude-3-sonnet
 model: "groq/llama-3.1-8b-instant"
+# model: "together_ai/togethercomputer/Llama-2-7B-32K-Instruct"
 
 # Temperature (0.0 = deterministic, 2.0 = very creative)
 temperature: 0.2
@@ -15,7 +16,9 @@ temperature: 0.2
 max_retries: 3
 
 # Delay in seconds between retry attempts
-retry_delay: 1.0
+# we set a high delay until we do not work 
+# locally...
+retry_delay: 10.0
 
 # Enable JSON mode for structured outputs
 # (requires model support for response_format)

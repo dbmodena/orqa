@@ -126,7 +126,7 @@ def load_dataset_info(
     df = pl_read_dataset(dataset_path, polars_opts)
 
     df = remove_null_columns(df)
-    df = remove_null_rows(df)
+    df = remove_null_rows(df, [])
 
     # Get first N columns (or all if fewer)
     df = df.select(df.columns[:limit_to_n_columns])
@@ -135,11 +135,7 @@ def load_dataset_info(
     column_typings = {}
     coldetails = ""
     for col in df.columns:
-        coldetails += f"\n- {col}:"
-        coldetails += f"\n  Type: {df[col].dtype}"
-        coldetails += f"\n  Num Unique: {df[col].n_unique()}"
-        coldetails += f"\n  Null count: {df[col].null_count()}"
-
+        coldetails = f"\n- {col} (df[col].dtype): {df[col].null_count()} nulls, {df[col].n_unique()} unique values."
         column_typings[col] = df[col].dtype.is_numeric()
 
     sample = df.sample(min(sample_size, df.height), seed=seed)

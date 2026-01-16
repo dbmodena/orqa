@@ -1,11 +1,10 @@
-from orqa.search_candidates import candidates_discovery
-import sys
 import os
+import sys
 from pathlib import Path
 
 from conf import load_config
-
-from orqa.crawling import crawl_canada, crawl_uk
+from orqa.candidates_generation import candidates_discovery
+from orqa.crawling import crawl_canada, crawl_nyc, crawl_uk
 from orqa.indexing import create_blend_index
 
 
@@ -36,16 +35,34 @@ def uk():
     candidates_discovery(cfg)
 
 
+def nyc():
+    nyc_yaml_path = Path(
+        os.path.dirname(__file__), "..", "conf", "workflow", "nyc.yaml"
+    )
+    data_path = Path(os.environ["DATADIR"], "orqa", "socrata", "nyc")
+
+    data_path.mkdir(parents=True, exist_ok=True)
+
+    cfg = load_config(nyc_yaml_path, data_path)
+
+    crawl_nyc(cfg)
+    # create_blend_index(cfg)
+    # candidates_discovery(cfg)
+
+
 def main():
-    assert len(sys.argv) == 2, "Usage is: python main.py <canada | uk>"
+    accepted = ["canada", "uk", "nyc"]
+    assert len(sys.argv) == 2, f"Usage is: python main.py <{' | '.join(accepted)}>"
 
     match sys.argv[1]:
         case "canada":
             canada()
         case "uk":
             uk()
+        case "nyc":
+            nyc()
         case _:
-            raise ValueError("Usage is: python main.py <canada | uk>")
+            raise ValueError(f"Usage is: python main.py <{' | '.join(accepted)}>")
 
 
 if __name__ == "__main__":

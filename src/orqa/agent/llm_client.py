@@ -282,6 +282,7 @@ class LLMClient:
             self.raw = False
 
         assert self.response_model is not None
+        last_content = None
 
         # Retry loop
         last_error = None

@@ -11,12 +11,14 @@ dependencies = [
     "inflection>=0.5.1",
     "jsonlines>=4.0.0",
     "litellm>=1.80.10",
+    "networkx>=3.6.1",
     "pandas>=2.3.3",
     "polars>=1.36.1",
     "pyarrow>=22.0.0",
     "pyyaml>=6.0.3",
     "tqdm>=4.67.1",
     "ulod",
+    "wrapt-timeout-decorator>=1.5.1",
 ]
 
 [tool.uv.sources]
