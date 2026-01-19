@@ -7,6 +7,9 @@ from fake_useragent import UserAgent
 from ulod.bulk.ckan import CKANDownloadConfig, ckan_download_datasets
 from ulod.ckan import UKCKAN, CanadaCKAN
 
+from ulod.socrata import NYCSocrata
+from ulod.bulk.socrata import SocrataDownloadConfig, socrata_download_datasets
+
 from conf import OrQAConfig
 
 ua = UserAgent()
@@ -129,3 +132,27 @@ def crawl_uk(cfg: OrQAConfig):
     )
 
     ckan_download_datasets(download_cfg, uk)
+
+
+def crawl_nyc(cfg: OrQAConfig):
+    download_destination = cfg.data_path
+    download_destination.mkdir(parents=True, exist_ok=True)
+
+    nyc = NYCSocrata(os.environ["SOCRATA_NYC_APP_TOKEN"])
+
+    download_cfg = SocrataDownloadConfig(
+        download_destination,
+        max_datasets=cfg.crawling.max_datasets,
+        from_dataset_index=cfg.crawling.from_dataset_index,
+        download_format=cfg.crawling.download_format,
+        save_metadata=True,
+        engine=cfg.crawling.engine,
+        cast_datatypes=True,
+        max_rows_per_dataset=cfg.crawling.max_rows_per_dataset,
+        batch_rows_per_dataset=cfg.crawling.batch_rows_per_dataset,
+        max_process_workers=cfg.crawling.max_process_workers,
+        max_thread_workers=cfg.crawling.max_thread_workers,
+        verbose=cfg.crawling.verbose,
+    )
+
+    socrata_download_datasets(download_cfg, nyc)
