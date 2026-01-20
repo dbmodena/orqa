@@ -24,6 +24,9 @@ class LLMClient:
         """
         self.config = self._load_config(config_path)
         self.model = self.config.get("model", "groq/llama-3.1-8b-instant")
+        self.api_base = self.config.get("api_base",None)
+        self.keep_alive = self.config.get("keep_alive","24h")
+        self.num_ctx = self.config.get("num_ctx",8192)
         self.temperature = self.config.get("temperature", 0.2)
         self.max_retries = self.config.get("max_retries", 3)
         self.retry_delay = self.config.get("retry_delay", 1.0)
@@ -272,9 +275,13 @@ class LLMClient:
             "model": self.model,
             "messages": messages,
             "temperature": temp,
+            "keep_alive": self.keep_alive,
+            "num_ctx": self.num_ctx,
             **kwargs,
         }
-
+        if self.api_base:
+            completion_args["api_base"] = self.api_base
+        if self.
         # Enable JSON mode if we have a response model
         if reply_model and self.enable_json_mode:
             completion_args["response_format"] = {"type": "json_object"}
