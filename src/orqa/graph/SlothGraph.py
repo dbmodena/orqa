@@ -97,7 +97,7 @@ def analyzeTablePair(rTab: List[List[Any]], sTab: List[List[Any]],
 def analyze_table_pair(left_table:Path=None,right_table:Path=None)-> float:
     try:
         l_table, r_table = prepare_tables(left_table,right_table)
-        return analyzeTablePair(l_table, r_table,False)  # FIXED: was using Path instead of loaded tables
+        return analyzeTablePair(l_table, r_table,False) 
     except Exception as e:
         print(e)
         return 0
@@ -105,7 +105,7 @@ def analyze_table_pair(left_table:Path=None,right_table:Path=None)-> float:
 def prepare_tables(left_table:Path,right_table:Path):
     l_table = loadCsvAsLists(pd.read_csv(left_table,thousands=","))
     r_table = loadCsvAsLists(pd.read_csv(right_table,thousands=","))
-    return l_table, r_table  # FIXED: was returning Path instead of loaded tables
+    return l_table, r_table  
 
 
 def loadCsvAsLists(df) -> List[List[Any]]:
@@ -225,7 +225,7 @@ if __name__ == "__main__":
     operation = "JC"
     path_matches = Path(MATCHES_JSON)
     path_dataset = Path(DATASET_DIR)
-    G = build_matches_graph(path_matches, path_dataset)  # FIXED: path -> path_matches
+    G = build_matches_graph(path_matches, path_dataset)
     matching_subgraph = fetch_matches(G, node=table_id, edge_label=operation)
     print(matching_subgraph.edges())
 
