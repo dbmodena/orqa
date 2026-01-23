@@ -4,12 +4,31 @@ Candidates Discovery Stage
 In this stage, candidates for actual dataset generation in next steps
 are proposed through an agentic step.
 
-1 - The CandidatesDiscoveryAgent agent analyses a random subset of datasets
+1. A first AI Agent analyses a random subset of datasets
     drawned from the whole available collection;
         a. for each dataset, it inspects its available metadata and a sample
             of few rows;
-        b. if the dataset is not recognized as valid, any
-
+        b. if the dataset is valid, the Agent proposes a set of data discovery
+            tasks to perform on it against the BLEND index.
+2. The proposed tasks are executed and each identified pair of candidate
+    matching datasets is stored.
+        a. Schema matching techniques are applied on the Join-discovered candidates,
+            avoiding to consider datasets with nearly-identical or identical schema
+            as joinable, while instead would be better to consider them only as unionable.
+3. The identified matches are used to build a graph representing the relationships
+    discovered among datasets: also, the graph is enriched with metadata about the
+    overlap ratio between each pair of tables, and metrics from schema matching
+    techniques.
+4. The graph is navigated in a random-walk or metadata-driven fashion to generate
+    paths of related involved, with 1...N datasets involved.
+    If a boolean predicate is specified, the generation is conducted on the sub-graph
+    induced by the predicate.
+        a. In the random-walk case, the graph is just traversed focusing only on
+            a specified type or relationships (e.g. Union-only), avoiding loops
+            and repeteated nodes.
+        b. In the metadata-driven case, the graph is again traversed in a random-walk
+            style, but giving more weight to one of the available metrics (overlap_ratio, ...)
+    In both case, each generated path is then used as final candidate.
 """
 
 import json
@@ -17,9 +36,11 @@ import os
 import random
 import resource
 import time
+from functools import partial
 from pathlib import Path
 
 import dotenv
+import networkx as nx
 import polars as pl
 from blend import BLEND
 from tqdm import tqdm
@@ -28,6 +49,7 @@ from wrapt_timeout_decorator import timeout
 from conf import OrQAConfig
 
 from .agent import agent
+from .graph import graph_builder, graph_explorer
 from .utils import load_datasets_metadata, pl_read_dataset, remove_file_extension
 
 # make the API key for LLM available
@@ -94,20 +116,14 @@ def sample_seed_datasets(
     return sample  # ty: ignore
 
 
-def generate_tasks(cfg: OrQAConfig):
+def generate_tasks(cfg: OrQAConfig, seed_datasets: list[tuple[str, Path, str]]):
     datasets_path = cfg.datasets_path
-
-    # sample dataset seeds for the candidates discovery step
-    print("Sample seed datasets...")
-    sample = sample_seed_datasets(
-        datasets_path, cfg.candidates_discovery.n_random_dataset_seeds, cfg.seed
-    )
 
     # for each of these sample datasets, fetch its relative metadata
     print("Loading metadata for sampled datasets...")
     metadata = load_datasets_metadata(
         cfg.metadata_path.joinpath("metadata.json"),
-        [s[3 if len(s) == 4 else 2] for s in sample],
+        [s[3 if len(s) == 4 else 2] for s in seed_datasets],
     )
 
     litellm_config_path = cfg.llm_config_path.joinpath("litellm.yaml")
@@ -122,7 +138,7 @@ def generate_tasks(cfg: OrQAConfig):
     results = {}
 
     for dataset_filename, dataset_path, dataset_name, dataset_id in tqdm(
-        sample, desc="Generating Tasks"
+        seed_datasets, desc="Generating Tasks"
     ):
         try:
             _metadata = metadata[dataset_id]
@@ -143,7 +159,7 @@ def generate_tasks(cfg: OrQAConfig):
             print(f"\n\n{e}\n\n")
 
     with open(
-        cfg.candidates_discovery.candidate_tasks_path, "w", encoding="utf-8"
+        cfg.candidates_discovery.proposed_tasks_path, "w", encoding="utf-8"
     ) as file:
         json.dump(results, file, indent=4, ensure_ascii=False)
 
@@ -193,7 +209,7 @@ def execute_tasks(cfg: OrQAConfig, tasks: dict) -> list[dict]:
         xash_size=cfg.indexing.xash_size,
     )
 
-    top_k = cfg.candidates_discovery.candidates_per_task
+    top_k = cfg.candidates_discovery.top_k_results_per_task
 
     # a collection where we will store our effective candidates as dictionaries
     candidates = []
@@ -334,33 +350,109 @@ def execute_tasks(cfg: OrQAConfig, tasks: dict) -> list[dict]:
                         "r_target": r_target_column,
                     }
                 )
-        with open(cfg.candidates_discovery.candidates_results_path, "w") as file:
+        with open(cfg.candidates_discovery.tasks_results_path, "w") as file:
             json.dump(candidates, file, indent=4)
     return candidates
 
 
-def candidates_discovery(cfg: OrQAConfig):
-    # generated_tasks = generate_tasks(cfg)
+def build_matches_graph(cfg: OrQAConfig, matches: list[dict]) -> nx.MultiDiGraph:
+    G = graph_builder.build_matches_graph(
+        matches, cfg.datasets_path, cfg.polars_opts.read
+    )
 
-    with open(cfg.candidates_discovery.candidate_tasks_path, "r") as file:
+    nx.write_gml(G, cfg.candidates_discovery.matches_graph_path)
+    return G
+
+
+def overlap_ratio_only_predicate(edge_data: dict, overlap_threshold: float) -> bool:
+    return edge_data["overlap_ratio"] >= overlap_threshold
+
+
+def explore_matches_graph(
+    cfg: OrQAConfig, G: nx.MultiDiGraph, seed_datasets: list[tuple[str, Path, str]]
+):
+    _overlap_ratio_only_predicate = partial(
+        overlap_ratio_only_predicate,
+        overlap_threshold=cfg.candidates_discovery.overlap_ratio_threshold,
+    )
+
+    random_walks = []
+
+    for dataset_filename, dataset_path, dataset_name, dataset_id in tqdm(
+        seed_datasets, desc="Exploring Graph"
+    ):
+        # FIX: Here we do not check whether a Join column is considered
+        # also in any other Join/Join-Correlation candidate match during
+        # search.
+        for edge_labels in [["U"], ["J", "JC"]]:
+            sub_graph = graph_explorer.fetch_matches(
+                G,
+                dataset_id,
+                None,  # _overlap_ratio_only_predicate,
+                edge_labels,  # ty: ignore
+                cfg.candidates_discovery.max_path_length,
+            )
+
+            for random_walk in nx.generate_random_paths(
+                sub_graph,
+                cfg.candidates_discovery.n_paths_for_dataset,
+                cfg.candidates_discovery.max_path_length,
+                weight="overlap_ratio",
+                seed=cfg.seed,
+                source=dataset_id,
+            ):
+                random_walks.append(
+                    {
+                        "Q": dataset_id,
+                        "operation_type": edge_labels,
+                        "datasets": random_walk,  # this should be a list
+                    }
+                )
+
+    with open(cfg.candidates_discovery.candidates_path, "w") as file:
+        json.dump(random_walks, file)
+
+
+def get_seed_datasets(cfg: OrQAConfig):
+    # sample dataset seeds for the candidates discovery step
+    if cfg.candidates_discovery.seeds_datasets_path.exists():
+        with open(cfg.candidates_discovery.seeds_datasets_path) as file:
+            sample = json.load(file)
+    else:
+        sample = sample_seed_datasets(
+            cfg.datasets_path, cfg.candidates_discovery.n_random_dataset_seeds, cfg.seed
+        )
+
+    return sample
+
+
+def candidates_discovery(cfg: OrQAConfig):
+    GENERATE_TASKS = True
+    EXECUTE_TASKS = False
+    BUILD_GRAPH = False
+    EXPLORE_GRAPH = False
+
+    seed_datasets = get_seed_datasets(cfg)
+
+    if GENERATE_TASKS:
+        generate_tasks(cfg, seed_datasets)
+    with open(cfg.candidates_discovery.proposed_tasks_path, "r") as file:
         generated_tasks = json.load(file)
 
     memory_limit_half()
+
+    if EXECUTE_TASKS:
+        execute_tasks(cfg, generated_tasks)
     with open(
-        cfg.candidates_discovery.candidates_results_path.parent.joinpath(
-            "candidates_0_to_23.json"
-        ),
+        cfg.candidates_discovery.tasks_results_path,
         "r",
     ) as file:
         discovered_candidates = json.load(file)
-    #
-    # print({c["Q"] for c in discovered_candidates})
-    # print(len({c["Q"] for c in discovered_candidates}))
 
-    # execute_tasks(cfg, generated_tasks)
+    if BUILD_GRAPH:
+        G = build_matches_graph(cfg, discovered_candidates)
+    else:
+        G = nx.read_gml(cfg.candidates_discovery.matches_graph_path)
 
-    with open(
-        cfg.candidates_discovery.candidates_results_path,
-        "r",
-    ) as file:
-        discovered_candidates = json.load(file)
+    if EXPLORE_GRAPH:
+        explore_matches_graph(cfg, G, seed_datasets)

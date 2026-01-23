@@ -45,6 +45,6 @@ tasks:
     min_dataset_height: 10
     limit_to_n_columns: 15
     sample_size: 3
-    candidates_per_task: 30
+    top_k_results_per_task: 30
     qcr_hash_size: 128
 

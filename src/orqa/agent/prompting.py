@@ -131,7 +131,7 @@ class DatasetDescription(Prompt):
 
 
 class CandidatesDiscoveryPrompt(Prompt):
-    _prompt_path = PROMPT_PATH.joinpath("candidates_discovery.md")
+    _prompt_path = PROMPT_PATH.joinpath("propose_discovery_tasks.md")
 
     def update(
         self,

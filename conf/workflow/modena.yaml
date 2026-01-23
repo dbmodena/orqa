@@ -1,9 +1,3 @@
-# New York City Scenario
-# NYC Open Data are provided by Socrata, and some key differences with 
-# CKAN cases have to be kept in mind. First, the metadata are quite different,
-# since here we have column-level details, and we do not have anymore the 
-# package-resource(s) semantic, we just have "datasets".
-
 seed: 0
 
 pandas:
@@ -15,16 +9,13 @@ pandas:
 
 tasks:
   crawling:
-    max_datasets: 3000
-
+    max_datasets: 2000
     from_dataset_index: 0
-    # batch_fetch_metadata: 500 # CKAN-only
+    batch_fetch_metadata: 500
     accept_zip: False
     download_format: csv 
     engine: pandas
-    # max_resource_size: 20MB # CKAN-only
-    max_rows_per_dataset: 100_000 # Socrata-only
-    batch_rows_per_dataset: 10_000 # Socrata-only
+    max_resource_size: 100MB
     max_process_workers: 6
     max_thread_workers: 4
     verbose: True
@@ -56,4 +47,6 @@ tasks:
     sample_size: 3
     top_k_results_per_task: 30
     qcr_hash_size: 128
-
+    n_paths_for_dataset: 5
+    max_path_length: 5
+    overlap_ratio_threshold: 0.5

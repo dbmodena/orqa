@@ -6,11 +6,13 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "bidict>=0.23.1",
+    "bitarray>=3.8.0",
     "blend",
     "duckdb>=1.4.3",
     "inflection>=0.5.1",
     "jsonlines>=4.0.0",
     "litellm>=1.80.10",
+    "matplotlib>=3.10.8",
     "networkx>=3.6.1",
     "pandas>=2.3.3",
     "polars>=1.36.1",

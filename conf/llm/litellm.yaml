@@ -1,16 +1,20 @@
 # LLM Configuration File
 
-# Model to use (any LiteLLM-supported model)
+# groq setup
 # Examples:
 #   - groq/llama-3.1-8b-instant
 #   - groq/llama-3.1-70b-versatile
 #   - openai/gpt-4
 #   - anthropic/claude-3-sonnet
-#model: "groq/llama-3.1-8b-instant"
-model: ollama_chat/llama3.3:latest
-api_base: http://localhost:11434
-keep_alive: 24h
-num_ctx: 8192
+model: "groq/llama-3.3-70b-versatile"
+
+# Local Ollama setup
+# model: ollama_chat/llama3.3:latest
+# api_base: http://localhost:11434
+# keep_alive: 24h
+# num_ctx: 8192
+
+# TogetherAI setup
 # model: "together_ai/togethercomputer/Llama-2-7B-32K-Instruct"
 
 # Temperature (0.0 = deterministic, 2.0 = very creative)

@@ -96,13 +96,19 @@ class CandidatesDiscovery:
     at least one result.
     """
 
+    # We store also the seed datasets initially sampled
+    seeds_datasets_path: Path
+
     # Where the discovered candidates are stored as
     # possible executable tasks
-    candidate_tasks_path: Path
+    proposed_tasks_path: Path
 
     # Where results computed with BLEND are stored
     # as a CSV
-    candidates_results_path: Path
+    tasks_results_path: Path
+
+    # The final candidates for the generation
+    candidates_path: Path
 
     # How many datasets we will randomly sample as
     # seeds for the discovery task
@@ -122,10 +128,21 @@ class CandidatesDiscovery:
 
     # Candidates per task, i.e. how many results we'll fetch
     # with the BLEND index
-    candidates_per_task: int
+    top_k_results_per_task: int
 
     # Hash size for the QCR schema used by BLEND
     qcr_hash_size: int
+
+    # Where to store the matches graph generated from the executed tasks
+    matches_graph_path: Path
+
+    # The number of distinct paths to generate for each seed datasets
+    n_paths_for_dataset: int
+
+    # The maximum path length for each path
+    max_path_length: int
+
+    overlap_ratio_threshold: float
 
 
 @dataclass
@@ -207,8 +224,10 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     with open(yaml_path, "r") as file:
         parsed = yaml.safe_load(file)
 
+    # we will use a unique seed for random operations
     seed = int(parsed["seed"])
 
+    # setup the Crawling step
     crawling_task = parsed["tasks"]["crawling"]
 
     # For the Crawling stage, set to default values to deal with CKAN/Socrata differences
@@ -229,6 +248,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
 
     crawling = Crawling(**crawling_task)
 
+    # setup the Indexing step
     indexing_task = parsed["tasks"]["indexing"]
     indexing_task["clean_args"] = indexing_task.get("clean_args", {})
     indexing_task["clean_args"]["bad_tokens"] = tuple(
@@ -242,12 +262,24 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         index_database_path=index_database_path,
     )
 
+    # setup the Candidates Discovery step
     candidates_discovery_task = parsed["tasks"]["candidates_discovery"]
-    candidate_tasks_path = data_path.joinpath("candidate_tasks.json")
-    # candidates_list_path = data_path.joinpath("candidates.csv")
-    candidates_list_path = data_path.joinpath("candidates.json")
+    cand_disc_directory = data_path.joinpath("candidates_discovery")
+    cand_disc_directory.mkdir(exist_ok=True)
+    seeds_datasets_path = cand_disc_directory.joinpath("seeds_datasets.json")
+    proposed_tasks_path = cand_disc_directory.joinpath("proposed_tasks.json")
+    tasks_results_path = cand_disc_directory.joinpath("tasks_results.json")
+    matches_graph_path = cand_disc_directory.joinpath("matches_graph.gml")
+    final_candidates_path = cand_disc_directory.joinpath(
+        "final_generation_candidates.json"
+    )
     candidates_discovery = CandidatesDiscovery(
-        candidate_tasks_path, candidates_list_path, **candidates_discovery_task
+        seeds_datasets_path,
+        proposed_tasks_path,
+        tasks_results_path,
+        final_candidates_path,
+        matches_graph_path=matches_graph_path,
+        **candidates_discovery_task,
     )
 
     orqa_cfg = OrQAConfig(

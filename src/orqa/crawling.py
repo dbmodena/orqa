@@ -5,7 +5,7 @@ from typing import Any
 
 from fake_useragent import UserAgent
 from ulod.bulk.ckan import CKANDownloadConfig, ckan_download_datasets
-from ulod.ckan import UKCKAN, CanadaCKAN
+from ulod.ckan import UKCKAN, CanadaCKAN, ModenaCKAN
 
 from ulod.socrata import NYCSocrata
 from ulod.bulk.socrata import SocrataDownloadConfig, socrata_download_datasets
@@ -132,6 +132,34 @@ def crawl_uk(cfg: OrQAConfig):
     )
 
     ckan_download_datasets(download_cfg, uk)
+
+
+def crawl_modena(cfg: OrQAConfig):
+    download_destination = cfg.data_path
+    download_destination.mkdir(parents=True, exist_ok=True)
+
+    client = ModenaCKAN(headers=headers)
+
+    download_cfg = CKANDownloadConfig(
+        download_destination,
+        max_datasets=cfg.crawling.max_datasets,
+        from_dataset_index=cfg.crawling.from_dataset_index,
+        batch_fetch_metadata=cfg.crawling.batch_fetch_metadata,
+        search_filters=cfg.crawling.search_filters,
+        filter_resource_metadata=_uk_filter_resource_metadata,
+        download_format=cfg.crawling.download_format,
+        http_headers=headers,
+        read_dataset_kwargs=cfg.pandas_opts.read[cfg.crawling.download_format],
+        save_dataset_kwargs=cfg.pandas_opts.write[cfg.crawling.download_format],
+        accept_zip=cfg.crawling.accept_zip,
+        engine=cfg.crawling.engine,
+        max_resource_size=cfg.crawling.max_resource_size,
+        max_process_workers=cfg.crawling.max_process_workers,
+        max_thread_workers=cfg.crawling.max_thread_workers,
+        verbose=cfg.crawling.verbose,
+    )
+
+    ckan_download_datasets(download_cfg, client)
 
 
 def crawl_nyc(cfg: OrQAConfig):

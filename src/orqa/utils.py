@@ -7,7 +7,7 @@ import polars as pl
 from bs4 import BeautifulSoup
 
 
-def pl_read_dataset(dataset_path: Path, opts) -> pl.DataFrame:
+def pl_read_dataset(dataset_path: Path, opts: dict = {}) -> pl.DataFrame:
     match dataset_path.suffix:
         case ".csv":
             return pl.read_csv(dataset_path, **opts.get("csv", {}))
@@ -19,7 +19,7 @@ def pl_read_dataset(dataset_path: Path, opts) -> pl.DataFrame:
             )
 
 
-def pl_scan_dataset(dataset_path: Path, opts) -> pl.LazyFrame:
+def pl_scan_dataset(dataset_path: Path, opts: dict = {}) -> pl.LazyFrame:
     match dataset_path.suffix:
         case ".csv":
             return pl.scan_csv(dataset_path, **opts.get("csv", {}))
@@ -135,7 +135,7 @@ def load_dataset_info(
     column_typings = {}
     coldetails = ""
     for col in df.columns:
-        coldetails = f"\n- {col} (df[col].dtype): {df[col].null_count()} nulls, {df[col].n_unique()} unique values."
+        coldetails += f"\n- {col} (df[col].dtype): {df[col].null_count()} nulls, {df[col].n_unique()} unique values."
         column_typings[col] = df[col].dtype.is_numeric()
 
     sample = df.sample(min(sample_size, df.height), seed=seed)
