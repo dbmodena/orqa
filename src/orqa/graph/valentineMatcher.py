@@ -26,16 +26,19 @@ THRESHOLD = 0.5
 MAX_WORKERS = 12
 
 ### calcs the Valentine averages
-def calcAvgValentine(scores,q_columns:list=None,r_columns:list=None):
+def calcAvgValentine(scores,q_columns:list=None,r_columns:list=None,q_key:str=None,q_target:str=None,r_key:str=None,r_target:str=None):
     averageAll = sum(scores.values()) / len(scores)
     specificAvg = 0
     filteredValues = []
     if q_columns is not None and r_columns is not None:
         filteredValues = [ value for ((_, col1), (_, col2)), value in scores.items()if col1 in q_columns and col2 in r_columns]
-        specificAvg = sum(filteredValues) / len(filteredValues)
+        specificAvg = sum(filteredValues) / len(filteredValues) if filteredValues else 0
     elif q_columns is not None:
         filteredValues = [ value for ((_, col1), (_, col2)), value in scores.items()if col1 in q_columns and col2 in q_columns]
-        specificAvg = sum(filteredValues) / len(filteredValues)
+        specificAvg =  sum(filteredValues) / len(filteredValues) if filteredValues else 0
+    elif q_key is not None and q_target is not None and r_key is not None and r_target is not None:
+        filteredValues = [ value for ((_, col1), (_, col2)), value in scores.items()if (col1 == q_key and col2==r_key) or (col1 == q_target and col2==r_target)]
+        specificAvg = sum(filteredValues) / len(filteredValues) if filteredValues else 0
     return averageAll,specificAvg
 
 def prepare_datasets(dataset_dir,Q,R):
@@ -49,29 +52,39 @@ def prepare_datasets(dataset_dir,Q,R):
         print(e)
         return None
 
-def valentineHandler(dataset_dir,Q, R, q_columns:list =None,r_indices:list=None) -> Dict:
+def valentineHandler(dataset_dir,task,Q, R, q_columns:list =None,r_indices:list=None,q_key:str=None,q_target:str=None,r_key:str=None,r_target:str=None) -> Dict:
     try:
         l_table, r_table = prepare_datasets(dataset_dir,Q,R)
         matcher = Coma(use_instances=True)
-        if r_indices is not None:
-            matches= valentine_match(l_table, r_table, matcher)
+        matches= valentine_match(l_table, r_table, matcher)
+        print("= L Table" + "="*50)
+        print(l_table.columns)
+        print("= R Table" + "="*50)
+        print(r_table.columns)
+
+        print(matches)
+        if task=="U":
             r_columns = r_table.columns[r_indices].tolist()
             avg, avg_q= calcAvgValentine(matches,q_columns,r_columns)
             print(f"average overall {avg}")
             print(f"average score columns involved {avg_q}")
             return matches,avg,avg_q
-        else:
-            matches= valentine_match(l_table, r_table, matcher)
+        elif task == "MJ":
             avg, avg_q= calcAvgValentine(matches,q_columns)
+            print(f"average overall {avg}")
+            print(f"average score columns involved {avg_q}")
+            return matches,avg,avg_q
+        elif task == "JC":
+            r_key_label= r_table.columns[r_key]
+            r_target_label = r_table.columns[r_target]
+            print(r_key_label)
+            print(r_target_label)
+            avg, avg_q= calcAvgValentine(matches,q_key=q_key,q_target=q_target,r_key=r_key_label,r_target=r_target_label)
             print(f"average overall {avg}")
             print(f"average score columns involved {avg_q}")
             return matches,avg,avg_q
     except Exception as e:
         print(e)
-
-
-
-
 
 
 
@@ -85,11 +98,12 @@ def find_matches(matches_path:Path, dataset_dir:Path):
                 print(f"Analyzing the overlap between {entry["Q"]} and {entry["R"]}")
                 if entry["task"] == "U":
                     print("smell ya later")
-                    #valentineHandler(dataset_dir,entry["Q"], entry["R"], entry["q_columns"])
+                    #valentineHandler(dataset_dir,"U",entry["Q"], entry["R"], entry["q_columns"])
                 elif entry["task"] == "MJ":
-                    valentineHandler(dataset_dir,entry["Q"], entry["R"], entry["q_join_keys"], entry["r_join_keys_pos"])
+                    print("coffee break!!!")
+                    #valentineHandler(dataset_dir,"MJ",entry["Q"], entry["R"], entry["q_join_keys"], entry["r_join_keys_pos"])
                 elif entry["task"] == "JC":
-                    print("still not supported")
+                    valentineHandler(dataset_dir,"JC",entry["Q"], entry["R"],q_key=entry["q_key"],q_target=entry["q_target"],r_key=entry["r_key"],r_target=entry["r_target"])
     except Exception as e:
         print(e)
 
