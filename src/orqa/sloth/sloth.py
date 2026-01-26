@@ -1,3 +1,4 @@
+from typing import Optional, Any
 import itertools as it
 import math
 import time
@@ -265,37 +266,15 @@ def approximate_algorithm(
     res_a = res_w * res_h
 
     if verbose:
-        print(
-            "Generated "
-            + str(gen_cands)
-            + " candidate(s) in "
-            + str(gen_time)
-            + " seconds."
-        )
-        print(
-            "Verified "
-            + str(ver_cands)
-            + " candidate(s) in "
-            + str(ver_time)
-            + " seconds."
-        )
-        print(
-            "Detected "
-            + str(num_res)
-            + " largest overlap(s) in "
-            + str(tot_time)
-            + " seconds."
-        )
+        print(f"Generated {gen_cands} candidate(s) in {gen_time} seconds.")
+        print(f"Verified {ver_cands} candidate(s) in {ver_time} seconds.")
+        print(f"Detected {num_res} largest overlap(s) in {tot_time} seconds.")
+
         if num_res > 0:
             print(
-                "Size of the detected largest overlap(s): "
-                + str(res_w)
-                + " columns, "
-                + str(res_h)
-                + " rows, "
-                + str(res_a)
-                + " cells."
+                f"Size of the detected largest overlap(s): {res_w} columns, {res_h} rows, {res_a} cells."
             )
+
     if metrics is not None:
         to_app = [
             gen_cands,
@@ -545,36 +524,16 @@ def exact_algorithm(
 
     if verbose:
         print(
-            "Generated "
-            + str(gen_cands)
-            + " candidate(s) in "
-            + str(gen_time)
-            + " seconds."
+            f"Generated {gen_cands} candidate(s) in {gen_time} seconds.\n"
+            f"Verified {ver_cands} candidate(s) in {ver_time} seconds.\n"
+            f"Detected {num_res} largest overlap(s) in {tot_time} seconds."
         )
-        print(
-            "Verified "
-            + str(ver_cands)
-            + " candidate(s) in "
-            + str(ver_time)
-            + " seconds."
-        )
-        print(
-            "Detected "
-            + str(num_res)
-            + " largest overlap(s) in "
-            + str(tot_time)
-            + " seconds."
-        )
+
         if num_res > 0:
             print(
-                "Size of the detected largest overlap(s): "
-                + str(res_w)
-                + " columns, "
-                + str(res_h)
-                + " rows, "
-                + str(res_a)
-                + " cells."
+                f"Size of the detected largest overlap(s): {res_w} columns, {res_h} rows, {res_a} cells."
             )
+
     if metrics is not None:
         to_app = [
             gen_cands,
@@ -593,17 +552,17 @@ def exact_algorithm(
 
 
 def sloth(
-    r_tab,
-    s_tab,
-    min_a=0,
-    min_w=0,
-    max_w=math.inf,
-    min_h=0,
-    max_h=math.inf,
-    bw=var.default_bw,
-    complete=False,
-    verbose=True,
-    metrics=None,
+    r_tab: list[list[Any]],
+    s_tab: list[list[Any]],
+    min_a: Optional[int | float] = None,
+    min_w: Optional[int | float] = None,
+    max_w: Optional[int | float] = None,
+    min_h: Optional[int | float] = None,
+    max_h: Optional[int | float] = None,
+    bw: int = var.default_bw,
+    complete: bool = False,
+    verbose: bool = True,
+    metrics: Optional[list] = None,
 ):
     """
     Detect the largest overlaps between the two tables R(X) and S(Y)
@@ -620,6 +579,15 @@ def sloth(
     :param verbose: if set to True, print information about the advances in the detection process
     :param metrics: the list to store the achieved metrics (if not None)
     """
+    # set default values
+    min_a = min_a if min_a else 0
+
+    min_w = min_w if min_w else 0
+    max_w = max_w if max_w else math.inf
+
+    max_h = max_h if max_h else math.inf
+    min_h = min_h if min_h else 0
+
     start_time = time.time()
     results = list()  # list of the detected largest overlaps
     res_h = 0  # height of the detected largest overlaps
@@ -666,7 +634,7 @@ def sloth(
     try:
         seeds, top_lev = detect_seeds(r_tab, s_tab, r_w, s_w, min_h)
         num_seeds = len(seeds)
-    except Exception as exc:
+    except TimeoutError as exc:
         seeds = list()
         num_seeds = -1
         top_lev = 0
@@ -674,13 +642,8 @@ def sloth(
 
     seed_init_time = time.time() - start_seed_init_time
     if verbose:
-        print(
-            "Detected "
-            + str(num_seeds)
-            + " seed(s) in "
-            + str(seed_init_time)
-            + " seconds."
-        )
+        print(f"Detected {num_seeds} seed(s) in {seed_init_time} seconds.")
+
     if metrics is not None:
         metrics.append(num_seeds)
         metrics.append(seed_init_time)
@@ -728,8 +691,9 @@ def sloth(
             verbose,
             metrics,
         )
-    except Exception as exc:
-        print(exc)
+    except TimeoutError as exc:
+        if verbose:
+            print(exc)
         if var.run_approximate:
             try:
                 results, metrics = approximate_algorithm(
@@ -750,12 +714,13 @@ def sloth(
                     verbose,
                     metrics,
                 )
-            except Exception as exc:
-                print(exc)
+            except TimeoutError as exc:
+                if verbose:
+                    print(exc)
 
     tot_time = time.time() - start_time
     if verbose:
-        print("Total elapsed time: " + str(tot_time) + " seconds.")
+        print(f"Total elapsed time: {tot_time} seconds.")
     if metrics is not None:
         metrics.append(tot_time)
 

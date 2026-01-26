@@ -32,7 +32,8 @@ def pl_scan_dataset(dataset_path: Path, opts: dict = {}) -> pl.LazyFrame:
 
 
 def remove_null_rows(df: pl.DataFrame, *exclude_columns) -> pl.DataFrame:
-    return df.filter(~pl.all_horizontal(pl.all().exclude(*exclude_columns).is_null()))
+    _expr = pl.all().exclude(*exclude_columns) if exclude_columns else pl.all()
+    return df.filter(~pl.all_horizontal(_expr.is_null()))
 
 
 def remove_null_columns(df: pl.DataFrame) -> pl.DataFrame:

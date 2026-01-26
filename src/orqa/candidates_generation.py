@@ -357,7 +357,10 @@ def execute_tasks(cfg: OrQAConfig, tasks: dict) -> list[dict]:
 
 def build_matches_graph(cfg: OrQAConfig, matches: list[dict]) -> nx.MultiDiGraph:
     G = graph_builder.build_matches_graph(
-        matches, cfg.datasets_path, cfg.polars_opts.read
+        matches,
+        cfg.datasets_path,
+        cfg.polars_opts.read,
+        cfg.candidates_discovery.verbose,
     )
 
     nx.write_gml(G, cfg.candidates_discovery.matches_graph_path)
@@ -427,11 +430,14 @@ def get_seed_datasets(cfg: OrQAConfig):
 
 
 def candidates_discovery(cfg: OrQAConfig):
-    GENERATE_TASKS = True
+    # TODO: export these as configuration options
+    GENERATE_TASKS = False
     EXECUTE_TASKS = False
-    BUILD_GRAPH = False
-    EXPLORE_GRAPH = False
+    BUILD_GRAPH = True
+    EXPLORE_GRAPH = True
 
+    # TODO: consider as seeds only valid datasets
+    # (i.e. datasets with at least N rows in general)
     seed_datasets = get_seed_datasets(cfg)
 
     if GENERATE_TASKS:
@@ -442,17 +448,31 @@ def candidates_discovery(cfg: OrQAConfig):
     memory_limit_half()
 
     if EXECUTE_TASKS:
-        execute_tasks(cfg, generated_tasks)
-    with open(
-        cfg.candidates_discovery.tasks_results_path,
-        "r",
-    ) as file:
-        discovered_candidates = json.load(file)
+        discovered_candidates = execute_tasks(cfg, generated_tasks)
+    else:
+        try:
+            with open(
+                cfg.candidates_discovery.tasks_results_path,
+                "r",
+            ) as file:
+                discovered_candidates = json.load(file)
+
+        except FileNotFoundError:
+            print(
+                f"File {cfg.candidates_discovery.tasks_results_path} not found: have you executed tasks yet?"
+            )
+            return
 
     if BUILD_GRAPH:
         G = build_matches_graph(cfg, discovered_candidates)
     else:
-        G = nx.read_gml(cfg.candidates_discovery.matches_graph_path)
+        try:
+            G = nx.read_gml(cfg.candidates_discovery.matches_graph_path)
+        except FileNotFoundError:
+            print(
+                f"File {cfg.candidates_discovery.matches_graph_path} not found: have you generated the graph yet?"
+            )
+            return
 
     if EXPLORE_GRAPH:
         explore_matches_graph(cfg, G, seed_datasets)

@@ -144,6 +144,8 @@ class CandidatesDiscovery:
 
     overlap_ratio_threshold: float
 
+    verbose: bool = field(default=False)
+
 
 @dataclass
 class OrQAConfig:

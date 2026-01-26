@@ -20,6 +20,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "tqdm>=4.67.1",
     "ulod",
+    "valentine>=0.4.1",
     "wrapt-timeout-decorator>=1.5.1",
 ]
 

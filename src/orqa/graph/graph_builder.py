@@ -1,22 +1,31 @@
+from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+import polars as pl
 import networkx as nx
-from .sloth import sloth
 
-from ..utils import pl_read_dataset
+from orqa.sloth import sloth
 
-DATASET_DIR = Path("D:/uk_small/uk_small_copy/datasets/csv")
+from ..utils import pl_read_dataset, remove_null_columns, remove_null_rows
+
 DOCUMENT_TYPE = "csv"
-MATCHES_JSON = "matches.json"
 THRESHOLD = 0.5
 MAX_WORKERS = 8
 OVERLAP_RATIO_THRESHOLD = 0.5
 
 
-def load_dataset_as_list_of_columns(path: Path, opts: dict = {}) -> list[list[Any]]:
+def load_dataset_as_list_of_columns(
+    path: Path, columns: list, opts: dict = {}
+) -> list[list[Any]]:
     df = pl_read_dataset(path, opts)
+    if columns != []:
+        if isinstance(columns[0], int):
+            columns = [pl.nth(i) for i in columns]
+        df = df.select(*columns)
+    df = remove_null_columns(df)
+    df = remove_null_rows(df)
 
     # Convert to column-oriented list of lists
     columns = []
@@ -50,9 +59,9 @@ def calculate_overlap_ratio(
         }
 
     # Extract from metrics (already calculated by SLOTH)
-    overlap_area = metrics[12]  # Area from metrics
-    num_rows_overlapping = metrics[11]  # Height from metrics
-    num_columns_involved = metrics[10]  # Width from metrics
+    overlap_area = metrics[-2]  # Area from metrics
+    num_rows_overlapping = metrics[-3]  # Height from metrics
+    num_columns_involved = metrics[-4]  # Width from metrics
 
     # Extract mapping from result
     mapping, overlap_rows = result[0]
@@ -81,7 +90,10 @@ def calculate_overlap_ratio(
 
 
 def compute_overlap_metrics(
-    left_table: list[list[Any]], right_table: list[list[Any]], verbose: bool = True
+    left_table: list[list[Any]],
+    right_table: list[list[Any]],
+    min_width: Optional[int] = None,
+    verbose: bool = False,
 ) -> dict:
     """
     Analyze a single pair of tables that are already in list of lists format.
@@ -102,7 +114,7 @@ def compute_overlap_metrics(
 
 
 def process_edge(
-    entry: dict, datasets_folder: Path, polars_opts: dict = {}
+    entry: dict, datasets_folder: Path, polars_opts: dict = {}, verbose: bool = False
 ) -> tuple[str, str, str, dict] | None:
     """Helper function to process a single edge in parallel"""
     q_node = entry["Q"]
@@ -112,22 +124,44 @@ def process_edge(
     if q_node == r_node:
         return None
 
+    match task_label:
+        case "U":
+            left_columns = entry["q_columns"]
+            right_columns = []
+        case "J":
+            left_columns = entry["q_join_keys"]
+            right_columns = entry["r_join_keys"]
+        case "JC":
+            left_columns = [entry["q_key"], entry["q_target"]]
+            right_columns = [entry["r_key"], entry["r_target"]]
+
     try:
         left_path = datasets_folder.joinpath(f"{q_node}.{DOCUMENT_TYPE}")
         right_path = datasets_folder.joinpath(f"{r_node}.{DOCUMENT_TYPE}")
 
-        left_table = load_dataset_as_list_of_columns(left_path, polars_opts)
-        right_table = load_dataset_as_list_of_columns(right_path, polars_opts)
+        left_table = load_dataset_as_list_of_columns(
+            left_path, left_columns, polars_opts
+        )
+        right_table = load_dataset_as_list_of_columns(
+            right_path, right_columns, polars_opts
+        )
 
-        overlap_metrics = compute_overlap_metrics(left_table, right_table)
+        # we force an overlap with at least #(left_table_involved_columns) width
+        overlap_metrics = compute_overlap_metrics(
+            left_table, right_table, min_width=len(left_columns), verbose=verbose
+        )
         return (q_node, r_node, task_label, overlap_metrics)
     except Exception as e:
         print(e)
+        raise e
         return None
 
 
 def build_matches_graph(
-    matches: list[dict], datasets_folder: Path, polars_opts: dict = {}
+    matches: list[dict],
+    datasets_folder: Path,
+    polars_opts: dict = {},
+    verbose: bool = False,
 ) -> nx.MultiDiGraph:
     """
     From the discovered matches, build a graph where nodes are
@@ -152,13 +186,19 @@ def build_matches_graph(
             # Submit all tasks
             futures = {
                 executor.submit(
-                    process_edge, entry, datasets_folder, polars_opts
+                    process_edge,
+                    entry,
+                    datasets_folder,
+                    polars_opts,
+                    verbose,
                 ): entry
                 for entry in matches
             }
 
             # Collect results as they complete
-            for future in as_completed(futures):
+            for future in tqdm(
+                as_completed(futures), desc="Building graph", total=len(matches)
+            ):
                 result = future.result()
                 if result:
                     q_node, r_node, task_label, metrics = result
@@ -166,6 +206,7 @@ def build_matches_graph(
 
     except Exception as e:
         print(e)
+        raise e
         return nx.MultiDiGraph()
     return G
 
