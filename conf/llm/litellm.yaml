@@ -1,44 +1,38 @@
 # LLM Configuration File
+# Primary model (will be tried first)
+model: "ollama_chat/llama3.3:latest"
+# Fallback models (tried in order if primary fails)
+fallback_models:
+  - "groq/llama-3.3-70b-versatile"
+#  - "together_ai/togethercomputer/Llama-2-7B-32K-Instruct"
 
-# groq setup
-# Examples:
-#   - groq/llama-3.1-8b-instant
-#   - groq/llama-3.1-70b-versatile
-#   - openai/gpt-4
-#   - anthropic/claude-3-sonnet
-model: "groq/llama-3.3-70b-versatile"
+# Provider-specific parameters
+provider_params:
+  ollama:
+    api_base: "http://localhost:11434"
+    keep_alive: "24h"
+    num_ctx: 8192
+  groq:
+    # Groq-specific params (if any)
+  together_ai:
+    # TogetherAI-specific params (if any)
+
+# Common parameters (applied to all models)
+temperature: 0.2
+max_retries: 3
+retry_delay: 10.0
+enable_json_mode: true
+
+
+# Response model configuration
+response_model:
+  module: "structured_outputs"  # Python module where the model is defined
+  class: "Result"  # Pydantic model class name
+
+
 
 # Local Ollama setup
 # model: ollama_chat/llama3.3:latest
 # api_base: http://localhost:11434
 # keep_alive: 24h
 # num_ctx: 8192
-
-# TogetherAI setup
-# model: "together_ai/togethercomputer/Llama-2-7B-32K-Instruct"
-
-# Temperature (0.0 = deterministic, 2.0 = very creative)
-temperature: 0.2
-
-# Maximum number of retry attempts on failure
-max_retries: 3
-
-# Delay in seconds between retry attempts
-# we set a high delay until we do not work 
-# locally...
-retry_delay: 10.0
-
-# Enable JSON mode for structured outputs
-# (requires model support for response_format)
-enable_json_mode: true
-
-# Optional: Additional model parameters
-# max_tokens: 1000
-# top_p: 1.0
-# frequency_penalty: 0.0
-# presence_penalty: 0.0
-
-# Response model configuration
-response_model:
-  module: "structured_outputs"  # Python module where the model is defined
-  class: "Result"  # Pydantic model class name
