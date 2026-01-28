@@ -1,0 +1,74 @@
+[
+  {
+    "queries": [
+      {
+        "id": "query-2",
+        "question": "What are the top 10 suppliers with the highest total expenses in March and January, considering both months?",
+        "query": "SELECT T1.Supplier, SUM(CAST(T1.Amount AS DOUBLE)) AS Total_Expenses_March, SUM(CAST(T2.Amount AS DOUBLE)) AS Total_Expenses_January FROM \"2019-March-return\" T1 INNER JOIN \"2019-January-return\" T2 ON T1.\"Transaction number\" = T2.\"Transaction number\" AND T1.Supplier = T2.Supplier GROUP BY T1.Supplier ORDER BY SUM(CAST(T1.Amount AS DOUBLE)) + SUM(CAST(T2.Amount AS DOUBLE)) DESC",
+        "tables": [
+          "2019-March-return",
+          "2019-January-return"
+        ],
+        "columns": [
+          "Supplier",
+          "Amount",
+          "Transaction number"
+        ],
+        "difficulty": 3
+      },
+      {
+        "id": "query-3",
+        "question": "What are the average expenses per department family for travel and subsistence in both months?",
+        "query": "SELECT T1.`Department family`, AVG(T1.Amount) AS Average_Expenses_March, AVG(T2.Amount) AS Average_Expenses_January FROM `2019-March-return` T1 INNER JOIN `2019-January-return` T2 ON T1.`Transaction number` = T2.`Transaction number` AND T1.Supplier = T2.Supplier WHERE T1.`Expense type` = 'Travel & Subsistence' AND T2.`Expense type` = 'Travel & Subsistence' GROUP BY T1.`Department family`",
+        "tables": [
+          "2019-March-return",
+          "2019-January-return"
+        ],
+        "columns": [
+          "Department family",
+          "Amount",
+          "Transaction number",
+          "Supplier",
+          "Expense type"
+        ],
+        "difficulty": 4
+      },
+      {
+        "id": "query-5",
+        "question": "What are the total expenses for each expense area in March and January?",
+        "query": "SELECT T1.`Expense area`, SUM(T1.Amount) AS Total_Expenses_March, SUM(T2.Amount) AS Total_Expenses_January FROM `2019-March-return` T1 INNER JOIN `2019-January-return` T2 ON T1.`Transaction number` = T2.`Transaction number` AND T1.Supplier = T2.Supplier GROUP BY T1.`Expense area`",
+        "tables": [
+          "2019-March-return",
+          "2019-January-return"
+        ],
+        "columns": [
+          "Expense area",
+          "Amount",
+          "Transaction number",
+          "Supplier"
+        ],
+        "difficulty": 3
+      },
+      {
+        "id": "query-4",
+        "question": "What are the department families with the highest transaction counts in March and January, considering both months?",
+        "query": "SELECT T1.\"Department family\", COUNT(T1.\"Transaction number\") AS Transaction_Count_March, COUNT(T2.\"Transaction number\") AS Transaction_Count_January FROM \"2019-March-return\" T1 INNER JOIN \"2019-January-return\" T2 ON T1.\"Transaction number\" = T2.\"Transaction number\" AND T1.Supplier = T2.Supplier GROUP BY T1.\"Department family\" ORDER BY COUNT(T1.\"Transaction number\") + COUNT(T2.\"Transaction number\") DESC",
+        "tables": [
+          "2019-March-return",
+          "2019-January-return"
+        ],
+        "columns": [
+          "Department family",
+          "Transaction number",
+          "Supplier"
+        ],
+        "difficulty": 3
+      }
+    ]
+  },
+  {
+    "prompt_tokens": 4881,
+    "completion_tokens": 1349,
+    "total_tokens": 6230
+  }
+]

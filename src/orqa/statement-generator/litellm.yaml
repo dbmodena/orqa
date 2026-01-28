@@ -1,0 +1,38 @@
+# LLM Configuration File
+# Primary model (will be tried first)
+model: "ollama_chat/llama3.3:latest"
+# Fallback models (tried in order if primary fails)
+fallback_models:
+  - "groq/llama-3.3-70b-versatile"
+#  - "together_ai/togethercomputer/Llama-2-7B-32K-Instruct"
+
+# Provider-specific parameters
+provider_params:
+  ollama:
+    api_base: "http://localhost:11434"
+    keep_alive: "24h"
+    num_ctx: 8192
+  groq:
+    # Groq-specific params (if any)
+  together_ai:
+    # TogetherAI-specific params (if any)
+
+# Common parameters (applied to all models)
+temperature: 0.2
+max_retries: 3
+retry_delay: 10.0
+enable_json_mode: true
+
+
+# Response model configuration
+response_model:
+  module: "structured_outputs"  # Python module where the model is defined
+  class: "Result"  # Pydantic model class name
+
+
+
+# Local Ollama setup
+# model: ollama_chat/llama3.3:latest
+# api_base: http://localhost:11434
+# keep_alive: 24h
+# num_ctx: 8192

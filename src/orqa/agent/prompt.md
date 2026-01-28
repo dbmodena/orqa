@@ -61,9 +61,6 @@ CRITICAL RULES:
 {sample}
 
 
-
-Here’s a **clean, production-ready prompt** you can use. It is explicit about *pairwise completeness*, *scoring semantics*, and *output structure*, and it fits well with the Pydantic model you designed.
-
 ---
 
 ## Match
