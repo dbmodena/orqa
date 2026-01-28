@@ -311,7 +311,7 @@ class LLMClient:
 
 
 
-    def complete_sql(
+    def complete(
         self,
         prompt: str,
         dataframes,table_names,
@@ -591,7 +591,7 @@ if __name__=="__main__":
     ### testing queries
     dataframes = [df1,df2]
     table_names = [D1.split("__")[0],D2.split("__")[0]]
-    queries=client.complete_sql(prompt,dataframes,table_names, reply_model=SQLQuerySet)
+    queries=client.complete(prompt,dataframes,table_names, reply_model=SQLQuerySet)
     with open("validated_queries.json", "w", encoding="utf-8") as f:
         json.dump(queries, f, indent=2)   
     print(queries)
