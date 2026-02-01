@@ -128,65 +128,72 @@ class Result(BaseModel):
         return unique_tasks
 
 
+from pydantic import BaseModel, Field
+from typing import List, Literal, Union
 
 
-class SQLQuery(BaseModel):
-    
-    question: str
-    query: str
-    tables: List[str]
-    columns: List[str]
-    difficulty: int
-
-
-
-class SQLQuery(BaseModel):
+class Query(BaseModel):
     """
-    A structured SQL query paired with a natural language question
+    A structured query (SQL or Pandas) paired with a natural language question
     that expresses the intent of the query.
     """
     id: str = Field(
         ...,
         description="Stable unique identifier for the query (UUID or deterministic hash)."
     )
+    
     question: str = Field(
         ...,
         description=(
-            "A natural language question that the SQL query answers. "
+            "A natural language question that the code answers. "
             "The question must describe the business or analytical intent, "
-            "NOT the SQL operations or schema structure."
+            "NOT the operations or technical implementation details."
         )
     )
 
-    query: str = Field(
+    code: str = Field(
         ...,
-        description="The SQL query that answers the natural language question."
+        description=(
+            "The executable code (SQL query or Pandas operation) that answers "
+            "the natural language question."
+        )
+    )
+    
+    query_type: Literal["sql", "pandas"] = Field(
+        ...,
+        description="Type of query: 'sql' for SQL queries or 'pandas' for Pandas operations."
     )
 
     tables: List[str] = Field(
         ...,
-        description="List of table names used in the SQL query."
+        description=(
+            "List of table names (for SQL) or DataFrame names (for Pandas) "
+            "used in the code."
+        )
     )
 
     columns: List[str] = Field(
         ...,
-        description="List of column names referenced in the SQL query."
+        description="List of column names referenced in the code."
     )
 
     difficulty: int = Field(
         ...,
         ge=1,
         le=5,
-        description="Query complexity from 1 (simple) to 5 (very complex)."
+        description=(
+            "Query complexity from 1 (simple) to 5 (very complex). "
+            "For SQL: 1=basic SELECT, 5=complex subqueries/CTEs. "
+            "For Pandas: 1=filter/merge, 5=transform/window/correlation."
+        )
     )
 
 
-class SQLQuerySet(BaseModel):
+class QuerySet(BaseModel):
     """
-    Container for multiple SQL queries generated together.
+    Container for multiple queries (SQL or Pandas) generated together.
     """
-
-    queries: List[SQLQuery] = Field(
+    queries: List[Query] = Field(
         ...,
-        description="List of SQL queries with matching natural language questions."
+        description="List of queries with matching natural language questions."
     )

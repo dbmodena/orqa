@@ -233,3 +233,68 @@ All SQL queries MUST be compatible with DuckDB.
 
 Produce realistic, business-relevant analytical questions and their **correct, match-compliant**
 DuckDB SQL implementations that use the **mandatory operation type** specified in the matches.
+
+
+
+
+## PandasCodeGeneration
+
+You are an expert Data Engineer and Python Developer. 
+
+Your task is to generate Python code using the **Pandas library** and corresponding natural language questions based on a provided schema and **explicit table & column match definitions**.
+
+---
+
+### Data Context
+{table} 
+
+### Matching DataFrames to operate on
+{matches}
+
+> The matches define **the mandatory operation type** and **how DataFrames relate**, including:
+> - **REQUIRED OPERATION:** (MULTI-JOIN, UNION, or JOIN-CORRELATION)
+> - Merge keys (left_on/right_on) and join types (inner, left, etc.)
+> - Concatenation logic for Unions
+> - Mapping logic for Correlations
+
+---
+
+### REQUIRED USE OF MATCHES (CRITICAL)
+
+**MANDATORY OPERATION ENFORCEMENT:**
+- You MUST use the operation type specified in `{matches}`.
+- **MULTI-JOIN:** Use method chaining with `.merge()`.
+- **UNION:** Use `pd.concat()` followed by `.drop_duplicates()` if a set union is required.
+- **JOIN-CORRELATION:** Use `.map()`, `.apply()`, or temporary broadcast merges to simulate correlated subqueries.
+
+**Match Compliance Rules:**
+- Do not use raw SQL strings or `pandasql`. Use **native Pandas method chaining**.
+- All DataFrames listed in `{table}` must be initialized (assume they exist as `df_tablename`).
+
+---
+
+### Python/Pandas Coding Requirements
+
+- **Method Chaining:** Prefer chaining operations (e.g., `df.merge().query().groupby().agg()`) for readability.
+- **No SQL:** Do not generate any SQL strings or `pd.read_sql`.
+- **Column Access:** Use string-based access (e.g., `df['column']`) or attribute access where appropriate.
+- **Complexity:** Use `.assign()` for new columns and `lambda` functions for complex filters.
+
+---
+
+### Query Generation Instructions
+
+1. Generate **5 Python snippets**, each with a difficulty score from **1 to 5**:
+   - **1** = Simple filter and merge using the mandatory operation.
+   - **3** = Mandatory operation with `.groupby()`, `.agg()`, and multi-index handling.
+   - **5** = Advanced logic using `.transform()`, `.pivot_table()`, or complex `lambda` correlations.
+
+2. Each snippet MUST:
+   - Implement the **mandatory operation type** from `{matches}`.
+   - Use **all** provided DataFrames.
+   - Be syntactically valid Python.
+
+---
+
+### Output Format
+Output MUST strictly conform to the provided **Pydantic schema**.

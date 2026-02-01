@@ -29,6 +29,14 @@ response_model:
   module: "structured_outputs"  # Python module where the model is defined
   class: "Result"  # Pydantic model class name
 
+querying: 
+  module: "structured_outputs"
+  class: "QuerySet"
+
+table_analyzer: 
+  module: "structured_outputs"
+  class: "Result"
+
 
 
 # Local Ollama setup

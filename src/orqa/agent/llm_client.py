@@ -10,7 +10,7 @@ from litellm import completion, Router
 from pydantic import BaseModel, ValidationError
 
 
-class LLMClient:
+class LLMClient(LLMClient):
     """
     LiteLLM client with YAML configuration and structured output support.
     """
