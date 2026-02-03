@@ -3,7 +3,8 @@ import sys
 from pathlib import Path
 
 from conf import load_config
-from orqa.candidates_generation import candidates_discovery
+
+from orqa.candidates_generation_stream import candidates_discovery
 from orqa.crawling import crawl_canada, crawl_modena, crawl_nyc, crawl_uk
 from orqa.indexing import create_blend_index
 
@@ -24,7 +25,7 @@ def canada():
 
 def uk():
     uk_yaml_path = Path(os.path.dirname(__file__), "..", "conf", "workflow", "uk.yaml")
-    data_path = Path(os.environ["DATADIR"], "open_data", "ckan", "uk_small")
+    data_path = Path(os.environ["DATADIR"], "orqa", "ckan", "uk")
 
     data_path.mkdir(parents=True, exist_ok=True)
 

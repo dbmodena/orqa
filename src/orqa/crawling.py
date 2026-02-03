@@ -5,7 +5,9 @@ from typing import Any
 
 from fake_useragent import UserAgent
 from ulod.bulk.ckan import CKANDownloadConfig, ckan_download_datasets
-from ulod.ckan import UKCKAN, CanadaCKAN, ModenaCKAN
+from ulod.ckan import CanadaCKAN
+from ulod.ckan.uk import UKCKAN
+from ulod.ckan.italy import ModenaCKAN
 
 from ulod.socrata import NYCSocrata
 from ulod.bulk.socrata import SocrataDownloadConfig, socrata_download_datasets
@@ -89,13 +91,8 @@ def crawl_canada(cfg: OrQAConfig):
         filter_resource_metadata=_canada_filter_resource_metadata,
         download_format=cfg.crawling.download_format,
         http_headers=headers,
-        read_dataset_kwargs=cfg.pandas_opts.read[cfg.crawling.download_format],
-        save_dataset_kwargs=cfg.pandas_opts.write[cfg.crawling.download_format],
-        accept_zip=cfg.crawling.accept_zip,
-        engine=cfg.crawling.engine,
         max_resource_size=cfg.crawling.max_resource_size,
-        max_process_workers=cfg.crawling.max_process_workers,
-        max_thread_workers=cfg.crawling.max_thread_workers,
+        max_workers=cfg.crawling.max_workers,
         verbose=cfg.crawling.verbose,
     )
 
@@ -117,17 +114,12 @@ def crawl_uk(cfg: OrQAConfig):
         max_datasets=cfg.crawling.max_datasets,
         from_dataset_index=cfg.crawling.from_dataset_index,
         batch_fetch_metadata=cfg.crawling.batch_fetch_metadata,
-        search_filters=cfg.crawling.search_filters,
+        # search_filters=cfg.crawling.search_filters,
         filter_resource_metadata=_uk_filter_resource_metadata,
         download_format=cfg.crawling.download_format,
         http_headers=headers,
-        read_dataset_kwargs=cfg.pandas_opts.read[cfg.crawling.download_format],
-        save_dataset_kwargs=cfg.pandas_opts.write[cfg.crawling.download_format],
-        accept_zip=cfg.crawling.accept_zip,
-        engine=cfg.crawling.engine,
         max_resource_size=cfg.crawling.max_resource_size,
-        max_process_workers=cfg.crawling.max_process_workers,
-        max_thread_workers=cfg.crawling.max_thread_workers,
+        max_workers=cfg.crawling.max_workers,
         verbose=cfg.crawling.verbose,
     )
 
@@ -145,17 +137,12 @@ def crawl_modena(cfg: OrQAConfig):
         max_datasets=cfg.crawling.max_datasets,
         from_dataset_index=cfg.crawling.from_dataset_index,
         batch_fetch_metadata=cfg.crawling.batch_fetch_metadata,
-        search_filters=cfg.crawling.search_filters,
+        # search_filters=cfg.crawling.search_filters,
         filter_resource_metadata=_uk_filter_resource_metadata,
         download_format=cfg.crawling.download_format,
         http_headers=headers,
-        read_dataset_kwargs=cfg.pandas_opts.read[cfg.crawling.download_format],
-        save_dataset_kwargs=cfg.pandas_opts.write[cfg.crawling.download_format],
-        accept_zip=cfg.crawling.accept_zip,
-        engine=cfg.crawling.engine,
         max_resource_size=cfg.crawling.max_resource_size,
-        max_process_workers=cfg.crawling.max_process_workers,
-        max_thread_workers=cfg.crawling.max_thread_workers,
+        max_workers=cfg.crawling.max_workers,
         verbose=cfg.crawling.verbose,
     )
 
@@ -178,8 +165,7 @@ def crawl_nyc(cfg: OrQAConfig):
         cast_datatypes=True,
         max_rows_per_dataset=cfg.crawling.max_rows_per_dataset,
         batch_rows_per_dataset=cfg.crawling.batch_rows_per_dataset,
-        max_process_workers=cfg.crawling.max_process_workers,
-        max_thread_workers=cfg.crawling.max_thread_workers,
+        max_workers=cfg.crawling.max_workers,
         verbose=cfg.crawling.verbose,
     )
 

@@ -10,7 +10,7 @@ from litellm import completion, Router
 from pydantic import BaseModel, ValidationError
 
 
-class LLMClient(LLMClient):
+class LLMClient:
     """
     LiteLLM client with YAML configuration and structured output support.
     """
@@ -24,21 +24,20 @@ class LLMClient(LLMClient):
         """
         # 1. Load configuration
         self.config = self._load_config(config_path)
-        
+
         # 2. Set basic attributes
         self.temperature = self.config.get("temperature", 0.2)
         self.max_retries = self.config.get("max_retries", 3)
         self.retry_delay = self.config.get("retry_delay", 1.0)
         self.enable_json_mode = self.config.get("enable_json_mode", True)
         self.provider_params = self.config.get("provider_params", {}) or {}
-        
+
         # 3. Load response model
         self.response_model = self._load_pydantic_response_model()
         self.raw = self.response_model is None
-        
+
         # 4. Setup router LAST (depends on provider_params being set)
         self.router = self._setup_router()
-
 
     def _get_provider_from_model(self, model: str) -> str:
         """Extract provider name from model string."""
@@ -49,67 +48,63 @@ class LLMClient(LLMClient):
     def _get_provider_specific_params(self, model: str) -> dict[str, Any]:
         """
         Get provider-specific parameters for a given model.
-        
+
         Args:
             model: Model string (e.g., "ollama_chat/llama3.3:latest")
-            
+
         Returns:
             Dictionary of provider-specific parameters
         """
         provider = self._get_provider_from_model(model)
-        
+
         # Defensive programming: handle None and missing keys
         if not self.provider_params:
             return {}
-        
+
         provider_config = self.provider_params.get(provider, {})
-        
+
         # Handle case where provider_config might be None
         if provider_config is None:
             return {}
         return provider_config.copy()
 
-
     def _setup_router(self) -> Router:
         """Setup LiteLLM Router with primary and fallback models."""
         model_list = []
-        
+
         # Primary model
         primary_model = self.config["model"]
         primary_params = self._get_provider_specific_params(primary_model)
-        model_list.append({
-            "model_name": "primary",
-            "litellm_params": {
-                "model": primary_model,
-                **primary_params
+        model_list.append(
+            {
+                "model_name": "primary",
+                "litellm_params": {"model": primary_model, **primary_params},
             }
-        })
-        
+        )
+
         # Fallback models
         fallback_names = []
         for idx, fallback_model in enumerate(self.config.get("fallback_models", [])):
             fallback_name = f"fallback_{idx}"
             fallback_names.append(fallback_name)
             fallback_params = self._get_provider_specific_params(fallback_model)
-            model_list.append({
-                "model_name": fallback_name,
-                "litellm_params": {
-                    "model": fallback_model,
-                    **fallback_params
+            model_list.append(
+                {
+                    "model_name": fallback_name,
+                    "litellm_params": {"model": fallback_model, **fallback_params},
                 }
-            })
-        
+            )
+
         # Setup fallback chain: primary -> fallback_0 -> fallback_1 -> ...
         fallbacks = [{"primary": fallback_names}] if fallback_names else []
-        
+
         return Router(
             model_list=model_list,
             fallbacks=fallbacks,
             num_retries=1,  # Router handles retries per model
             timeout=60,
-            set_verbose=True  # Shows which model is being used
+            set_verbose=True,  # Shows which model is being used
         )
-
 
     def _load_config(self, config_path) -> dict[str, Any]:
         """Load configuration from YAML file"""
@@ -307,10 +302,6 @@ class LLMClient(LLMClient):
 
         return False, None
 
-
-
-
-
     def complete(
         self,
         prompt: str,
@@ -351,14 +342,13 @@ class LLMClient(LLMClient):
         if reply_model:
             self.response_model = reply_model
             self.raw = False
-            
+
         if self.response_model and self.enable_json_mode:
             completion_args["response_format"] = {"type": "json_object"}
-        
+
         assert self.response_model is not None or self.raw
         last_content = None
         last_error = None
-
 
         for attempt in range(retries):
             try:
@@ -461,4 +451,3 @@ class LLMClient(LLMClient):
             print(f"\nLast response preview:\n{last_content[:300]}...\n")
 
         return self.response_model().model_dump_json(indent=2), usage_total
-

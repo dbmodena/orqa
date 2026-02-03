@@ -25,5 +25,5 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-ulod = { git = "https://github.com/nanni00/ULOD" }
 blend = { git = "https://github.com/nanni00/Blend" }
+ulod = { git = "https://github.com/nanni00/ULOD" }

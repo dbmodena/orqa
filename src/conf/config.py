@@ -10,7 +10,7 @@ import yaml
 class PolarsOpts:
     read: dict = field(
         default_factory=lambda: {
-            "csv": {"ignore_errors": True},
+            "csv": {"ignore_errors": True, "encoding": "latin-1"},
             "parquet": {},
             "json": {},
         }
@@ -56,14 +56,13 @@ class Crawling:
     batch_fetch_metadata: int
     accept_zip: bool
     download_format: Literal["csv", "parquet", "json"]
-    engine: Literal["pandas", "polars"]
     max_resource_size: int  # CKAN-only
     max_rows_per_dataset: int  # Socrata-only
     batch_rows_per_dataset: int  # Socrata-only
-    max_process_workers: int
-    max_thread_workers: int
-    verbose: bool
+    max_workers: int
+    engine: Literal["pandas", "polars"] = field(default="pandas")
     search_filters: dict = field(default_factory=lambda: {})
+    verbose: bool = field(default=True)
 
 
 @dataclass
