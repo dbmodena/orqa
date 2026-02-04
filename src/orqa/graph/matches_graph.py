@@ -12,7 +12,7 @@ from orqa.utils import pl_read_dataset, remove_null_columns, remove_null_rows
 
 DOCUMENT_TYPE = "csv"
 THRESHOLD = 0.5
-MAX_WORKERS = 8
+MAX_WORKERS = 10
 OVERLAP_RATIO_THRESHOLD = 0.5
 
 
@@ -24,11 +24,14 @@ def load_dataset_as_list_of_columns(
     path: Path, columns: list, opts: dict = {}
 ) -> list[list[Any]]:
     df = pl_read_dataset(path, opts)
+    df = remove_null_columns(df)
+    columns = list(set(columns))
     if columns != []:
         if isinstance(columns[0], int):
+            # c = columns
             columns = [pl.nth(i) for i in columns]
+            # print(c, "--->", columns)
         df = df.select(*columns)
-    df = remove_null_columns(df)
     df = remove_null_rows(df)
 
     # Convert to column-oriented list of lists
@@ -118,7 +121,7 @@ def compute_overlap_metrics(
 
 
 def process_edge(
-    entry: dict, datasets_folder: Path, polars_opts: dict = {}, verbose: bool = False
+    entry: dict, datasets_folder: Path, read_opts: dict = {}, verbose: bool = False
 ) -> tuple[str, str, str, dict] | None:
     """Helper function to process a single edge in parallel"""
     q_node = entry["Q"]
@@ -133,8 +136,16 @@ def process_edge(
             left_columns = entry["q_columns"]
             right_columns = []
         case "J":
-            left_columns = entry["q_join_keys"]
-            right_columns = entry["r_join_keys"]
+            try:
+                left_columns = entry["q_join_keys"]
+                right_columns = entry["r_join_keys_pos"]
+            except KeyError:
+                try:
+                    left_columns = [entry["q_join_key"]]
+                    right_columns = [entry["r_join_key_pos"]]
+                except KeyError:
+                    print("Whatafuck", entry)
+
         case "JC":
             left_columns = [entry["q_key"], entry["q_target"]]
             right_columns = [entry["r_key"], entry["r_target"]]
@@ -143,11 +154,9 @@ def process_edge(
         left_path = datasets_folder.joinpath(f"{q_node}.{DOCUMENT_TYPE}")
         right_path = datasets_folder.joinpath(f"{r_node}.{DOCUMENT_TYPE}")
 
-        left_table = load_dataset_as_list_of_columns(
-            left_path, left_columns, polars_opts
-        )
+        left_table = load_dataset_as_list_of_columns(left_path, left_columns, read_opts)
         right_table = load_dataset_as_list_of_columns(
-            right_path, right_columns, polars_opts
+            right_path, right_columns, read_opts
         )
 
         # we force an overlap with at least #(left_table_involved_columns) width
@@ -156,8 +165,8 @@ def process_edge(
         )
         return (q_node, r_node, task_label, overlap_metrics)
     except Exception as e:
-        print(e)
-        raise e
+        print("Error while processing edge: ", e)
+        # raise e
         return None
 
 
@@ -173,44 +182,43 @@ class DatasetMatchesGraph:
         self,
         matches: list[dict],
         datasets_folder: Path,
-        opts: dict,
+        read_opts: dict,
         max_workers: Optional[int] = None,
         verbose: bool = False,
     ):
-        try:
-            # Add all nodes first
-            for entry in matches:
-                # print(f"Analyzing {entry}")
-                self._G.add_node(entry["Q"])
-                self._G.add_node(entry["R"])
+        # Add all nodes first
+        # for entry in matches:
+        #     # print(f"Analyzing {entry}")
+        #     self._G.add_node(entry["Q"])
+        #     self._G.add_node(entry["R"])
 
-            # Process edges in parallel
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                # Submit all tasks
-                futures = {
-                    executor.submit(
-                        process_edge,
-                        entry,
-                        datasets_folder,
-                        opts,
-                        verbose,
-                    ): entry
-                    for entry in matches
-                }
+        # Process edges in parallel
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            # Submit all tasks
+            futures = {
+                executor.submit(
+                    process_edge,
+                    entry,
+                    datasets_folder,
+                    read_opts,
+                    verbose,
+                )
+                for entry in matches
+            }
 
-                # Collect results as they complete
-                for future in tqdm(
-                    as_completed(futures),
-                    desc="Adding edges to the graph",
-                    total=len(matches),
-                ):
-                    result = future.result()
+            # Collect results as they complete
+            for future in tqdm(
+                as_completed(futures),
+                desc="Adding edges to the graph",
+                total=len(matches),
+            ):
+                try:
+                    result = future.result(60)
                     if result:
                         q_node, r_node, task_label, metrics = result
                         self._G.add_edge(q_node, r_node, label=task_label, **metrics)
-
-        except Exception as e:
-            print(e)
+                except Exception as e:
+                    print("Error within main process: ", e)
 
     def expand_one_hop(
         self,

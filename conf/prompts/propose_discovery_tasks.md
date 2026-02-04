@@ -9,12 +9,12 @@ Analyze the given dataset and identify columns for UNION, JOIN and JOIN-CORRELAT
    - Identify groups of columns that could be combined with similar columns from other datasets.
    - Look for columns with similar names, types, or semantic meaning.
    - Format each entry in this way: {{"columns": ["col1", "col2", "col3", "col4"]}}.
-   - Focus on LARGE set of columns, even all the columns, do not propose union-discovery tasks on few columns.
+   - Focus on WIDE set of columns, **even all the columns**; do not propose union-discovery tasks on few columns.
 
 2. **JOIN TASKS** (join_tasks):
    - Identify columns that could serve as join keys (unique identifiers or foreign keys).
    - Format each entry in this way: {{"columns": ["id_col1", "id_col2"]}}.
-   - Ignore columns with very few unique values (like <5).
+   - Ignore columns with very few unique values (like <5); focus on columns that are **likely to be keys**.
 
 3. **JOIN-CORRELATION TASKS** (join_correlation_tasks):
    - Identify pairs where one column is a join key and another correlates with it.
@@ -26,7 +26,7 @@ Analyze the given dataset and identify columns for UNION, JOIN and JOIN-CORRELAT
 ### Notes
 
 1. Do not focus on correctness of numerical values: for instance, 6,124.45 is as correct as 6124.45.
-4. Propose AT MOST 5 tasks for each task type.
+4. Propose AT MOST 3 tasks for each task type.
 
 ### Critical Rules:
 

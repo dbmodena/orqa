@@ -23,10 +23,9 @@ tasks:
     download_format: csv 
     engine: pandas
     # max_resource_size: 20MB # CKAN-only
-    max_rows_per_dataset: 100_000 # Socrata-only
+    max_rows_per_dataset: 1_000_000 # Socrata-only
     batch_rows_per_dataset: 10_000 # Socrata-only
-    max_process_workers: 6
-    max_thread_workers: 4
+    max_workers: 20
     verbose: True
 
   indexing:
@@ -56,4 +55,7 @@ tasks:
     sample_size: 3
     top_k_results_per_task: 30
     qcr_hash_size: 128
+    n_paths_for_dataset: 5
+    max_path_length: 5
+    overlap_ratio_threshold: 0.5
 

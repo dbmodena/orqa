@@ -13,6 +13,10 @@ def pl_read_dataset(dataset_path: Path, opts: dict = {}) -> pl.DataFrame:
             return pl.read_csv(dataset_path, **opts.get("csv", {}))
         case ".parquet":
             return pl.read_parquet(dataset_path, **opts.get("parquet", {}))
+        case ".xls" | ".xslx":
+            return pl.read_excel(
+                dataset_path, **opts.get("excel", {"engine": "calamine"})
+            )
         case _:
             raise ValueError(
                 f"Unknown dataset format for file {dataset_path.absolute()}"
@@ -125,7 +129,6 @@ def load_dataset_info(
     Returns a dict ready to be unpacked as kwargs for load_prompt.
     """
     df = pl_read_dataset(dataset_path, polars_opts)
-
     df = remove_null_columns(df)
     df = remove_null_rows(df, [])
 

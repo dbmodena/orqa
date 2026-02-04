@@ -9,13 +9,13 @@ pandas:
 
 tasks:
   crawling:
-    max_datasets: 2000
-    from_dataset_index: 5000
-    batch_fetch_metadata: 500
-    accept_zip: False
+    max_datasets: 5000
+    from_dataset_index: 0
+    batch_fetch_metadata: 1000
+    accept_zip: True
     download_format: csv 
-    max_resource_size: 20MB
-    max_workers: 4
+    max_resource_size: 50MB
+    max_workers: 20
     verbose: True
 
   indexing:
@@ -28,6 +28,8 @@ tasks:
         - "none"
         - "null"
         - "nan"
+        - "n/a"
+        - "n/d"
 
         # we do not want to filer all the punctuations, 
         # or to replace all the punctuations with empty 
@@ -39,11 +41,11 @@ tasks:
     verbose: True
 
   candidates_discovery:
-    n_random_dataset_seeds: 50
+    n_random_dataset_seeds: 30
     min_dataset_height: 10
     limit_to_n_columns: 15
     sample_size: 3
-    top_k_results_per_task: 30
+    top_k_results_per_task: 10
     qcr_hash_size: 128
     n_paths_for_dataset: 5
     max_path_length: 5

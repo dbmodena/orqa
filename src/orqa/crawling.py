@@ -55,6 +55,12 @@ def _uk_filter_resource_metadata(metadata: dict[str, Any]) -> bool:
     return True
 
 
+def rename_crawled_datasets_folder(cfg: OrQAConfig):
+    import shutil
+
+    shutil.move(cfg.datasets_path, cfg.crawled_datasets_path)
+
+
 def _canada_create_links_for_unzipped_folder(datasets_path: Path, cfg: OrQAConfig):
     for dataset_file in os.listdir(datasets_path):
         dataset_path = datasets_path.joinpath(dataset_file)
@@ -123,7 +129,8 @@ def crawl_uk(cfg: OrQAConfig):
         verbose=cfg.crawling.verbose,
     )
 
-    ckan_download_datasets(download_cfg, uk)
+    # ckan_download_datasets(download_cfg, uk)
+    rename_crawled_datasets_folder(cfg)
 
 
 def crawl_modena(cfg: OrQAConfig):
@@ -162,7 +169,7 @@ def crawl_nyc(cfg: OrQAConfig):
         download_format=cfg.crawling.download_format,
         save_metadata=True,
         engine=cfg.crawling.engine,
-        cast_datatypes=True,
+        # cast_datatypes=True,
         max_rows_per_dataset=cfg.crawling.max_rows_per_dataset,
         batch_rows_per_dataset=cfg.crawling.batch_rows_per_dataset,
         max_workers=cfg.crawling.max_workers,

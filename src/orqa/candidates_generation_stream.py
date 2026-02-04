@@ -38,6 +38,10 @@ The workflow changes now:
         4. Go to 1
 """
 
+from orqa.graph.matches_graph import DatasetMatchesGraph
+
+from networkx.algorithms import union
+
 import json
 import os
 import random
@@ -167,21 +171,26 @@ def _execute_correlation_search(index: BLEND, keys, targets, k, hash_size):
 
 
 def execute_tasks(
-    cfg: OrQAConfig,
     index: BLEND,
     top_k: int,
     tasks: dict,
     query_id: str,
     query_dataset_path: Path,
-):
-    df = pl_read_dataset(query_dataset_path, cfg.polars_opts.read)
+    opts_read: dict,
+    qcr_hash_size: int,
+) -> list[dict]:
+    df = pl_read_dataset(query_dataset_path, opts_read)
 
     # the list where execution tasks results will be stored
     candidates = []
 
     union_tasks = tasks.get("union_tasks", [])
     join_tasks = tasks.get("join_tasks", [])
-    join_correlation = tasks.get("join_correlation_tasks", [])
+    join_correlation_tasks = tasks.get("join_correlation_tasks", [])
+
+    print(f"Union tasks: {len(union_tasks)}")
+    print(f"Join tasks: {len(join_tasks)}")
+    print(f"Join-Correlation tasks: {len(join_correlation_tasks)}")
 
     for task in tqdm(union_tasks, desc="Union tasks", position=1, leave=False):
         columns = task["columns"]
@@ -241,7 +250,7 @@ def execute_tasks(
                 print(f"Timeout on Multi-Join: {query_id}")
 
     for task in tqdm(
-        join_correlation, desc="Join-Correlation tasks", position=1, leave=False
+        join_correlation_tasks, desc="Join-Correlation tasks", position=1, leave=False
     ):
         # get the column names
         key_column = task["join_column"]
@@ -271,11 +280,10 @@ def execute_tasks(
             continue
 
         targets = targets.to_list()
-        hash_size = cfg.candidates_discovery.qcr_hash_size
 
         try:
             top_res = _execute_correlation_search(
-                index, keys, targets, top_k, hash_size
+                index, keys, targets, top_k, qcr_hash_size
             )
 
             for cand_id, r_key_column, r_target_column, score in top_res:
@@ -315,8 +323,8 @@ def pipeline(cfg: OrQAConfig):
     litellm_config_path = cfg.llm_config_path.joinpath("litellm.yaml")
     agent = CandidatesDiscoveryAgent(litellm_config_path)
 
-    tokens_budget = 100_000
-    n_datasets_limit = 20
+    tokens_budget = 1_000_000
+    n_datasets_limit = 100
 
     q = seed_datasets
 
@@ -334,7 +342,7 @@ def pipeline(cfg: OrQAConfig):
     # instantiate the matches graph
     G = matches_graph.DatasetMatchesGraph()
 
-    while True:
+    while q:
         if tokens_budget <= 0 or n_datasets_limit <= 0:
             break
         # get the first item in the queue
@@ -344,12 +352,13 @@ def pipeline(cfg: OrQAConfig):
         metadata = datasets_metadata[resource_id]
 
         # Propose tasks for this dataset
-        tasks = generate_tasks(cfg, dataset_path, metadata, agent)
-        if not tasks:
+        tasks_completion = generate_tasks(cfg, dataset_path, metadata, agent)
+        if not tasks_completion:
             continue
 
-        # print(">", tasks, "<")
-        tokens_budget -= tasks["token_usage"]["total_tokens"]
+        total_tokens = tasks_completion["token_usage"]["total_tokens"]
+        tasks = tasks_completion["tasks"]
+        tokens_budget -= total_tokens
         n_datasets_limit -= 1
 
         print("\n" + " BUDGET UPDATE ".center(100, "="))
@@ -358,14 +367,26 @@ def pipeline(cfg: OrQAConfig):
         print("=" * 100 + "\n")
 
         # wait some time (for remote groq calls...)
-        time.sleep(20)
-        save_proposed_tasks(cfg, list(tasks))
+        time.sleep(30)
+        save_list_to_jsonlines(cfg.candidates_discovery.proposed_tasks_path, [tasks])
 
         # execute the tasks
         print("\n" + " EXECUTING TASKS ".center(100, "="))
-        candidates = execute_tasks(cfg, index, top_k, tasks, dataset_id, dataset_path)
-        print(" TASKS EXECUTED ".center(100, "="))
-        save_execution_tasks_results(cfg, candidates)
+        candidates = execute_tasks(
+            index,
+            top_k,
+            tasks,
+            dataset_id,
+            dataset_path,
+            cfg.polars_opts.read,
+            cfg.candidates_discovery.qcr_hash_size,
+        )
+        print("\n" + " DONE ".center(100, "="))
+
+        # TODO: tag or filter with metadata from Valentine Schema matching:
+        #   - Joinable pairs with (almost-)identical schema should not be joined;
+        #   - Unionable pairs should have a very similar schema instead;
+        save_list_to_jsonlines(cfg.candidates_discovery.tasks_results_path, candidates)
 
         # Add the identified matches to the queue of datasets that have to
         # be analysed
@@ -380,20 +401,17 @@ def pipeline(cfg: OrQAConfig):
 
         # Once we have executed the tasks, we can add the identified
         # matches to the graph
-        G.add(candidates, cfg.datasets_path, cfg.polars_opts.read, verbose=True)
+        print("\n" + " EXTENDING GRAPH ".center(100, "="))
+        G.add(candidates, cfg.datasets_path, cfg.polars_opts.read, verbose=False)
+        print("\n" + " DONE ".center(100, "="))
         G.save(cfg.candidates_discovery.matches_graph_path)
 
     G.save(cfg.candidates_discovery.matches_graph_path)
 
 
-def save_proposed_tasks(cfg: OrQAConfig, tasks: list[dict]):
-    with open(cfg.candidates_discovery.tasks_results_path, "a") as file:
-        file.writelines([json.dumps(task_set) + "\n" for task_set in tasks])
-
-
-def save_execution_tasks_results(cfg: OrQAConfig, candidates: list[dict]):
-    with open(cfg.candidates_discovery.tasks_results_path, "a") as file:
-        file.writelines([json.dumps(match) + "\n" for match in candidates])
+def save_list_to_jsonlines(path: Path, objects: list):
+    with open(path, "a") as file:
+        file.writelines([json.dumps(o) + "\n" for o in objects])
 
 
 def get_seed_datasets(cfg: OrQAConfig) -> list[tuple[str, Path, str, str]]:
@@ -411,6 +429,12 @@ def get_seed_datasets(cfg: OrQAConfig) -> list[tuple[str, Path, str, str]]:
 
 def candidates_discovery(cfg: OrQAConfig):
     pipeline(cfg)
+    # with open(cfg.candidates_discovery.tasks_results_path, "r") as file:
+    #     candidates = [json.loads(line) for line in file.readlines()]
+    #
+    # G = DatasetMatchesGraph()
+    # G.add(candidates, cfg.datasets_path, cfg.polars_opts.read, verbose=False)
+    # G.save(cfg.candidates_discovery.matches_graph_path)
 
 
 def candidates_discovery_old(cfg: OrQAConfig):

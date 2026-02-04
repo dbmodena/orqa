@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import yaml
 
@@ -10,7 +10,7 @@ import yaml
 class PolarsOpts:
     read: dict = field(
         default_factory=lambda: {
-            "csv": {"ignore_errors": True, "encoding": "latin-1"},
+            "csv": {"ignore_errors": True},  # "encoding": "latin-1"},
             "parquet": {},
             "json": {},
         }
@@ -161,6 +161,9 @@ class OrQAConfig:
     data_path: Path
 
     # Where all the datasets are stored once downloaded
+    crawled_datasets_path: Path = field(init=False)
+
+    # Where all the datasets are stored after cleaning
     datasets_path: Path = field(init=False)
 
     # Where the datasets metadata are stored once downloaded
@@ -184,12 +187,16 @@ class OrQAConfig:
     datasets_format: str
 
     def __post_init__(self):
+        self.crawled_datasets_path = Path(
+            self.data_path, "datasets", "crawling", self.crawling.download_format
+        )
+
         self.datasets_path = Path(
             self.data_path, "datasets", self.crawling.download_format
         )
 
         self.metadata_path = Path(self.data_path, "metadata")
-        self.logging_path = Path(self.data_path, "logging_path")
+        self.logging_path = Path(self.data_path, "log")
         self.tmp_path = Path(self.data_path, "tmp")
         self.prompts_path = Path(__file__).parent.parent.parent.joinpath(
             "conf", "prompts"

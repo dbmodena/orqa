@@ -9,6 +9,7 @@ dependencies = [
     "bitarray>=3.8.0",
     "blend",
     "duckdb>=1.4.3",
+    "fastexcel>=0.19.0",
     "inflection>=0.5.1",
     "jsonlines>=4.0.0",
     "litellm>=1.80.10",
