@@ -343,8 +343,8 @@ class LLMClient:
             self.response_model = reply_model
             self.raw = False
 
-        if self.response_model and self.enable_json_mode:
-            completion_args["response_format"] = {"type": "json_object"}
+        # if self.response_model and self.enable_json_mode:
+        #     completion_args["response_format"] = {"type": "json_object"}
 
         assert self.response_model is not None or self.raw
         last_content = None

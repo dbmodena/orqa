@@ -325,7 +325,7 @@ class DatasetMatchesGraph:
             )
 
             for random_walk in nx.generate_random_paths(
-                sub_graph,
+                nx.to_undirected(sub_graph),
                 n_paths_to_generate,
                 max_path_length,
                 weight=weight,
@@ -334,7 +334,7 @@ class DatasetMatchesGraph:
             ):
                 random_walks.append(
                     {
-                        "Q": dataset_id,
+                        # "Q": dataset_id,
                         "operation_type": edge_labels,
                         "datasets": random_walk,  # this should be a list
                     }

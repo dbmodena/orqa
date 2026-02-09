@@ -14,7 +14,7 @@ Analyze the given dataset and identify columns for UNION, JOIN and JOIN-CORRELAT
 2. **JOIN TASKS** (join_tasks):
    - Identify columns that could serve as join keys (unique identifiers or foreign keys).
    - Format each entry in this way: {{"columns": ["id_col1", "id_col2"]}}.
-   - Ignore columns with very few unique values (like <5); focus on columns that are **likely to be keys**.
+   - Ignore columns with very few unique values (like <5); focus on columns or group of columns that are **likely to be keys**.
 
 3. **JOIN-CORRELATION TASKS** (join_correlation_tasks):
    - Identify pairs where one column is a join key and another correlates with it.
@@ -35,4 +35,4 @@ Analyze the given dataset and identify columns for UNION, JOIN and JOIN-CORRELAT
 3. Each field is an ARRAY of objects.
 4. DO NOT include a "task" field in any object.
 5. DO NOT wrap your response in an array.
-6. Column names must exactly match those in the CSV.
+6. Column names must exactly match those in the dataset.

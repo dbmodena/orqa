@@ -1,10 +1,10 @@
 # LLM Configuration File
 # Primary model (will be tried first)
-model: "ollama_chat/llama3.3:latest"
+model: "ollama_chat/llama3.1-8b"
 # Fallback models (tried in order if primary fails)
 fallback_models:
-  - "groq/llama-3.3-70b-versatile"
-#  - "together_ai/togethercomputer/Llama-2-7B-32K-Instruct"
+  # - "groq/llama-3.3-70b-versatile"
+  - "together_ai/meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
 
 # Provider-specific parameters
 provider_params:
@@ -12,8 +12,14 @@ provider_params:
     api_base: "http://localhost:11434"
     keep_alive: "24h"
     num_ctx: 8192
+    enable_json_mode: true
+    response_format: 
+      type: "json_object"
   groq:
     # Groq-specific params (if any)
+    enable_json_mode: true 
+    response_format: 
+      type: "json_object"
   together_ai:
     # TogetherAI-specific params (if any)
 
@@ -21,7 +27,7 @@ provider_params:
 temperature: 0.2
 max_retries: 3
 retry_delay: 10.0
-enable_json_mode: true
+enable_json_mode: false
 
 
 # Response model configuration

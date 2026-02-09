@@ -72,7 +72,7 @@ def clean_html_from_metadata_notes(html_text):
 
 
 def load_datasets_metadata(
-    metadata_path: Path, dataset_ids: str | list[str], field: str = "id"
+    metadata_path: Path, dataset_ids: str | list[str] | None, field: str = "id"
 ) -> dict[str, dict]:
     """
     Load the datasets metadata from the main JSON file.
@@ -83,10 +83,16 @@ def load_datasets_metadata(
     :param field: the key field on which search for the metadata
     :return: a list of dictionaries containing the metadata, one for each identified dataset
     """
-    _dataset_ids = copy.copy(dataset_ids)
-    _dataset_ids = (
-        {_dataset_ids} if isinstance(_dataset_ids, str) else set(_dataset_ids)
-    )
+    dataset_ids = copy.copy(dataset_ids)
+
+    if dataset_ids:
+        dataset_ids = (  # ty: ignore
+            {
+                dataset_ids,
+            }
+            if isinstance(dataset_ids, str)
+            else set(dataset_ids)
+        )
 
     with open(metadata_path, "r") as file:
         metadata = json.load(file)
@@ -96,8 +102,9 @@ def load_datasets_metadata(
     for package in metadata:
         resources = package.get("resources", [])
         for resource in resources:
-            if resource.get(field) in dataset_ids:
-                _dataset_ids.remove(resource.get(field))
+            if dataset_ids is None or resource.get(field) in dataset_ids:
+                if dataset_ids:
+                    dataset_ids.remove(resource.get(field))  # ty: ignore
                 rv[resource.get(field)] = {
                     "package.title": package.get("title", "N/A"),
                     "resource.title": resource.get("title", "N/A"),

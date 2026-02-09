@@ -1,16 +1,12 @@
 import importlib
 import json
-import os
 import time
 from pathlib import Path
 from typing import Any, Optional, Type
 
-import yaml
-from litellm import completion, Router
-from pydantic import BaseModel, ValidationError
-from LLMClient import LLMClient
-from prompting import DatasetDescription
 import prompting
+from LLMClient import LLMClient
+from pydantic import BaseModel, ValidationError
 
 
 class LLMClientStructured(LLMClient):
@@ -18,7 +14,7 @@ class LLMClientStructured(LLMClient):
     LiteLLM client with YAML configuration and structured output support.
     """
 
-    def __init__(self, config_path: Path,response_model="response_model"):
+    def __init__(self, config_path: Path, response_model="response_model"):
         """
         Initialize LLM client with configuration from YAML file.
 
@@ -27,7 +23,7 @@ class LLMClientStructured(LLMClient):
         """
         # 1. Inherits the methods and proprierties
         super().__init__(config_path)
-        
+
         # 2. Load response model
         self.response_model = self._load_pydantic_response_model(response_model)
 
@@ -85,7 +81,8 @@ class LLMClientStructured(LLMClient):
                         return content[start : i + 1].strip()
 
         return content.strip()
-    def _load_pydantic_response_model(self,model) -> Optional[Type[BaseModel]]:
+
+    def _load_pydantic_response_model(self, model) -> Optional[Type[BaseModel]]:
         """
         Dynamically load Pydantic model from config.
 
@@ -105,7 +102,7 @@ class LLMClientStructured(LLMClient):
 
         try:
             # Import the module
-            module = importlib.import_module( module_name)
+            module = importlib.import_module(module_name)
 
             # Get the class from the module
             model_class = getattr(module, class_name)
@@ -122,6 +119,7 @@ class LLMClientStructured(LLMClient):
             raise AttributeError(
                 f"Could not find class '{class_name}' in module '{module_name}': {e}"
             )
+
     def _format_json_error(self, content: str, error: Exception) -> str:
         """
         Format JSON parsing error with context.
@@ -145,6 +143,7 @@ class LLMClientStructured(LLMClient):
         )
 
         return formatted_error
+
     def _clean_json_response(self, content: str) -> str:
         """Clean up JSON response by extracting valid JSON"""
         content = content.strip()
@@ -199,6 +198,7 @@ class LLMClientStructured(LLMClient):
                         return content[start : i + 1].strip()
 
         return content.strip()
+
     def _format_validation_error(self, error: ValidationError) -> str:
         """
         Format Pydantic validation error in a clear, actionable way.
@@ -227,10 +227,10 @@ class LLMClientStructured(LLMClient):
         )
 
         return formatted_error
-    
-    def reform_prompt_constraint(self,prompt: str):
-        return f"{prompt}\n{prompting._load_prompt("prompt.md", "Pydantic", format= self.response_model.schema_json(indent=2))}"
-        
+
+    def reform_prompt_constraint(self, prompt: str):
+        return f"{prompt}\n{prompting._load_prompt('prompt.md', 'Pydantic', format=self.response_model.schema_json(indent=2))}"
+
     def complete(
         self,
         prompt: str,
@@ -241,13 +241,15 @@ class LLMClientStructured(LLMClient):
         :param prompt: The prompt to send to the model
         :param **kwargs: Additional arguments to pass to litellm.completion
         """
-        usage_total = {"prompt_tokens": 0,"completion_tokens": 0,"total_tokens": 0}
-        messages = [{"role": "system", "content": self.reform_prompt_constraint(prompt)}]
+        usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        messages = [
+            {"role": "system", "content": self.reform_prompt_constraint(prompt)}
+        ]
         completion_args = {
             "model": "primary",  # Router handles the actual model selection
             "messages": messages,
             "temperature": self.temperature,
-            "response_format" : {"type": "json_object"},
+            "response_format": {"type": "json_object"},
             **kwargs,
         }
         last_content = None
@@ -319,5 +321,3 @@ class LLMClientStructured(LLMClient):
             print(f"\nLast response preview:\n{last_content[:300]}...\n")
 
         return {}, usage_total
-
-

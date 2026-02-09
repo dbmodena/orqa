@@ -1,14 +1,10 @@
-import importlib
 import json
-import os
 import time
 from pathlib import Path
-from typing import Any, Optional, Type
+from typing import Any
 
-import yaml
-from litellm import completion, Router
-from pydantic import BaseModel, ValidationError
 from LLMClientStructured import LLMClientStructured
+from pydantic import ValidationError
 
 
 class LLMClientTableAnalyzer(LLMClientStructured):
@@ -24,8 +20,7 @@ class LLMClientTableAnalyzer(LLMClientStructured):
             config_path: Path to YAML configuration file
         """
         # 1. Load configuration
-        super().__init__(config_path,"table_analyzer")
-
+        super().__init__(config_path, "table_analyzer")
 
     def _value_validation_error(
         self, content: dict, schema: list
@@ -72,10 +67,6 @@ class LLMClientTableAnalyzer(LLMClientStructured):
 
         return False, None
 
-
-
-
-
     def complete(
         self,
         prompt: str,
@@ -94,12 +85,14 @@ class LLMClientTableAnalyzer(LLMClientStructured):
             "completion_tokens": 0,
             "total_tokens": 0,
         }
-        messages = [{"role": "system", "content": self.reform_prompt_constraint(prompt)}]
+        messages = [
+            {"role": "system", "content": self.reform_prompt_constraint(prompt)}
+        ]
         completion_args = {
             "model": "primary",  # Router handles the actual model selection
             "messages": messages,
             "temperature": self.temperature,
-            "response_format" : {"type": "json_object"},
+            # "response_format": {"type": "json_object"},
             **kwargs,
         }
         last_content = None
@@ -149,7 +142,6 @@ class LLMClientTableAnalyzer(LLMClientStructured):
                                         messages.append(
                                             {"role": "user", "content": error_msg}
                                         )
-
                                         continue
 
                     print(f"✓ Success on attempt {attempt + 1}\n")
@@ -194,7 +186,7 @@ class LLMClientTableAnalyzer(LLMClientStructured):
 
         # All retries failed
         # All retries exhausted
-        print(f"\n❌ Failed after {retries} attempts")
+        print(f"\n❌ Failed after {self.max_retries} attempts")
         print(f"Last error: {last_error}")
         if last_content:
             print(f"\nLast response preview:\n{last_content[:300]}...\n")
@@ -202,14 +194,12 @@ class LLMClientTableAnalyzer(LLMClientStructured):
         return {}, usage_total
 
 
+if __name__ == "__main__":
+    ### testing main
+    import pandas as pd
+    import prompting
+    from prompting import DatasetDescription
 
-
-
-### testing main
-import pandas as pd
-import prompting
-from prompting import DatasetDescription
-if __name__=="__main__":
     #### we fetch the dataframes
     folder = r"D:\uk_small\uk_small_copy\datasets\csv"
     path = Path("litellm.yaml")
@@ -219,7 +209,7 @@ if __name__=="__main__":
     df1["Amount"] = df1["Amount"].str.replace(",", "").astype(float)
 
     ### define the tables aliases
-    TABLE1=f"df_{D1.split("__")[0].replace("-","_")}"
+    TABLE1 = f"df_{D1.split('__')[0].replace('-', '_')}"
     # Create table descriptions
     descriptor = DatasetDescription()
     table = descriptor.update(TABLE1, df1.shape[0], df1.shape[1], "", "", df1.head(3))
@@ -229,5 +219,6 @@ if __name__=="__main__":
     client = LLMClientTableAnalyzer(Path("litellm.yaml"))
     ### testing queries
     print(prompt)
-    result=client.complete(prompt)
+    result = client.complete(prompt)
     print(result)
+

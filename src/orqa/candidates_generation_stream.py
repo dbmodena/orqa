@@ -38,10 +38,6 @@ The workflow changes now:
         4. Go to 1
 """
 
-from orqa.graph.matches_graph import DatasetMatchesGraph
-
-from networkx.algorithms import union
-
 import json
 import os
 import random
@@ -79,6 +75,7 @@ def memory_limit_half():
 
 
 SEP = "__"
+COMPLETION_CALLS_TIMEOUT = 1
 
 
 def get_memory():
@@ -96,7 +93,7 @@ def _f_nop(x: str):
 
 
 def _f_comma_dot_filter_tokens(x: str):
-    x = x.strip().replace(",", "").lower()
+    x = x.strip().replace(",", "").replace("£", "").lower()
     return x if x != "total" else None
 
 
@@ -307,12 +304,16 @@ def execute_tasks(
 def pipeline(cfg: OrQAConfig):
     seed_datasets = get_seed_datasets(cfg)
 
+    # save seed datasets
+    with open(cfg.candidates_discovery.seeds_datasets_path, "w") as file:
+        json.dump([d[0] for d in seed_datasets], file)
+
     # load metadata for seed datasets
     # FIX: could not be better to load all metadata in memory directly?
     # or store them in document-oriented-like db?
     datasets_metadata = load_datasets_metadata(
         cfg.metadata_path.joinpath("metadata.json"),
-        [s[3 if len(s) == 4 else 2] for s in seed_datasets],
+        None,  # [s[3 if len(s) == 4 else 2] for s in seed_datasets],
     )
 
     # setup the Agent
@@ -325,8 +326,6 @@ def pipeline(cfg: OrQAConfig):
 
     tokens_budget = 1_000_000
     n_datasets_limit = 100
-
-    q = seed_datasets
 
     _format = cfg.datasets_format
 
@@ -342,11 +341,29 @@ def pipeline(cfg: OrQAConfig):
     # instantiate the matches graph
     G = matches_graph.DatasetMatchesGraph()
 
-    while q:
+    # keep track of already analyzed datasets
+    visited = set()
+
+    # Place the candidates inside q. Once we have analyzed all the
+    # initial seeds, switch to the candidates.
+    q = set()
+
+    while seed_datasets or q:
+        # first pop the seeds, then switch to the candidates
+        if seed_datasets == []:
+            dataset_id, dataset_path, resource_name, resource_id = q.pop()
+        else:
+            dataset_id, dataset_path, resource_name, resource_id = seed_datasets.pop()
+
+        # avoid duplicated analyses
+        if resource_id in visited:
+            continue
+
+        # if we run out of budget, stop generation
         if tokens_budget <= 0 or n_datasets_limit <= 0:
             break
-        # get the first item in the queue
-        dataset_id, dataset_path, resource_name, resource_id = q.pop(0)
+
+        print("\n" + f" DATASET {dataset_id} ".center(100, "=") + "\n")
 
         # get its metadata
         metadata = datasets_metadata[resource_id]
@@ -361,14 +378,19 @@ def pipeline(cfg: OrQAConfig):
         tokens_budget -= total_tokens
         n_datasets_limit -= 1
 
+        if isinstance(tasks, str):
+            continue
+
         print("\n" + " BUDGET UPDATE ".center(100, "="))
         print(f" Remaining tokens: {tokens_budget} ".center(100, "-"))
         print(f" Remaining datasets: {n_datasets_limit} ".center(100, "-"))
         print("=" * 100 + "\n")
 
         # wait some time (for remote groq calls...)
-        time.sleep(30)
-        save_list_to_jsonlines(cfg.candidates_discovery.proposed_tasks_path, [tasks])
+        time.sleep(COMPLETION_CALLS_TIMEOUT)
+        save_list_to_jsonlines(
+            cfg.candidates_discovery.proposed_tasks_path, [tasks_completion]
+        )
 
         # execute the tasks
         print("\n" + " EXECUTING TASKS ".center(100, "="))
@@ -388,14 +410,14 @@ def pipeline(cfg: OrQAConfig):
         #   - Unionable pairs should have a very similar schema instead;
         save_list_to_jsonlines(cfg.candidates_discovery.tasks_results_path, candidates)
 
-        # Add the identified matches to the queue of datasets that have to
-        # be analysed
+        # Add the identified matches to the queue of datasets that have to be analysed
         for candidate in candidates:
-            q.append(
+            filename = str(candidate["R"])
+            q.add(
                 (  # ty: ignore
                     candidate["R"],
                     cfg.datasets_path / f"{candidate['R']}.{cfg.datasets_format}",
-                    *str(candidate["R"]).split(SEP),
+                    *(filename.split(SEP) if SEP in filename else ("", filename)),
                 )
             )
 
@@ -427,8 +449,47 @@ def get_seed_datasets(cfg: OrQAConfig) -> list[tuple[str, Path, str, str]]:
     return sample
 
 
+def generate_random_walks(cfg: OrQAConfig):
+    graph_gml_path = cfg.candidates_discovery.matches_graph_path
+    random_walks_path = cfg.candidates_discovery.candidates_path
+
+    G = matches_graph.DatasetMatchesGraph()
+    G.load(graph_gml_path)
+
+    seed_datasets = get_seed_datasets(cfg)
+    random_walks = {}
+
+    for dataset_id, dataset_path, resource_id, resource_name in tqdm(
+        seed_datasets, desc="Generating random walks"
+    ):
+        if dataset_id not in G._G:
+            continue
+
+        random_walks[dataset_id] = []
+
+        for path_length in range(1, cfg.candidates_discovery.max_path_length + 1):
+            random_walks[dataset_id].append(
+                {
+                    "path_length": path_length,
+                    "paths": G.generate_random_walks(
+                        dataset_id,
+                        cfg.candidates_discovery.n_paths_for_dataset,
+                        path_length,
+                        None,
+                        cfg.seed,
+                    ),
+                }
+            )
+
+    with open(random_walks_path, "w") as file:
+        json.dump(random_walks, file, indent=4)
+
+
 def candidates_discovery(cfg: OrQAConfig):
-    pipeline(cfg)
+    # pipeline(cfg)
+
+    generate_random_walks(cfg)
+
     # with open(cfg.candidates_discovery.tasks_results_path, "r") as file:
     #     candidates = [json.loads(line) for line in file.readlines()]
     #

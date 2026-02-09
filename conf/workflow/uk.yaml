@@ -41,7 +41,7 @@ tasks:
     verbose: True
 
   candidates_discovery:
-    n_random_dataset_seeds: 30
+    n_random_dataset_seeds: 20
     min_dataset_height: 10
     limit_to_n_columns: 15
     sample_size: 3

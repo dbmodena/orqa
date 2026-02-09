@@ -1,14 +1,9 @@
-import importlib
-import json
-import os
 import time
 from pathlib import Path
-from typing import Any, Optional, Type
+from typing import Any
 
 import yaml
-from litellm import completion, Router
-from pydantic import BaseModel, ValidationError
-
+from litellm import Router
 
 
 class LLMClient:
@@ -34,8 +29,6 @@ class LLMClient:
         # 3. Setup router LAST (depends on provider_params being set)
         self.router = self._setup_router()
 
-
-
     def _get_provider_from_model(self, model: str) -> str:
         """Extract provider name from model string."""
         if "/" in model:
@@ -45,74 +38,68 @@ class LLMClient:
     def _get_provider_specific_params(self, model: str) -> dict[str, Any]:
         """
         Get provider-specific parameters for a given model.
-        
+
         Args:
             model: Model string (e.g., "ollama_chat/llama3.3:latest")
-            
+
         Returns:
             Dictionary of provider-specific parameters
         """
         provider = self._get_provider_from_model(model)
-        
+
         # Defensive programming: handle None and missing keys
         if not self.provider_params:
             return {}
-        
+
         provider_config = self.provider_params.get(provider, {})
-        
+
         # Handle case where provider_config might be None
         if provider_config is None:
             return {}
         return provider_config.copy()
 
-
     def _setup_router(self) -> Router:
         """Setup LiteLLM Router with primary and fallback models."""
         model_list = []
-        
+
         # Primary model
         primary_model = self.config["model"]
         primary_params = self._get_provider_specific_params(primary_model)
-        model_list.append({
-            "model_name": "primary",
-            "litellm_params": {
-                "model": primary_model,
-                **primary_params
+        model_list.append(
+            {
+                "model_name": "primary",
+                "litellm_params": {"model": primary_model, **primary_params},
             }
-        })
-        
+        )
+
         # Fallback models
         fallback_names = []
         for idx, fallback_model in enumerate(self.config.get("fallback_models", [])):
             fallback_name = f"fallback_{idx}"
             fallback_names.append(fallback_name)
             fallback_params = self._get_provider_specific_params(fallback_model)
-            model_list.append({
-                "model_name": fallback_name,
-                "litellm_params": {
-                    "model": fallback_model,
-                    **fallback_params
+            model_list.append(
+                {
+                    "model_name": fallback_name,
+                    "litellm_params": {"model": fallback_model, **fallback_params},
                 }
-            })
-        
+            )
+
         # Setup fallback chain: primary -> fallback_0 -> fallback_1 -> ...
         fallbacks = [{"primary": fallback_names}] if fallback_names else []
-        
+
         return Router(
             model_list=model_list,
             fallbacks=fallbacks,
             num_retries=1,  # Router handles retries per model
             timeout=60,
-            set_verbose=True  # Shows which model is being used
+            set_verbose=True,  # Shows which model is being used
         )
-
 
     def _load_config(self, config_path) -> dict[str, Any]:
         """Load configuration from YAML file"""
         with open(config_path, "r") as f:
             return yaml.safe_load(f)
-
-
 
     def complete(
         self,
@@ -127,9 +114,18 @@ class LLMClient:
         :return: If response_model is provided, instance of the Pydantic model,
                 otherwise a raw string response
         """
-        usage_total = {"prompt_tokens": 0,"completion_tokens": 0,"total_tokens": 0,}
+        usage_total = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
         messages = [{"role": "system", "content": prompt}]
-        completion_args = { "model": "primary", "messages": messages,"temperature": self.temp,**kwargs,}
+        completion_args = {
+            "model": "primary",
+            "messages": messages,
+            "temperature": self.temp,
+            **kwargs,
+        }
         last_content = None
         last_error = None
         for attempt in range(self.max_retries):
@@ -149,7 +145,7 @@ class LLMClient:
                 print(f"✗ Error on attempt {attempt + 1}: {e}")
                 # Wait before retry
                 if attempt < self.max_retries - 1:
-                    message.append({"role":"user","content":e})
+                    message.append({"role": "user", "content": e})
                     print(f"Retrying in {self.retry_delay} seconds...\n")
                     time.sleep(self.retry_delay)
         # All retries exhausted
