@@ -14,3 +14,4 @@ prev*
 *.lock
 .env
 __pycache__
+oci

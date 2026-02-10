@@ -4,10 +4,9 @@ import time
 from pathlib import Path
 from typing import Any, Optional, Type
 
-import prompting
-from LLMClient import LLMClient
+from statement_generator.prompting import DatasetDescription, _load_prompt
 from pydantic import BaseModel, ValidationError
-
+from statement_generator.LLMClient import LLMClient
 
 class LLMClientStructured(LLMClient):
     """
@@ -102,7 +101,7 @@ class LLMClientStructured(LLMClient):
 
         try:
             # Import the module
-            module = importlib.import_module(module_name)
+            module = importlib.import_module(f"statement_generator.{module_name}")
 
             # Get the class from the module
             model_class = getattr(module, class_name)
@@ -229,7 +228,7 @@ class LLMClientStructured(LLMClient):
         return formatted_error
 
     def reform_prompt_constraint(self, prompt: str):
-        return f"{prompt}\n{prompting._load_prompt('prompt.md', 'Pydantic', format=self.response_model.schema_json(indent=2))}"
+        return f"{prompt}\n{_load_prompt('statement_generator/prompt.md', 'Pydantic', format=self.response_model.schema_json(indent=2))}"
 
     def complete(
         self,
@@ -249,7 +248,6 @@ class LLMClientStructured(LLMClient):
             "model": "primary",  # Router handles the actual model selection
             "messages": messages,
             "temperature": self.temperature,
-            "response_format": {"type": "json_object"},
             **kwargs,
         }
         last_content = None

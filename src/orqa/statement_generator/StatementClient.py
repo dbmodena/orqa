@@ -11,10 +11,9 @@ from pydantic import BaseModel, ValidationError
 
 
 import pandas as pd
-import prompting
-from prompting import DatasetDescription
+from statement_generator.prompting import DatasetDescription, _load_prompt
 from pathlib import Path
-from structured_outputs import QuerySet, Query
+from statement_generator.structured_outputs import QuerySet, Query
 import duckdb
 
 
@@ -26,11 +25,9 @@ import sys
 from io import StringIO
 
 import pandas as pd
-import prompting
-from prompting import DatasetDescription
 from pathlib import Path
 import duckdb
-from LLMClientStructured import LLMClientStructured
+from statement_generator.LLMClientStructured import LLMClientStructured
 
 
 class LLMClientStatementGenerator(LLMClientStructured):
@@ -51,8 +48,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
     def complete(
         self,
         prompt: str,
-        dataframes,table_names, typology="SQL",
-        **kwargs,
+        dataframes,table_names, typology="SQL"
     ) -> Any:
         """
         Make a completion request with optional structured output.
@@ -65,13 +61,13 @@ class LLMClientStatementGenerator(LLMClientStructured):
             "completion_tokens": 0,
             "total_tokens": 0,
         }
-        messages = [{"role": "system", "content": self.reform_prompt_constraint(prompt)}]
+        initial_message = self.reform_prompt_constraint(prompt)
+        messages = [{"role": "system", "content": initial_message}]
         completion_args = {
-            "model": "primary",  # Router handles the actual model selection
+            "model": self.config["model"],
             "messages": messages,
             "temperature": self.temperature,
-             "response_format" : {"type": "json_object"},
-            **kwargs,
+            "num_retries":3,
         }
         
         last_content = None
@@ -114,6 +110,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
 
                     if attempt < self.max_retries - 1:
                         # Add assistant's failed response
+                        messages = [{"role": "system", "content": initial_message}]
                         messages.append({"role": "assistant", "content": content})
                         # Add error feedback as user message
                         messages.append({"role": "user", "content": error_msg})
@@ -127,7 +124,8 @@ class LLMClientStatementGenerator(LLMClientStructured):
 
                     if attempt < self.max_retries - 1:
                         # Add assistant's failed response
-                        messages.append({"role": "assistant", "content": content})
+                        messages = [{"role": "system", "content": initial_message}]
+                        messages.append({"role": "system", "content": content})
                         # Add error feedback as user message
                         messages.append({"role": "user", "content": error_msg})
                         print("💬 Sending validation errors to LLM...\n")
@@ -156,6 +154,13 @@ class LLMClientStatementGenerator(LLMClientStructured):
             return self.validate_sql_queries(dataframes, result, table_names)
         else:
             return self.validate_dataframe_queries(dataframes, result, table_names)
+
+    def clean_pandas(self,query: str) -> str:
+        """Rimuove import statements dalle query"""
+        lines = query.split(';')
+        # Filtra righe che contengono import
+        cleaned = [line.strip() for line in lines if 'import' not in line.lower()]
+        return '; '.join(cleaned).strip() 
 
     def validate_dataframe_queries(self, dataframes, result, table_names):
         """
@@ -190,7 +195,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
             namespace[name] = df
         
         for idx, q in enumerate(result["queries"]):
-            query_code = q["code"].strip()  # <-- Cambiato da "query" a "code"
+            query_code = self.clean_pandas(q["code"].strip()) 
             
             try:
                 local_namespace = namespace.copy()
@@ -251,6 +256,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
             "role": "user",
             "content": "\n".join(feedback_lines)
         }, good_queries
+
     def validate_sql_queries(self,dataframes, result, table_names):
         validation_errors = []
         all_valid = True
@@ -311,99 +317,8 @@ class LLMClientStatementGenerator(LLMClientStructured):
 
 
 
-def parse_matches(matches,TABLE1,TABLE2):
-    """Generate a textual description of database operations from match data between two tables."""
-    operations = []
-    all_join_conditions = []
-    
-    for match in matches:
-        table1 = match["table1"]
-        table2 = match["table2"]
-        operation = match["operation"]
-        
-        # Build join conditions for this match
-        join_conditions = []
-        for couple in match["couples"]:
-            condition = f"{TABLE1}.{couple[0]} {couple[1]} {TABLE2}.{couple[2]}"
-            join_conditions.append(condition)
-            all_join_conditions.append(condition)
-        
-        # Build operation description
-        if operation == "U":
-            operations.append(f"{TABLE1} UNIONS {TABLE2}")
-        elif operation == "JC":
-            operations.append(f"{TABLE1} JOIN-CORRELATION {TABLE2}")
-        elif operation == "MJ":
-            # Format: "table1 joins table2 on columns (condition1, condition2, ...)"
-            conditions_str = ", ".join(f"({cond})" for cond in join_conditions)
-            operations.append(f"{TABLE1} joins {TABLE2} on columns {conditions_str}")
-    
-    # Determine the primary operation type
-    operation_types = [m["operation"] for m in matches]
-    
-    if "MJ" in operation_types:
-        operation_name = "MULTI-JOIN"
-    elif "JC" in operation_types:
-        operation_name = "JOIN-CORRELATION"
-    elif "U" in operation_types:
-        operation_name = "UNION"
-    else:
-        operation_name = "operation"
-    
-    # Build final description
-    description = f"The query must be done on the {operation_name} operation where:\n"
-    description += "\n".join(f" {op}" for op in operations)
-    
-    return description
 
 
 
 
-
-
-
-
-
-if __name__=="__main__":
-    #### we fetch the dataframes
-    folder = r"D:\uk_small\uk_small_copy\datasets\csv"
-    path = Path("litellm.yaml")
-    D1 = "2019-March-return__3f436d14-4e17-476c-a3e4-66d18e7f6c90"
-    D2 = "2019-January-return__e07d11d5-afcb-4b8d-909f-d4952c4f183a"
-    ### env 
-    
-    # Load CSVs
-    df1 = pd.read_csv(Path(folder) / f"{D1}.csv")
-    df1["Amount"] = df1["Amount"].str.replace(",", "").astype(float)
-    df2 = pd.read_csv(Path(folder) / f"{D2}.csv")
-    df2["Amount"] = df2["Amount"].str.replace(",", "").astype(float)
-
-    ### define the tables aliases
-    TABLE1=f"df_{D1.split("__")[0].replace("-","_")}"
-    TABLE2=f"df_{D2.split("__")[0].replace("-","_")}"
-    # Define matches with real columns
-    matches = [
-        {
-            "table1": TABLE1,
-            "table2": TABLE2,
-            "operation": "MJ",
-            "couples": [("Transaction number", "=", df2.columns[6]),("Supplier", "=",df2.columns[5])]
-        },
-    ]
-    # Create table descriptions
-    descriptor = DatasetDescription()
-    table = descriptor.update(TABLE1, df1.shape[0], df1.shape[1], "", "", df1.head(3))
-    table += f"\n{descriptor.update(TABLE2, df2.shape[0], df2.shape[1], '', '', df2.head(3))}"
-
-    # Load prompt
-    prompt = prompting._load_prompt("prompt.md", "PandasCodeGeneration", matches=parse_matches(matches,TABLE1,TABLE2), table=table)
-    client = LLMClientStatementGenerator(Path("litellm.yaml"))
-    ### testing queries
-    dataframes = [df1,df2]
-    table_names = [TABLE1,TABLE2]
-    print(prompt)
-    queries=client.complete(prompt,dataframes,table_names,typology="PANDAS")
-    with open("validated_queries.json", "w", encoding="utf-8") as f:
-        json.dump(queries, f, indent=2)   
-    print(queries)
 
