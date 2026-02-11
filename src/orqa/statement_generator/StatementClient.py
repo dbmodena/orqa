@@ -45,6 +45,13 @@ class LLMClientStatementGenerator(LLMClientStructured):
         # 1. Load configuration
         super().__init__(config_path,"querying")
 
+
+    def add_difficulty(self,prompt, difficulty):
+                actual_dif = difficulty if difficulty in [1, 3, 5] else (3 if difficulty == 2 else 5)
+                return f"{prompt}\n{_load_prompt('statement_generator/prompt.md', f'Difficulty Level:{actual_dif}')}"
+
+
+
     def complete(
         self,
         prompt: str,
@@ -62,12 +69,11 @@ class LLMClientStatementGenerator(LLMClientStructured):
             "total_tokens": 0,
         }
         initial_message = self.reform_prompt_constraint(prompt)
-        messages = [{"role": "system", "content": initial_message}]
+        messages = [{"role": "system", "content": "You are an expert Data Engineer"},{"role": "user", "content": initial_message}]
         completion_args = {
             "model": self.config["model"],
             "messages": messages,
             "temperature": self.temperature,
-            "num_retries":3,
         }
         
         last_content = None
@@ -86,6 +92,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 content = response["choices"][0]["message"]["content"]
                 # Parse structured output
                 last_content = content
+                print(content)
                 cleaned_content = self._clean_json_response(content)
                 try:
                     # First try to parse as JSON
@@ -93,7 +100,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                     # Then validate with Pydantic
                     result = self.response_model.model_validate(json_data)
                     result = result.model_dump()
-                    outcome, errors, accepted_queries = self.validate_queries(dataframes, result,table_names,type)
+                    outcome, errors, accepted_queries = self.validate_queries(dataframes, result,table_names,typology)
                     good_queries.update(accepted_queries)
                     if not outcome:
                        messages.append(errors)
@@ -110,7 +117,6 @@ class LLMClientStatementGenerator(LLMClientStructured):
 
                     if attempt < self.max_retries - 1:
                         # Add assistant's failed response
-                        messages = [{"role": "system", "content": initial_message}]
                         messages.append({"role": "assistant", "content": content})
                         # Add error feedback as user message
                         messages.append({"role": "user", "content": error_msg})
@@ -124,7 +130,6 @@ class LLMClientStatementGenerator(LLMClientStructured):
 
                     if attempt < self.max_retries - 1:
                         # Add assistant's failed response
-                        messages = [{"role": "system", "content": initial_message}]
                         messages.append({"role": "system", "content": content})
                         # Add error feedback as user message
                         messages.append({"role": "user", "content": error_msg})

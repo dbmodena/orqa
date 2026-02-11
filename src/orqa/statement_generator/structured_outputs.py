@@ -137,11 +137,6 @@ class Query(BaseModel):
     A structured query (SQL or Pandas) paired with a natural language question
     that expresses the intent of the query.
     """
-    id: str = Field(
-        ...,
-        description="Stable unique identifier for the query (UUID or deterministic hash)."
-    )
-    
     question: str = Field(
         ...,
         description=(

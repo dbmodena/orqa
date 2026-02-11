@@ -171,7 +171,7 @@ The question MUST NOT:
 ### REQUIRED USE OF TABLE & COLUMN MATCHES (CRITICAL)
 
 **MANDATORY OPERATION ENFORCEMENT:**
-- The operation type specified in `{matches}` is **REQUIRED** and **NON-NEGOTIABLE**
+- The operation type specified is **REQUIRED** and **NON-NEGOTIABLE**
 - If the match specifies MULTI-JOIN → all queries MUST use multi-table joins as defined
 - If the match specifies UNION → all queries MUST use UNION operations as defined
 - If the match specifies JOIN-CORRELATION → all queries MUST use correlation joins as defined
@@ -179,7 +179,7 @@ The question MUST NOT:
 
 **Match Compliance Rules:**
 - **All joins, unions, and relationships MUST use the provided matches exactly**
-- Do **not** infer or invent relationships outside of `{matches}`
+- Do **not** infer or invent relationships
 - If a match specifies:
   - a join → it must be used with the exact columns specified
   - a union → it must be respected with the exact tables specified
@@ -211,9 +211,9 @@ All SQL queries MUST be compatible with DuckDB.
    - **5** = advanced logic using the mandatory operation with CTEs, window functions, or correlated subqueries
 
 2. Each query MUST:
-   - **Implement the mandatory operation type specified in `{matches}`**
+   - **Implement the mandatory operation type specified**
    - Use **only** the provided tables
-   - Use **only** the relationships defined in `{matches}`
+   - Use **only** the relationships defined
    - Use **all** the provided tables
    - Follow DuckDB SQL syntax
    - Correctly answer its associated natural language question
@@ -238,27 +238,93 @@ DuckDB SQL implementations that use the **mandatory operation type** specified i
 
 
 ## PandasCodeGeneration
-Generate 5 Pandas code examples with natural language questions.
 
-### DataFrames
-{table}
+You are an expert Data Engineer and Python Developer. 
 
-### Required Operation
+Your task is to generate Python code using the **Pandas library** and corresponding natural language questions based on a provided schema and **explicit table & column match definitions**.
+
+---
+
+### Data Context
+{table} 
+
+### Matching DataFrames to operate on
 {matches}
 
-### Rules
-1. Use the operation type from {matches} (UNION, MULTI-JOIN, or JOIN-CORRELATION)
-2. For UNION: use `pd.concat([df1[cols], df2[cols]]).drop_duplicates()`
-3. For MULTI-JOIN: use `df1.merge(df2, on='key').merge(df3, on='key2')`
-4. For JOIN-CORRELATION: use `.map()` or `.apply()`
-5. All code must be valid Python
-6. Generate 5 examples with difficulty 1 to 5
+> The matches define **the mandatory operation type** and **how DataFrames relate**, including:
+> - **REQUIRED OPERATION:** (MULTI-JOIN, UNION, or JOIN-CORRELATION)
+> - Merge keys (left_on/right_on) and join types (inner, left, etc.)
+> - Concatenation logic for Unions
+> - Mapping logic for Correlations
 
-### Difficulty Levels
-- Difficulty 1: Basic operation only
-- Difficulty 2: Add simple filter or groupby
-- Difficulty 3: Add aggregation with .agg()
-- Difficulty 4: Add .assign() or .transform()
-- Difficulty 5: Add complex lambda or .pivot_table()
+---
 
-Generate all 5 examples now.
+### CRITICAL: USE EXISTING DATAFRAMES
+
+**YOU MUST USE THE PRE-EXISTING DATAFRAMES PROVIDED:**
+- DataFrames are **already loaded and available** with their specified aliases (e.g., `Table_1`, `Table_2`, `customers_df`)
+- **DO NOT create new DataFrames** with `pd.DataFrame()` or `pd.read_csv()`
+- **DO NOT reassign** DataFrame variables (e.g., don't do `Table_1 = pd.DataFrame(...)`)
+- **ONLY reference** the DataFrame aliases exactly as provided
+- All operations must be performed on these existing DataFrames
+
+**Example of CORRECT usage:**
+```python
+# Assuming Table_1 and Table_2 are provided DataFrames
+result = Table_1.merge(Table_2, on='id', how='inner')
+```
+
+**Example of INCORRECT usage (DO NOT DO THIS):**
+```python
+# WRONG - Creating new DataFrames
+Table_1 = pd.DataFrame({'id': [1, 2], 'name': ['A', 'B']})
+```
+
+---
+
+### REQUIRED USE OF MATCHES (CRITICAL)
+
+**MANDATORY OPERATION ENFORCEMENT:**
+- You MUST use the operation type specified.
+- **MULTI-JOIN:** Use method chaining with `.merge()` on the provided DataFrames.
+- **UNION:** Use `pd.concat()` on the provided DataFrames, followed by `.drop_duplicates()` if a set union is required.
+- **JOIN-CORRELATION:** Use `.map()`, `.apply()`, or temporary broadcast merges on the provided DataFrames to simulate correlated subqueries.
+
+**Match Compliance Rules:**
+- Do not use raw SQL strings or `pandasql`. Use **native Pandas method chaining**.
+- All DataFrames listed must be referenced using their exact aliases.
+- Never create or initialize DataFrames - they are already available.
+
+---
+
+### Python/Pandas Coding Requirements
+
+- **Method Chaining:** Prefer chaining operations (e.g., `df.merge().query().groupby().agg()`) for readability.
+- **No SQL:** Do not generate any SQL strings or `pd.read_sql`.
+- **Column Access:** Use string-based access (e.g., `df['column']`) or attribute access where appropriate.
+- **Complexity:** Use `.assign()` for new columns and `lambda` functions for complex filters.
+- **DataFrame References:** Always use the exact DataFrame aliases (e.g., `Table_1`, `orders_df`, etc.)
+
+---
+
+### Query Generation Instructions
+
+1. Generate **5 Python snippets**, each with a difficulty score from **1 to 5**:
+   - **1** = Simple filter and merge using the mandatory operation on existing DataFrames.
+   - **3** = Mandatory operation with `.groupby()`, `.agg()`, and multi-index handling on existing DataFrames.
+   - **5** = Advanced logic using `.transform()`, `.pivot_table()`, or complex `lambda` correlations on existing DataFrames.
+
+2. Each snippet MUST:
+   - Implement the **mandatory operation type**.
+   - Use **all** provided DataFrames with their exact aliases.
+   - **Reference existing DataFrames only** - never create new ones.
+   - Be syntactically valid Python that can run immediately without DataFrame initialization.
+   - Start operations directly on the provided DataFrame aliases (e.g., `Table_1.merge(table2, ...)`)
+
+3. **Verification Checklist** for each generated snippet:
+   - [ ] Uses only DataFrame aliases
+   - [ ] No `pd.DataFrame()` or data creation statements
+   - [ ] No variable reassignments like `Table_1 = ...`
+   - [ ] Implements the mandatory operation
+   - [ ] All referenced DataFrames exist
+

@@ -91,7 +91,7 @@ class LLMClient:
         return Router(
             model_list=model_list,
             fallbacks=fallbacks,
-            num_retries=1,  # Router handles retries per model
+            num_retries=0,  # Router handles retries per model
             timeout=60,
             set_verbose=True,  # Shows which model is being used
         )
