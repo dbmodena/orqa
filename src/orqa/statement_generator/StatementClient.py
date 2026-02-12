@@ -28,6 +28,8 @@ import pandas as pd
 from pathlib import Path
 import duckdb
 from statement_generator.LLMClientStructured import LLMClientStructured
+from statement_generator.SQLValidator import SQLValidator
+from statement_generator.PandasValidator import PandasValidator
 
 
 class LLMClientStatementGenerator(LLMClientStructured):
@@ -160,162 +162,20 @@ class LLMClientStatementGenerator(LLMClientStructured):
         else:
             return self.validate_dataframe_queries(dataframes, result, table_names)
 
-    def clean_pandas(self,query: str) -> str:
-        """Rimuove import statements dalle query"""
-        lines = query.split(';')
-        # Filtra righe che contengono import
-        cleaned = [line.strip() for line in lines if 'import' not in line.lower()]
-        return '; '.join(cleaned).strip() 
 
     def validate_dataframe_queries(self, dataframes, result, table_names):
-        """
-        Validate pandas/polars queries by executing them in a sandboxed environment.
-        """
-        import sys
-        from io import StringIO
-        
-        validation_errors = []
-        all_valid = True
-        good_queries = {}
-        
-        # Safe builtins
-        safe_builtins = {
-            'abs': abs, 'min': min, 'max': max, 'sum': sum,
-            'len': len, 'range': range, 'enumerate': enumerate,
-            'zip': zip, 'map': map, 'filter': filter,
-            'int': int, 'float': float, 'str': str, 'bool': bool,
-            'list': list, 'dict': dict, 'set': set, 'tuple': tuple,
-            'True': True, 'False': False, 'None': None,
-        }
-        
-        # Create namespace
-        namespace = {
-            'pd': pd,
-            'pl': pl,
-            '__builtins__': safe_builtins
-        }
-        
-        # Map table names to dataframes
-        for df, name in zip(dataframes, table_names):
-            namespace[name] = df
-        
-        for idx, q in enumerate(result["queries"]):
-            query_code = self.clean_pandas(q["code"].strip()) 
-            
-            try:
-                local_namespace = namespace.copy()
-                
-                # Capture stdout/stderr
-                old_stdout = sys.stdout
-                old_stderr = sys.stderr
-                sys.stdout = StringIO()
-                sys.stderr = StringIO()
-                
-                try:
-                    compiled_code = compile(query_code, '<string>', 'exec')
-                    exec(compiled_code, local_namespace)
-                finally:
-                    sys.stdout = old_stdout
-                    sys.stderr = old_stderr
-                
-                good_queries[idx] = q
-                
-            except Exception as e:
-                all_valid = False
-                print(e)
-                error_type = type(e).__name__
-                validation_errors.append({
-                    "id": idx,
-                    "query": query_code,
-                    "error": f"{error_type}: {str(e)}"
-                })
-        
-        if all_valid:
-            return True, {}, good_queries
-        
-        # Build feedback - USA I NOMI ESATTI
-        feedback_lines = [
-            "Some of the generated Python queries are invalid.",
-            "Fix ONLY the queries listed below. Do not modify valid queries.\n"
-        ]
-        
-        for err in validation_errors:
-            feedback_lines.append(
-                f"Query {err['id'] + 1}:\n"
-                f"{err['query']}\n\n"
-                f"Error:\n{err['error']}\n"
-            )
-        
-        # IMPORTANTE: Mostra i nomi ESATTI delle variabili disponibili
-        feedback_lines.append(
-            "General rules:\n"
-            "- Column names must exactly match the DataFrame schema.\n"
-            "- Use correct pandas/polars syntax (e.g., df['column'] for pandas, df['column'] for polars).\n"
-            "- For numeric operations on string columns, convert with .astype(float) (pandas) or .cast(pl.Float64) (polars).\n"
-            f"- IMPORTANT: Available DataFrames are named EXACTLY: {', '.join(table_names)}\n"  # <-- Enfatizza questo
-            f"- DO NOT add 'df_' prefix or any other modification to these names.\n"  # <-- Aggiungi questa riga
-            "- Do not change queries that are not listed above."
-        )
-        
-        return False, {
-            "role": "user",
-            "content": "\n".join(feedback_lines)
-        }, good_queries
+        """Validate pandas/polars queries."""
+        validator = PandasValidator(dataframes, table_names)
+        return validator.validate_queries(result)
 
-    def validate_sql_queries(self,dataframes, result, table_names):
-        validation_errors = []
-        all_valid = True
-        good_queries = {}
-        for idx, q in enumerate(result["queries"]):
-            sql = q["code"].replace("`", '"')
-            #id = q["id"]
-            con = duckdb.connect(database=":memory:")
-            try:
-                for df, name in zip(dataframes, table_names):
-                    con.register(name, df)
 
-                # Validate syntax + binding only
-                con.execute(sql.rstrip(";") + " LIMIT 1")
-                good_queries[idx] = q
+    def validate_sql_queries(self, dataframes, result, table_names):
+        """Validate SQL queries."""
+        validator = SQLValidator(dataframes, table_names)
+        return validator.validate_queries(result)
 
-            except Exception as e:
-                all_valid = False
-                validation_errors.append({
-                    "id": idx,#str(id),
-                    "sql": sql,
-                    "error": str(e)
-                })
 
-            finally:
-                con.close()
-
-        if all_valid:
-            return True, {},good_queries
-
-        # Build ONE aggregated feedback message
-        feedback_lines = [
-            "Some of the generated SQL queries are invalid.",
-            "Fix ONLY the queries listed below. Do not modify valid queries.\n"
-        ]
-
-        for err in validation_errors:
-            feedback_lines.append(
-                f"Query {err['id'] + 1}:\n"
-                f"{err['sql']}\n\n"
-                f"Error:\n{err['error']}\n"
-            )
-
-        feedback_lines.append(
-            "General rules:\n"
-            "- Column names must exactly match the schema.\n"
-            "- Amount may be stored as text; CAST to DOUBLE when using SUM or AVG.\n"
-            "- Do not change queries that are not listed above."
-        )
-
-        return False, {
-            "role": "user",
-            "content": "\n".join(feedback_lines)
-        },good_queries
+   
 
 
 

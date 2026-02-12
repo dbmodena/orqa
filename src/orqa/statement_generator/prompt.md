@@ -90,7 +90,7 @@ Your goal is to **analyze how well each table matches with every other table**, 
    * **10** = very strong relationship (e.g., clear foreign-key / primary-key join, strong semantic overlap)
 4. Base your score on signals such as:
 
-   * Shared or joinable identifiers (e.g., `customer_id`, `order_id`)
+   * Shared or joinable identifiers
    * Semantic similarity of column names
    * Overlap in data meaning or granularity
    * Potential for meaningful joins or correlations
@@ -239,92 +239,126 @@ DuckDB SQL implementations that use the **mandatory operation type** specified i
 
 ## PandasCodeGeneration
 
-You are an expert Data Engineer and Python Developer. 
+You are an expert Data Engineer and Python Developer specializing in translating business questions into Pandas code.
 
-Your task is to generate Python code using the **Pandas library** and corresponding natural language questions based on a provided schema and **explicit table & column match definitions**.
+Your task is to generate Python code using the **Pandas library** alongside natural language questions that a **non-technical business user** would ask.
 
 ---
 
 ### Data Context
-{table} 
+You will be provided with:
+- **Alias of the dataset**: Alias of the dataset name in order to create the queries.
+- **Dataset name**: Name of the dataset
+- **Schema/Metadata**: Table structures, column names, data types, and relationships
+- **Match Definitions**: Explicit DataFrame relationships specifying mandatory operations (MULTI-JOIN, UNION, or JOIN-CORRELATION) with merge keys, join types, and correlation logic
 
-### Matching DataFrames to operate on
+---
+
+### CRITICAL: USE EXISTING DATAFRAMES ONLY
+
+**All DataFrames are PRE-LOADED and AVAILABLE:**
+- DataFrames exist with their designated aliases (e.g., `customers_df`, `orders_df`, `Table_1`)
+- **NEVER** create DataFrames with `pd.DataFrame()`, `pd.read_csv()`, or similar
+- **NEVER** reassign DataFrame variables (e.g., `Table_1 = ...`)
+- **ONLY** reference the exact DataFrame aliases provided
+- Start operations directly on existing DataFrames
+
+---
+
+### MANDATORY REQUIREMENTS
+
+#### 1. **ALL DataFrames MUST Be Used**
+- Every DataFrame provided in the match definitions **must appear** in your code
+- No DataFrame can be omitted, even if it seems peripheral
+- The query must logically integrate all available data sources
+
+#### 2. **Operation Type Compliance**
+Based on the match definitions, implement the specified operation:
+
+- **MULTI-JOIN**: Chain `.merge()` operations across all DataFrames
+- **UNION**: Use `pd.concat()` on relevant DataFrames, apply `.drop_duplicates()` for set unions
+- **JOIN-CORRELATION**: Use `.map()`, `.apply()`, or broadcast merges to simulate correlated subqueries
+
+#### 3. **No SQL or External Libraries**
+- Use **native Pandas only** (no `pandasql`, no raw SQL strings)
+- Prefer method chaining for clarity and efficiency
+
+---
+
+### Natural Language Question Guidelines
+
+**Questions must be phrased as a business user would ask them:**
+
+**GOOD (Business-Focused):**
+- "What are the total sales by region for customers who made repeat purchases?"
+- "Which products have above-average ratings and are frequently bought together?"
+- "Show me customer segments with declining order frequency over the past year"
+
+
+**BAD (Technical/Table-Focused):**
+- "Join Table_1 with Table_2 on customer_id"
+- "Select all columns from customers_df where..."
+- "Merge the orders and products DataFrames"
+
+**Key Principles:**
+- Make sure to include the year and/or month in the question if specificed in the dataset name or metadata.
+- Use business terminology (customers, products, sales) not technical names (Table_1, df_xyz)
+- Focus on insights and outcomes, not operations
+- Phrase as actionable questions a manager/analyst would ask
+- Avoid mentioning DataFrame names, join types, or technical implementation details
+
+---
+
+### Code Generation Requirements
+
+**Style & Structure:**
+- **Method Chaining**: Prefer `.merge().query().groupby().agg()` patterns
+- **Column Access**: Use `df['column_name']` or attribute notation where safe
+- **Readability**: Use `.assign()` for calculated columns, `lambda` for inline logic
+- **Comments**: Add brief inline comments explaining business logic (not technical steps)
+
+**Complexity Levels (1-5):**
+- **Level 1**: Basic filtering and single merge across all DataFrames
+- **Level 2**: Aggregations with `.groupby()` on merged data
+- **Level 3**: Multi-level aggregations, `.agg()` with multiple functions
+- **Level 4**: Window functions with `.transform()`, conditional logic
+- **Level 5**: Complex correlations, `.pivot_table()`, advanced lambda operations
+
+---
+
+### Output Format
+
+For each of the **5 generated queries**, provide:
+
+1. **Natural Language Question** (business-focused, no table names)
+2. **Difficulty Level** (1-5)
+3. **Python/Pandas Code** (using only existing DataFrames)
+4. **Brief Explanation** (1-2 sentences on business logic)
+
+---
+
+### Validation Checklist
+
+Before finalizing each query, verify:
+
+- [ ] All provided DataFrames are used in the code
+- [ ] No DataFrame creation/initialization statements
+- [ ] No variable reassignments to DataFrame aliases
+- [ ] Mandatory operation type from matches is implemented
+- [ ] Natural language question uses business terms (no table names)
+- [ ] Code is syntactically valid and runs on pre-existing DataFrames
+- [ ] Difficulty level matches code complexity
+
+---
+
+### Tables involved in the queries
+Realize the queries and their natural language counterparts using the following tables. 
+{table}  
+### Matches between tables
 {matches}
 
-> The matches define **the mandatory operation type** and **how DataFrames relate**, including:
-> - **REQUIRED OPERATION:** (MULTI-JOIN, UNION, or JOIN-CORRELATION)
-> - Merge keys (left_on/right_on) and join types (inner, left, etc.)
-> - Concatenation logic for Unions
-> - Mapping logic for Correlations
+### Lookup aliases
+Make sure to use only the aliases in the queries in the following:
+{aliases}
 
----
-
-### CRITICAL: USE EXISTING DATAFRAMES
-
-**YOU MUST USE THE PRE-EXISTING DATAFRAMES PROVIDED:**
-- DataFrames are **already loaded and available** with their specified aliases (e.g., `Table_1`, `Table_2`, `customers_df`)
-- **DO NOT create new DataFrames** with `pd.DataFrame()` or `pd.read_csv()`
-- **DO NOT reassign** DataFrame variables (e.g., don't do `Table_1 = pd.DataFrame(...)`)
-- **ONLY reference** the DataFrame aliases exactly as provided
-- All operations must be performed on these existing DataFrames
-
-**Example of CORRECT usage:**
-```python
-# Assuming Table_1 and Table_2 are provided DataFrames
-result = Table_1.merge(Table_2, on='id', how='inner')
-```
-
-**Example of INCORRECT usage (DO NOT DO THIS):**
-```python
-# WRONG - Creating new DataFrames
-Table_1 = pd.DataFrame({'id': [1, 2], 'name': ['A', 'B']})
-```
-
----
-
-### REQUIRED USE OF MATCHES (CRITICAL)
-
-**MANDATORY OPERATION ENFORCEMENT:**
-- You MUST use the operation type specified.
-- **MULTI-JOIN:** Use method chaining with `.merge()` on the provided DataFrames.
-- **UNION:** Use `pd.concat()` on the provided DataFrames, followed by `.drop_duplicates()` if a set union is required.
-- **JOIN-CORRELATION:** Use `.map()`, `.apply()`, or temporary broadcast merges on the provided DataFrames to simulate correlated subqueries.
-
-**Match Compliance Rules:**
-- Do not use raw SQL strings or `pandasql`. Use **native Pandas method chaining**.
-- All DataFrames listed must be referenced using their exact aliases.
-- Never create or initialize DataFrames - they are already available.
-
----
-
-### Python/Pandas Coding Requirements
-
-- **Method Chaining:** Prefer chaining operations (e.g., `df.merge().query().groupby().agg()`) for readability.
-- **No SQL:** Do not generate any SQL strings or `pd.read_sql`.
-- **Column Access:** Use string-based access (e.g., `df['column']`) or attribute access where appropriate.
-- **Complexity:** Use `.assign()` for new columns and `lambda` functions for complex filters.
-- **DataFrame References:** Always use the exact DataFrame aliases (e.g., `Table_1`, `orders_df`, etc.)
-
----
-
-### Query Generation Instructions
-
-1. Generate **5 Python snippets**, each with a difficulty score from **1 to 5**:
-   - **1** = Simple filter and merge using the mandatory operation on existing DataFrames.
-   - **3** = Mandatory operation with `.groupby()`, `.agg()`, and multi-index handling on existing DataFrames.
-   - **5** = Advanced logic using `.transform()`, `.pivot_table()`, or complex `lambda` correlations on existing DataFrames.
-
-2. Each snippet MUST:
-   - Implement the **mandatory operation type**.
-   - Use **all** provided DataFrames with their exact aliases.
-   - **Reference existing DataFrames only** - never create new ones.
-   - Be syntactically valid Python that can run immediately without DataFrame initialization.
-   - Start operations directly on the provided DataFrame aliases (e.g., `Table_1.merge(table2, ...)`)
-
-3. **Verification Checklist** for each generated snippet:
-   - [ ] Uses only DataFrame aliases
-   - [ ] No `pd.DataFrame()` or data creation statements
-   - [ ] No variable reassignments like `Table_1 = ...`
-   - [ ] Implements the mandatory operation
-   - [ ] All referenced DataFrames exist
-
+Generate 5 complete query examples following all requirements above.
