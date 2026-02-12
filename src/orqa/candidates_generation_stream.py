@@ -43,6 +43,7 @@ import os
 import random
 import resource
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import dotenv
@@ -55,8 +56,8 @@ from wrapt_timeout_decorator import timeout
 from conf import OrQAConfig
 
 from .agent.agent import CandidatesDiscoveryAgent
-
 from .graph import matches_graph
+from .schema_matching.valentine_matcher import instantiate_matcher, schema_matching
 from .utils import load_datasets_metadata, pl_read_dataset, remove_file_extension
 
 # make the API key for LLM available
@@ -222,8 +223,8 @@ def execute_tasks(
                                 "Q": query_id,
                                 "R": cand_id,
                                 "task": "J",
-                                "q_join_key": columns[0],
-                                "r_join_key_pos": r_join_key,
+                                "q_join_keys": columns[0],
+                                "r_join_keys_pos": r_join_key,
                             }
                         )
             except (TimeoutError, RuntimeError):
@@ -299,6 +300,86 @@ def execute_tasks(
         except (TimeoutError, RuntimeError):
             print(f"Timeout on Join-Correlation: {query_id}")
     return candidates
+
+
+@lru_cache(64)
+def _load_dataframe(path: Path, opts: dict, seed: int) -> pl.DataFrame:
+    df = pl_read_dataset(path, opts)
+    return df.sample(min(1000, df.height), seed=seed)
+
+
+def load_dataframe(path: Path, opts: dict, seed: int) -> pl.DataFrame:
+    return _load_dataframe(path)
+
+
+def evaluate_matches(
+    cfg: OrQAConfig,
+    blend_matches: list[dict],
+):
+    matcher_name = "coma"
+
+    matcher = instantiate_matcher(matcher_name, use_instance=True)
+
+    for blend_match in tqdm(blend_matches, desc="Scanning BLEND matches"):
+        Q_name = blend_match["Q"]
+        R_name = blend_match["R"]
+        task = blend_match["task"]
+
+        Q = load_dataframe(
+            cfg.datasets_path / f"{Q_name}.csv", cfg.polars_opts.read, cfg.seed
+        )
+        R = load_dataframe(
+            cfg.datasets_path / f"{R_name}.csv", cfg.polars_opts.read, cfg.seed
+        )
+
+        q_columns = r_columns = None
+        q_key = r_key = None
+        q_target = r_target = None
+
+        match task:
+            case "U":
+                q_columns = blend_match["q_columns"]
+            case "J" | "MJ":
+                q_columns = blend_match["q_join_keys"]
+
+                r_columns_pos = blend_match["r_join_keys_pos"]
+                r_columns = [R.columns[i] for i in r_columns_pos]
+            case "JC":
+                q_key = blend_match["q_key"]
+                q_target = blend_match["q_target"]
+
+                r_key_pos = blend_match["r_key"]
+                r_target_pos = blend_match["r_target"]
+                r_key = R.columns[r_key_pos]
+                r_target = R.columns[r_target_pos]
+
+        try:
+            match_t = time.time()
+            matches, global_avg, spec_avg = schema_matching(
+                matcher,
+                task,
+                Q.to_pandas(),
+                R.to_pandas(),
+                q_columns,  # ty: ignore
+                r_columns,
+                q_key,
+                r_key,
+                q_target,
+                r_target,
+            )
+            match_t = time.time() - match_t
+        except Exception as exc:
+            print(f"Error with Q={Q_name}, R={R_name}: {exc}")
+            continue
+
+            blend_match["#Q_schema"] = len(Q.columns)
+            blend_match["#R_schema"] = len(R.columns)
+            blend_match["sm_global_avg"] = global_avg
+            blend_match["sm_spec_avg"] = spec_avg
+            blend_match["#Q_req_columns"] = len(q_columns) if q_columns else None
+            blend_match["#R_req_columns"] = len(r_columns) if r_columns else None
+            blend_match["#matches"] = len(matches)
+            blend_match["time(s)"] = match_t
 
 
 def pipeline(cfg: OrQAConfig):
@@ -408,6 +489,14 @@ def pipeline(cfg: OrQAConfig):
         # TODO: tag or filter with metadata from Valentine Schema matching:
         #   - Joinable pairs with (almost-)identical schema should not be joined;
         #   - Unionable pairs should have a very similar schema instead;
+        save_list_to_jsonlines(cfg.candidates_discovery.tasks_results_path, candidates)
+
+        print("\n" + " EVALUATE BLEND MATCHES WITH VALENTINE ".center(100, "="))
+        evaluate_matches(
+            cfg,
+            candidates,
+        )
+        print("\n" + " DONE ".center(100, "="))
         save_list_to_jsonlines(cfg.candidates_discovery.tasks_results_path, candidates)
 
         # Add the identified matches to the queue of datasets that have to be analysed

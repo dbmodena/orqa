@@ -13,10 +13,6 @@ def pl_read_dataset(dataset_path: Path, opts: dict = {}) -> pl.DataFrame:
             return pl.read_csv(dataset_path, **opts.get("csv", {}))
         case ".parquet":
             return pl.read_parquet(dataset_path, **opts.get("parquet", {}))
-        case ".xls" | ".xslx":
-            return pl.read_excel(
-                dataset_path, **opts.get("excel", {"engine": "calamine"})
-            )
         case _:
             raise ValueError(
                 f"Unknown dataset format for file {dataset_path.absolute()}"
@@ -36,8 +32,7 @@ def pl_scan_dataset(dataset_path: Path, opts: dict = {}) -> pl.LazyFrame:
 
 
 def remove_null_rows(df: pl.DataFrame, *exclude_columns) -> pl.DataFrame:
-    _expr = pl.all().exclude(*exclude_columns) if exclude_columns else pl.all()
-    return df.filter(~pl.all_horizontal(_expr.is_null()))
+    return df.filter(~pl.all_horizontal(pl.all().exclude(*exclude_columns).is_null()))
 
 
 def remove_null_columns(df: pl.DataFrame) -> pl.DataFrame:
@@ -72,7 +67,7 @@ def clean_html_from_metadata_notes(html_text):
 
 
 def load_datasets_metadata(
-    metadata_path: Path, dataset_ids: str | list[str] | None, field: str = "id"
+    metadata_path: Path, dataset_ids: str | list[str], field: str = "id"
 ) -> dict[str, dict]:
     """
     Load the datasets metadata from the main JSON file.
@@ -83,16 +78,10 @@ def load_datasets_metadata(
     :param field: the key field on which search for the metadata
     :return: a list of dictionaries containing the metadata, one for each identified dataset
     """
-    dataset_ids = copy.copy(dataset_ids)
-
-    if dataset_ids:
-        dataset_ids = (  # ty: ignore
-            {
-                dataset_ids,
-            }
-            if isinstance(dataset_ids, str)
-            else set(dataset_ids)
-        )
+    _dataset_ids = copy.copy(dataset_ids)
+    _dataset_ids = (
+        {_dataset_ids} if isinstance(_dataset_ids, str) else set(_dataset_ids)
+    )
 
     with open(metadata_path, "r") as file:
         metadata = json.load(file)
@@ -102,9 +91,8 @@ def load_datasets_metadata(
     for package in metadata:
         resources = package.get("resources", [])
         for resource in resources:
-            if dataset_ids is None or resource.get(field) in dataset_ids:
-                if dataset_ids:
-                    dataset_ids.remove(resource.get(field))  # ty: ignore
+            if resource.get(field) in dataset_ids:
+                _dataset_ids.remove(resource.get(field))
                 rv[resource.get(field)] = {
                     "package.title": package.get("title", "N/A"),
                     "resource.title": resource.get("title", "N/A"),
@@ -136,6 +124,7 @@ def load_dataset_info(
     Returns a dict ready to be unpacked as kwargs for load_prompt.
     """
     df = pl_read_dataset(dataset_path, polars_opts)
+
     df = remove_null_columns(df)
     df = remove_null_rows(df, [])
 

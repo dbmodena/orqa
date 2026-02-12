@@ -16,9 +16,11 @@ dependencies = [
     "matplotlib>=3.10.8",
     "networkx>=3.6.1",
     "pandas>=2.3.3",
+    "pip>=26.0.1",
     "polars>=1.36.1",
     "pyarrow>=22.0.0",
     "pyyaml>=6.0.3",
+    "seaborn>=0.13.2",
     "tqdm>=4.67.1",
     "ulod",
     "valentine>=0.4.1",
@@ -28,3 +30,6 @@ dependencies = [
 [tool.uv.sources]
 blend = { git = "https://github.com/nanni00/Blend" }
 ulod = { git = "https://github.com/nanni00/ULOD" }
+
+[tool.ty.environment]
+root = ["./src"]
