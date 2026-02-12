@@ -23,6 +23,8 @@ from orqa.utils import pl_read_dataset, remove_null_columns, remove_null_rows
 
 
 def cleaning(cfg: OrQAConfig):
+    records = []
+
     encodings = ["utf-8", "latin-1", "utf-8-sig"]
 
     cleaning_logfile = cfg.logging_path / "cleaning" / "cleaning.log"
@@ -85,6 +87,7 @@ def cleaning(cfg: OrQAConfig):
                     # be always Utf-8
                     df = pl_read_dataset(path, read_opts)
 
+                    raw_rows, raw_cols = df.shape
                     loaded = True
                     break
                 except (
@@ -93,10 +96,10 @@ def cleaning(cfg: OrQAConfig):
                     UnicodeDecodeError,
                     ValueError,
                 ) as e:
-                    print(filename)
-                    print(preamble)
-                    print(e)
-                    print("-" * 100)
+                    # print(filename)
+                    # print(preamble)
+                    # print(e)
+                    # print("-" * 100)
                     continue
                 except BaseException as e:  # NOTE: quite bad but for Rust panics
                     print("Strange exception: ", e)
@@ -108,6 +111,40 @@ def cleaning(cfg: OrQAConfig):
             df = remove_null_rows(df)
             df = remove_null_columns(df)
 
+            clean_rows, clean_cols = df.shape
+
+            # Type distribution
+            type_counts = {}
+            for dtype in df.dtypes:
+                dtype_str = str(dtype)
+                type_counts[dtype_str] = type_counts.get(dtype_str, 0) + 1
+
+            # Additional info
+            memory_usage = df.estimated_size("mb")
+            total_nulls = df.null_count().sum_horizontal().sum()
+            total_cells = raw_rows * raw_cols
+            sparsity = (total_nulls / total_cells) if total_cells > 0 else 0
+
+            records.append(
+                {
+                    "filename": path.name,
+                    "encoding": encoding,
+                    "has_preamble": has_preamble,
+                    "raw_rows": raw_rows,
+                    "raw_cols": raw_cols,
+                    "clean_rows": clean_rows,
+                    "clean_cols": clean_cols,
+                    "type_counts": str(type_counts),
+                    "memory_mb": round(memory_usage, 2),
+                    "sparsity": round(sparsity, 4),
+                    "total_nulls": int(total_nulls),
+                }
+            )
+
             # save into the cleaned datasets folder
             cleaned_filename = cfg.datasets_path / path.name
             df.write_csv(cleaned_filename)
+
+    stats = pl.DataFrame(records)
+    cfg.statistics_path.mkdir(exist_ok=True)
+    stats.write_csv(cfg.statistics_path / "datasets_stats.csv")

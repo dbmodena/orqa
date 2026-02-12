@@ -186,6 +186,8 @@ class OrQAConfig:
     # The format with which datasets are stored locally
     datasets_format: str
 
+    statistics_path: Path = field(init=False)
+
     def __post_init__(self):
         self.crawled_datasets_path = Path(
             self.data_path, "datasets", "crawling", self.crawling.download_format
@@ -209,6 +211,8 @@ class OrQAConfig:
 
         self.pandas_opts = PandasOpts()
         self.polars_opts = PolarsOpts()
+
+        self.statistics_path = self.data_path / "statistics"
 
 
 def to_bytes(b: str) -> int:

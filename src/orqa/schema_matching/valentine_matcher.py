@@ -14,7 +14,7 @@ def instantiate_matcher(name: str, **kwargs) -> schema_matchers.BaseMatcher:
         case "jaccard_distance":
             return schema_matchers.JaccardDistanceMatcher(**kwargs)
         case "coma":
-            params = {"use_instances": False} | kwargs
+            params = {"use_instances": False, "java_xmx": "2048m"} | kwargs
             return schema_matchers.Coma(**params)  # ty: ignore
         case "cupid":
             return schema_matchers.Cupid(**kwargs)
@@ -56,6 +56,8 @@ def schema_matching(
     if verbose:
         print("Done.")
 
+    if not matches:
+        return matches, 0, 0
     global_avg = sum(matches.values()) / len(matches)
     specific_avg = 0
     filtered_values = []
@@ -83,9 +85,6 @@ def schema_matching(
                 sum(filtered_values) / len(filtered_values) if filtered_values else 0
             )
         case "JC":
-            r_key_label = R.columns[r_key]
-            r_target_label = R.columns[r_target]
-
             filtered_values = [
                 value
                 for ((_, col1), (_, col2)), value in matches.items()

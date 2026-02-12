@@ -1,3 +1,4 @@
+from typing import Optional
 import copy
 import json
 import re
@@ -32,7 +33,8 @@ def pl_scan_dataset(dataset_path: Path, opts: dict = {}) -> pl.LazyFrame:
 
 
 def remove_null_rows(df: pl.DataFrame, *exclude_columns) -> pl.DataFrame:
-    return df.filter(~pl.all_horizontal(pl.all().exclude(*exclude_columns).is_null()))
+    expr = pl.all() if not exclude_columns else pl.all().exclude(*exclude_columns)
+    return df.filter(~pl.all_horizontal(expr.is_null()))
 
 
 def remove_null_columns(df: pl.DataFrame) -> pl.DataFrame:
@@ -67,7 +69,9 @@ def clean_html_from_metadata_notes(html_text):
 
 
 def load_datasets_metadata(
-    metadata_path: Path, dataset_ids: str | list[str], field: str = "id"
+    metadata_path: Path,
+    dataset_ids: Optional[list[str]] = None,
+    field: str = "id",
 ) -> dict[str, dict]:
     """
     Load the datasets metadata from the main JSON file.
@@ -78,10 +82,9 @@ def load_datasets_metadata(
     :param field: the key field on which search for the metadata
     :return: a list of dictionaries containing the metadata, one for each identified dataset
     """
-    _dataset_ids = copy.copy(dataset_ids)
-    _dataset_ids = (
-        {_dataset_ids} if isinstance(_dataset_ids, str) else set(_dataset_ids)
-    )
+    if dataset_ids is not None:
+        dataset_ids = copy.copy(dataset_ids)
+        dataset_ids = set(dataset_ids)  # ty: ignore
 
     with open(metadata_path, "r") as file:
         metadata = json.load(file)
@@ -91,8 +94,9 @@ def load_datasets_metadata(
     for package in metadata:
         resources = package.get("resources", [])
         for resource in resources:
-            if resource.get(field) in dataset_ids:
-                _dataset_ids.remove(resource.get(field))
+            if dataset_ids is None or resource.get(field) in dataset_ids:
+                if dataset_ids is not None:
+                    dataset_ids.remove(resource.get(field))
                 rv[resource.get(field)] = {
                     "package.title": package.get("title", "N/A"),
                     "resource.title": resource.get("title", "N/A"),

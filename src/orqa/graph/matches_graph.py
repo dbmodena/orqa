@@ -159,11 +159,20 @@ def process_edge(
             right_path, right_columns, read_opts
         )
 
+        # the metrics dictionary stores stats collected from
+        # schema matching and overlap methods
+        metrics = {
+            "sm_global_avg": entry["sm_global_avg"],
+            "sm_spec_avg": entry["sm_spec_avg"],
+            "sm_total_matches": entry["#matches"],
+        }
+
         # we force an overlap with at least #(left_table_involved_columns) width
-        overlap_metrics = compute_overlap_metrics(
+        metrics |= compute_overlap_metrics(
             left_table, right_table, min_width=len(left_columns), verbose=verbose
         )
-        return (q_node, r_node, task_label, overlap_metrics)
+
+        return (q_node, r_node, task_label, metrics)
     except Exception as e:
         print("Error while processing edge: ", e)
         # raise e
@@ -187,10 +196,10 @@ class DatasetMatchesGraph:
         verbose: bool = False,
     ):
         # Add all nodes first
-        # for entry in matches:
-        #     # print(f"Analyzing {entry}")
-        #     self._G.add_node(entry["Q"])
-        #     self._G.add_node(entry["R"])
+        for entry in matches:
+            # print(f"Analyzing {entry}")
+            self._G.add_node(entry["Q"])
+            self._G.add_node(entry["R"])
 
         # Process edges in parallel
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:

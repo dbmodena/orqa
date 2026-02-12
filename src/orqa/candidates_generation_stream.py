@@ -38,6 +38,8 @@ The workflow changes now:
         4. Go to 1
 """
 
+from valentine.algorithms.base_matcher import BaseMatcher
+
 import json
 import os
 import random
@@ -223,8 +225,8 @@ def execute_tasks(
                                 "Q": query_id,
                                 "R": cand_id,
                                 "task": "J",
-                                "q_join_keys": columns[0],
-                                "r_join_keys_pos": r_join_key,
+                                "q_join_keys": [columns[0]],
+                                "r_join_keys_pos": [r_join_key],
                             }
                         )
             except (TimeoutError, RuntimeError):
@@ -303,13 +305,13 @@ def execute_tasks(
 
 
 @lru_cache(64)
-def _load_dataframe(path: Path, opts: dict, seed: int) -> pl.DataFrame:
-    df = pl_read_dataset(path, opts)
+def _load_dataframe(path: Path, opts: str, seed: int) -> pl.DataFrame:
+    df = pl_read_dataset(path, json.loads(opts))
     return df.sample(min(1000, df.height), seed=seed)
 
 
 def load_dataframe(path: Path, opts: dict, seed: int) -> pl.DataFrame:
-    return _load_dataframe(path)
+    return _load_dataframe(path, json.dumps(opts), seed)
 
 
 def evaluate_matches(
@@ -318,7 +320,7 @@ def evaluate_matches(
 ):
     matcher_name = "coma"
 
-    matcher = instantiate_matcher(matcher_name, use_instance=True)
+    matcher = instantiate_matcher(matcher_name, use_instances=True)
 
     for blend_match in tqdm(blend_matches, desc="Scanning BLEND matches"):
         Q_name = blend_match["Q"]
@@ -406,7 +408,7 @@ def pipeline(cfg: OrQAConfig):
     agent = CandidatesDiscoveryAgent(litellm_config_path)
 
     tokens_budget = 1_000_000
-    n_datasets_limit = 100
+    n_datasets_limit = 500
 
     _format = cfg.datasets_format
 
@@ -431,10 +433,10 @@ def pipeline(cfg: OrQAConfig):
 
     while seed_datasets or q:
         # first pop the seeds, then switch to the candidates
-        if seed_datasets == []:
-            dataset_id, dataset_path, resource_name, resource_id = q.pop()
-        else:
+        if len(seed_datasets) > 0:
             dataset_id, dataset_path, resource_name, resource_id = seed_datasets.pop()
+        else:
+            dataset_id, dataset_path, resource_name, resource_id = q.pop()
 
         # avoid duplicated analyses
         if resource_id in visited:
@@ -527,7 +529,7 @@ def save_list_to_jsonlines(path: Path, objects: list):
 
 def get_seed_datasets(cfg: OrQAConfig) -> list[tuple[str, Path, str, str]]:
     # sample dataset seeds for the candidates discovery step
-    if cfg.candidates_discovery.seeds_datasets_path.exists():
+    if False and cfg.candidates_discovery.seeds_datasets_path.exists():
         with open(cfg.candidates_discovery.seeds_datasets_path) as file:
             sample = json.load(file)
     else:
@@ -575,9 +577,9 @@ def generate_random_walks(cfg: OrQAConfig):
 
 
 def candidates_discovery(cfg: OrQAConfig):
-    # pipeline(cfg)
+    pipeline(cfg)
 
-    generate_random_walks(cfg)
+    # generate_random_walks(cfg)
 
     # with open(cfg.candidates_discovery.tasks_results_path, "r") as file:
     #     candidates = [json.loads(line) for line in file.readlines()]

@@ -63,8 +63,8 @@ def nyc():
 
     cfg = load_config(nyc_yaml_path, data_path)
 
-    crawl_nyc(cfg)
-    # create_blend_index(cfg)
+    # crawl_nyc(cfg)
+    create_blend_index(cfg)
     # candidates_discovery(cfg)
 
 
