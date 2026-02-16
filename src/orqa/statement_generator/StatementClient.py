@@ -30,6 +30,7 @@ import duckdb
 from statement_generator.LLMClientStructured import LLMClientStructured
 from statement_generator.SQLValidator import SQLValidator
 from statement_generator.PandasValidator import PandasValidator
+import re
 
 
 class LLMClientStatementGenerator(LLMClientStructured):
@@ -78,13 +79,13 @@ class LLMClientStatementGenerator(LLMClientStructured):
             "temperature": self.temperature,
         }
         
-        last_content = None
+        last_content = ""
         last_error = None
 
         good_queries: dict[str, self.response_model] = {}
         for attempt in range(self.max_retries):
             try:
-                print(f"Attempt {attempt + 1}/{self.max_retries}...")
+                #print(f"Attempt {attempt + 1}/{self.max_retries}...")
 
                 response = self.router.completion(**completion_args)
                 usage = response["usage"]
@@ -94,65 +95,81 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 content = response["choices"][0]["message"]["content"]
                 # Parse structured output
                 last_content = content
-                print(content)
                 cleaned_content = self._clean_json_response(content)
                 try:
                     # First try to parse as JSON
-                    json_data = json.loads(cleaned_content)
+
+                    json_data = self.fix_json_with_triple_quotes(cleaned_content)
+                    json_data = self._normalize_response(json_data)
                     # Then validate with Pydantic
+                    #print(json_data)
                     result = self.response_model.model_validate(json_data)
                     result = result.model_dump()
                     outcome, errors, accepted_queries = self.validate_queries(dataframes, result,table_names,typology)
                     good_queries.update(accepted_queries)
                     if not outcome:
-                       messages.append(errors)
-                       print(errors)
+                       messages = [{"role": "system", "content": "You are an expert Data Engineer."},{"role": "user", "content": prompt}]
+                       messages.extend(errors)
+                       pydantic = self.reform_prompt_constraint("")
+                       messages.append({"role": "user", "content":pydantic})
+                       #print(errors)
                        continue
 
-                    print(f"✓ Success on attempt {attempt + 1}\n")
+                    #print(f"✓ Success on attempt {attempt + 1}\n")
                     return {"queries": list(good_queries.values())}, usage_total
                 except json.JSONDecodeError as e:
                     # JSON parsing failed
                     last_error = e
                     error_msg = self._format_json_error(cleaned_content, e)
-                    print(f"⚠️ JSON parsing error on attempt {attempt + 1}")
-
+                    #print(f"⚠️ JSON parsing error on attempt {attempt + 1}")
+                    #print(content)
                     if attempt < self.max_retries - 1:
+                        messages = [{"role": "system", "content": "You are an expert Data Engineer, below are listed the instructions for generating and correcting queries."},{"role": "user", "content": initial_message}]
                         # Add assistant's failed response
-                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "system", "content": last_content})
                         # Add error feedback as user message
-                        messages.append({"role": "user", "content": error_msg})
+                        pydantic = self.reform_prompt_constraint("")
+                        messages.append({"role": "user", "content": f"You generated a bad formatted output, that gave the following error message:\n{error_msg}\n{pydantic}"})
                         time.sleep(self.retry_delay)
                         continue
                 except ValidationError as e:
                     # Pydantic validation failed
                     last_error = e
                     error_msg = self._format_validation_error(e)
-                    print(f"⚠️ Validation error on attempt {attempt + 1}")
-
+                    #print(f"⚠️ Validation error on attempt {attempt + 1}")
                     if attempt < self.max_retries - 1:
+                        messages = [{"role": "system", "content": "You are an expert Data Engineer."},{"role": "user", "content": prompt}]
                         # Add assistant's failed response
-                        messages.append({"role": "system", "content": content})
+                        pydantic = self.reform_prompt_constraint("")
+                        messages.append({"role": "system", "content":last_content})
+                        messages.append({"role": "user","content": f"Genereated queries are not valid, the error message geneated:\n{error_msg}\n{pydantic}"})
                         # Add error feedback as user message
-                        messages.append({"role": "user", "content": error_msg})
-                        print("💬 Sending validation errors to LLM...\n")
+                        #print("💬 Sending validation errors to LLM...\n")
                         time.sleep(self.retry_delay)
                         continue
 
             except Exception as e:
                 last_error = e
-                print(f"✗ Error on attempt {attempt + 1}: {e}")
+                #print(f"✗ Error on attempt {attempt + 1}: {e}")
 
                 # Wait before retry
                 if attempt < self.max_retries - 1:
-                    print(f"Retrying in {self.retry_delay} seconds...\n")
-                    time.sleep(self.retry_delay)
+                        messages = [{"role": "system", "content": "You are an expert Data Engineer"},{"role": "user", "content": prompt}]
+                        # Add assistant's failed response
+                        messages.append({"role": "system", "content": last_content})
+                        # Add error feedback as user message
+                        messages.append({"role": "user", "content": f"Genereated queries that are not valid, error message geneated\n{e}\nMake a unique JSON compliant to the Pydantic format:\n{json.dumps(self.response_model.model_json_schema(), indent=2)}"})
+                        #print("💬 Sending validation errors to LLM...\n")
+                        time.sleep(self.retry_delay)
 
         # All retries exhausted
-        print(f"\n❌ Failed after {self.max_retries} attempts")
-        print(f"Last error: {last_error}")
-        if last_content:
-            print(f"\nLast response preview:\n{last_content[:300]}...\n")
+        #print(f"\n Number of max  {self.max_retries} attempts reached")
+        #print(f"Last error: {last_error}")
+        #if last_content:
+        #    print(f"\nLast response preview:\n{last_content[:300]}...\n")
+        #if len(good_queries.values())>0:
+            #print("Managed to create the following queries")
+            #print(good_queries.values())
 
         return {"queries": list(good_queries.values())}, usage_total
 
@@ -173,6 +190,63 @@ class LLMClientStatementGenerator(LLMClientStructured):
         """Validate SQL queries."""
         validator = SQLValidator(dataframes, table_names)
         return validator.validate_queries(result)
+
+    def fix_json_with_triple_quotes(self,content: str) -> dict:
+        """
+        Fix JSON that contains Python triple-quoted strings.
+        """
+        # Step 1: Trova tutte le occorrenze di triple quotes
+        pattern = r'"""[\s\S]*?"""'
+        
+        matches = list(re.finditer(pattern, content))
+        
+        # Step 2: Sostituisci ogni match con una stringa JSON valida
+        offset = 0
+        result = content
+        
+        for match in matches:
+            original = match.group(0)
+            # Rimuovi le triple virgolette
+            inner_content = original[3:-3].strip()
+            
+            # Escape dei caratteri speciali
+            escaped = (inner_content
+                    .replace('\\', '\\\\')
+                    .replace('"', '\\"')
+                    .replace('\n', '\\n')  # Rimuovi newline o usa \\n se vuoi preservarli
+                    .replace('\r', '')
+                    .replace('\t', ' '))
+            
+            # Sostituisci nel risultato
+            start = match.start() + offset
+            end = match.end() + offset
+            replacement = f'"{escaped}"'
+            result = result[:start] + replacement + result[end:]
+            
+            # Aggiorna l'offset
+            offset += len(replacement) - len(original)
+        
+        # Step 3: Parse del JSON
+        return json.loads(result)
+
+
+    def _normalize_response(self, json_data):
+        """Normalize response to match QuerySet schema."""
+        # Se è già una lista, wrappala in {"queries": [...]}
+        if isinstance(json_data, list):
+            return {"queries": json_data}
+        
+        # Se è un dict, verifica che abbia la chiave queries
+        if isinstance(json_data, dict):
+            if "queries" not in json_data:
+                # Se ha altre chiavi che sembrano query, prova a recuperare
+                if len(json_data) > 0:
+                    # Potrebbe essere un singolo query object
+                    return {"queries": [json_data]}
+            return json_data
+        
+        # Fallback: wrappa in struttura corretta
+        return {"queries": [json_data]}
 
 
    

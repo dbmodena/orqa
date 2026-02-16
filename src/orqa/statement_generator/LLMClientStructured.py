@@ -131,7 +131,7 @@ class LLMClientStructured(LLMClient):
             "❌ JSON PARSING ERROR - Your response is not valid JSON.\n\n"
             f"Error: {str(error)}\n\n"
             # f"Your response (first 200 chars):\n{snippet}\n\n"
-            "Required schema:\n"
+            "Required Pydantic schema:\n"
             f"{json.dumps(self.response_model.model_json_schema(), indent=2)}\n\n"
             "⚠️ Common issues:\n"
             "  - Missing quotes around strings\n"
@@ -218,7 +218,7 @@ class LLMClientStructured(LLMClient):
 
         formatted_error = (
             "❌ VALIDATION ERROR - Your JSON response does not match the required schema.\n\n"
-            "Required schema:\n"
+            "Required Pydantic schema:\n"
             f"{json.dumps(self.response_model.model_json_schema(), indent=2)}\n\n"
             "Validation errors found:\n"
             + "\n".join(error_messages)

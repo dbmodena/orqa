@@ -16,6 +16,8 @@ import polars as pl
 import json
 import time
 from utils import load_datasets_metadata, load_dataset_info
+import tempfile
+import os
 
 # ============================================================================
 # CARICAMENTO
@@ -193,10 +195,10 @@ def create_statements(csv_folder,output_dir,kind="PANDAS",max_cols=15,metadata=N
     else:
         all_results = {"successful": [], "failed": [], "total_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
     
-    for idx, result in enumerate(all_matches[:20]):
-        print(f"\n{'='*60}")
-        print(f"Processing match {idx + 1}/{len(all_matches)}")
-        print(f"{'='*60}")
+    for idx, result in enumerate(all_matches[80:]):
+        #print(f"\n{'='*60}")
+        #print(f"Processing match {idx + 1}/{len(all_matches)}")
+        #print(f"{'='*60}")
         
         start_time = time.time()
         
@@ -207,6 +209,7 @@ def create_statements(csv_folder,output_dir,kind="PANDAS",max_cols=15,metadata=N
         aliases = result["aliases"]
         involved_columns = result["columns_by_table"]
         for alias, dataset in aliases.items():
+            #print(dataset)
             specific_cols = involved_columns[alias]
             df = pd.read_csv(f"{csv_folder}/{dataset}.csv", sep=",")
 
@@ -215,17 +218,21 @@ def create_statements(csv_folder,output_dir,kind="PANDAS",max_cols=15,metadata=N
                 other_cols = [c for c in df.columns if c not in specific_cols]
                 cols_to_keep = list(specific_cols) + other_cols[:max_cols - len(specific_cols)]
                 df = df[cols_to_keep]
-            print(df.head())
+            #print(df.head())
             dataframes.append(df)
             table_names.append(alias)
             metadata = datasets_metadata.get(dataset, "")
-            dataset_info,_ = load_dataset_info(Path(f"{csv_folder}/{dataset}.csv"))
-            table_descriptions.append(
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as tmp_file:
+                df.to_csv(tmp_file.name, index=False)
+                tmp_path = tmp_file.name
 
-                f"### Dataset Alias: {alias} \n{descriptor.update(dataset, df.shape[0], df.shape[1], metadata, dataset_info["columns_details"], df.head(3))}"
-            )
-        # Generate prompt and queries
-        #print(table_descriptions)
+            try:
+                dataset_info, _ = load_dataset_info(Path(tmp_path))
+                table_descriptions.append(
+                    f"### Dataset Alias: {alias} \n{descriptor.update(dataset, df.shape[0], df.shape[1], metadata, dataset_info["columns_details"], df.head(3))}"
+                )
+            finally:
+                os.unlink(tmp_path)  
 
         prompt = _load_prompt(
             "statement_generator/prompt.md",
@@ -261,18 +268,18 @@ def create_statements(csv_folder,output_dir,kind="PANDAS",max_cols=15,metadata=N
                 entry["queries"] = queries_result["queries"]
                 entry["status"] = "success"
                 all_results["successful"].append(entry)
-                print(f"✓ Success: {len(queries_result['queries'])} queries generated in {elapsed_time:.2f}s")
+                #print(f"✓ Success: {len(queries_result['queries'])} queries generated in {elapsed_time:.2f}s")
         else:
                 entry["status"] = "failed"
                 entry["error"] = "No queries generated after max retries"
                 all_results["failed"].append(entry)
-                print(f"✗ Failed: No queries generated in {elapsed_time:.2f}s")
+                #print(f"✗ Failed: No queries generated in {elapsed_time:.2f}s")
             
             # Save incrementally after each match
         with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(all_results, f, indent=2, ensure_ascii=False)
         
-    print(f"💾 Results saved to {output_file}")
+    #print(f"💾 Results saved to {output_file}")
     return all_results
 
 if __name__ == "__main__":

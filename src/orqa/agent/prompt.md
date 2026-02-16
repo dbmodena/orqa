@@ -105,9 +105,6 @@ Your goal is to **analyze how well each table matches with every other table**, 
 
 
 
-
-
-
 ## Pydantic
  
 ### Output formmat instructions

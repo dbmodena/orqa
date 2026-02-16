@@ -4,6 +4,7 @@ from io import StringIO
 import sys
 from typing import List, Dict, Tuple, Any
 from statement_generator.QueryValidator import QueryValidator
+import re
 
 
 class PandasValidator(QueryValidator):
@@ -45,6 +46,28 @@ class PandasValidator(QueryValidator):
         try:
             compiled_code = compile(query, '<string>', 'exec')
             exec(compiled_code, local_namespace)
+        except KeyError as e:
+            # Crea una mappa di colonne per tabella
+            columns_by_table = {}
+            for df, name in zip(self.dataframes, self.table_names):
+                columns_by_table[name] = df.columns.tolist()
+            
+            # Formatta il messaggio con le colonne per tabella
+            columns_info = []
+            for table_name, columns in columns_by_table.items():
+                columns_info.append(f"  {table_name}: {columns}")
+            
+            raise KeyError(
+                f"Column {str(e)} not found in any table.\n\n"
+                f"Available columns by table:\n" + "\n".join(columns_info) + "\n\n"
+                f"Tip: Check column names spelling and case sensitivity."
+            )
+        except SyntaxError as e:
+            raise SyntaxError(
+                f"Invalid Python syntax in query.\n"
+                f"Error: {str(e)}\n"
+                f"Tip: Ensure multiple statements are separated by newlines (\\n)"
+            )
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
@@ -65,5 +88,10 @@ class PandasValidator(QueryValidator):
         """Clean pandas query code."""
         lines = query.split(';')
         cleaned = [line.strip() for line in lines if 'import' not in line.lower()]
+        # Remove comments from each line
+        cleaned = [re.sub(r'#.*$', '', line).strip() for line in cleaned]
+        
+        # Filter out empty lines
+        cleaned = [line for line in cleaned if line]
         return '; '.join(cleaned).strip()
          
