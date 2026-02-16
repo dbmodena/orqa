@@ -134,112 +134,40 @@ Your response must:
 
 ## SQLGeneration
 
-You are an expert data analyst and SQL engineer.
+Generate DuckDB SQL queries with business-focused natural language questions.
 
-Your task is to generate SQL queries and their corresponding natural language questions
-based on the provided database schema and explicit table & column match definitions.
+### Critical Rules
+- Operation type is NON-NEGOTIABLE - must match the specified type exactly
+- All tables must be used
+- Only use explicitly defined matches - no inferred relationships
+- DuckDB syntax only - ANSI SQL compatible
 
----
+### Natural Language Questions
+✓ Business terms (customers, revenue)  
+✓ Outcome-focused (insights, trends)  
+✗ No table/column names  
+✗ No SQL operations mentioned
 
-### Table Details
-{table}
+### Generate
+5 queries (difficulty 1-5) where:
+- Each implements the mandatory operation type
+- Each uses all provided tables
+- Each follows match definitions exactly
+- Each has semantically aligned NL question
+- All conform to Pydantic schema (no extra text)
 
-### Matching Tables to query on
+
+### Tables involved in the queries
+Realize the queries and their natural language counterparts using the following tables. 
+{table}  
+### Matches between tables
 {matches}
 
-> The matches define the mandatory operation type and how tables relate to each other, including:
-> - The required operation type (MULTI-JOIN, UNION, or JOIN-CORRELATION) - this is mandatory
-> - Join keys and join direction
-> - Allowed join paths and correlations
-> - Required unions or relationship mappings  
->
-> These matches are authoritative and must be followed exactly.
+### Lookup aliases
+Make sure to use only the aliases in the queries in the following:
+{aliases}
 
----
-
-### IMPORTANT RULES FOR NATURAL LANGUAGE QUESTIONS
-
-Each SQL query MUST have exactly one associated natural language question.
-
-The question MUST:
-- Describe the business, analytical, or real-world intent
-- Be understandable by a non-technical stakeholder
-- Avoid mentioning tables, columns, joins, filters, or SQL concepts
-- Avoid describing how the query is implemented
-
-The question MUST NOT:
-- Refer to tables or columns by name
-- Mention SQL operations (JOIN, GROUP BY, UNION, WHERE, etc.)
-- Describe schema mechanics or query steps
-
----
-
-### REQUIRED USE OF TABLE & COLUMN MATCHES (CRITICAL)
-
-MANDATORY OPERATION ENFORCEMENT:
-- The operation type specified is REQUIRED and NON-NEGOTIABLE
-- If the match specifies MULTI-JOIN → all queries MUST use multi-table joins as defined
-- If the match specifies UNION → all queries MUST use UNION operations as defined
-- If the match specifies JOIN-CORRELATION → all queries MUST use correlation joins as defined
-- Queries that do not implement the specified operation type are INVALID
-
-Match Compliance Rules:
-- All joins, unions, and relationships MUST use the provided matches exactly
-- Do not infer or invent relationships
-- If a match specifies:
-  - a join → it must be used with the exact columns specified
-  - a union → it must be respected with the exact tables specified
-  - a correlation → it must be followed with the exact relationship defined
-- Queries that do not rely on the listed matches are INVALID
-
-The matches are the only allowed source of truth for:
-1. WHAT operation type to use (MULTI-JOIN, UNION, or JOIN-CORRELATION)
-2. HOW tables connect (join keys, directions, and conditions)
-
----
-
-### DuckDB SQL Syntax Requirements
-
-All SQL queries MUST be compatible with DuckDB.
-
-- Use DuckDB-supported ANSI SQL
-- CTEs and window functions are allowed if supported by DuckDB
-- Use DuckDB-compatible date/time expressions
-- Avoid vendor-specific or procedural SQL
-
----
-
-### Query Generation Instructions
-
-1. Generate 5 SQL queries, each with a difficulty score from 1 to 5:
-   - 1 = simple filter using the mandatory operation
-   - 3 = the mandatory operation with aggregation and multiple conditions
-   - 5 = advanced logic using the mandatory operation with CTEs, window functions, or correlated subqueries
-
-2. Each query MUST:
-   - Implement the mandatory operation type specified
-   - Use only the provided tables
-   - Use only the relationships defined
-   - Use all the provided tables
-   - Follow DuckDB SQL syntax
-   - Correctly answer its associated natural language question
-
-3. The natural language question and SQL query must be:
-   - Semantically aligned
-   - Not a trivial restatement of each other
-
-4. Output MUST strictly conform to the provided Pydantic schema
-   - No extra text
-   - No explanations
-   - No markdown outside the schema
-
----
-
-### Goal
-
-Produce realistic, business-relevant analytical questions and their correct, match-compliant
-DuckDB SQL implementations that use the mandatory operation type specified in the matches.
-
+Generate complete queries following all requirements above.
 
 
 
@@ -313,7 +241,7 @@ Realize the queries and their natural language counterparts using the following 
 Make sure to use only the aliases in the queries in the following:
 {aliases}
 
-Generate 5 complete query examples following all requirements above.
+Generate complete queries following all requirements.
 
 
 ## QUERY CORRECTION PROMPT

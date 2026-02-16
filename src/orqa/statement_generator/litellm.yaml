@@ -1,9 +1,9 @@
 # LLM Configuration File
 # Primary model (will be tried first)
-model: "oci/meta.llama-3.3-70b-instruct"
+model: "ollama_chat/llama3.1:8b"
 # Fallback models (tried in order if primary fails)
 fallback_models:
-   - "ollama_chat/llama3.1:8b"
+   - "oci/openai.gpt-oss-120b"
    - "groq/llama-3.3-70b-versatile"
 #   - "groq/llama-3.1-8b-instant"
 #  - "together_ai/togethercomputer/Llama-2-7B-32K-Instruct"
@@ -24,13 +24,14 @@ provider_params:
   together_ai:
     # TogetherAI-specific params (if any)
   oci:
-    drop_params: True
     oci_region: os.environ/OCI_REGION
     oci_user: os.environ/OCI_USER
     oci_fingerprint: os.environ/OCI_FINGERPRINT
     oci_tenancy: os.environ/OCI_TENANCY
     oci_key_file: os.environ/OCI_KEY_FILE
     oci_compartment_id: os.environ/OCI_COMPARTMENT_ID
+    response_format: 
+      type: "json_object"
 
 # Common parameters (applied to all models)
 

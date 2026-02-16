@@ -18,6 +18,7 @@ class SQLValidator(QueryValidator):
                 con.register(name, df)
             
             # Validate syntax + binding only
+            #print(query.rstrip(";") + " LIMIT 1")
             con.execute(query.rstrip(";") + " LIMIT 1")
         finally:
             con.close()

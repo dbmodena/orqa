@@ -93,7 +93,7 @@ class LLMClient:
             fallbacks=fallbacks,
             num_retries=0,  # Router handles retries per model
             timeout=60,
-            set_verbose=True,  # Shows which model is being used
+            set_verbose=False,  # Shows which model is being used
         )
 
     def _load_config(self, config_path) -> dict[str, Any]:

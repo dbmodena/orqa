@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Optional, Type
 
 import yaml
+import litellm
 from litellm import completion, Router
 from pydantic import BaseModel, ValidationError
 
@@ -31,7 +32,6 @@ from statement_generator.LLMClientStructured import LLMClientStructured
 from statement_generator.SQLValidator import SQLValidator
 from statement_generator.PandasValidator import PandasValidator
 import re
-
 
 class LLMClientStatementGenerator(LLMClientStructured):
     """

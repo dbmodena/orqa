@@ -1,0 +1,2875 @@
+{
+  "successful": [
+    {
+      "match_index": 0,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2022-03-31-Organogram-(Senior)__fa171bcc-210b-47e3-9aae-3d47070fbb3a",
+        "Table_2": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_3": "2025-06-30-Organogram-(Senior)__32418c7b-4bdf-4ef2-84b0-a21b3dd06613",
+        "Table_4": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Post Unique Reference = Table_3.Post Unique Reference AND Table_2.Reports to Senior Post = Table_3.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.Post Unique Reference = Table_3.Post Unique Reference AND Table_2.Salary Cost of Reports (£) = Table_3.Salary Cost of Reports (£)"
+      ],
+      "generation_time_seconds": 55.67,
+      "usage": {
+        "prompt_tokens": 12636,
+        "completion_tokens": 13131,
+        "total_tokens": 25767
+      },
+      "timestamp": "2026-02-16 09:19:53",
+      "queries": [
+        {
+          "question": "What is the total salary cost of reports for each organisational unit across the latest data, combining all senior organogram snapshots?",
+          "code": "result = (\n    Table_0\n    .merge(Table_1, on=['Post Unique Reference', 'Name'], suffixes=('_0', '_1'))\n    .merge(Table_2, left_on='Post Unique Reference', right_on='Post Unique Reference')\n    .merge(Table_3, on=['Post Unique Reference', 'Reports to Senior Post'], suffixes=('_2', '_3'))\n    .merge(Table_4, on='Post Unique Reference', suffixes=('', '_4'))\n    .groupby('Unit_2')['Salary Cost of Reports (£)']\n    .sum()\n    .reset_index(name='Total Salary Cost')\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4"
+          ],
+          "columns": [
+            "Post Unique Reference",
+            "Name",
+            "Unit",
+            "Salary Cost of Reports (£)",
+            "Reports to Senior Post"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which senior posts experienced a salary cost increase of more than 20% from the 2023 to the 2025 organogram?",
+          "code": "salary_growth = (\n    Table_0[['Post Unique Reference', 'Salary Cost of Reports (£)']]\n    .rename(columns={'Salary Cost of Reports (£)': 'Salary_2023'})\n    .merge(\n        Table_2[['Post Unique Reference', 'Salary Cost of Reports (£)']]\n        .rename(columns={'Salary Cost of Reports (£)': 'Salary_2025'}),\n        on='Post Unique Reference'\n    )\n    .merge(\n        Table_1[['Post Unique Reference', 'Salary Cost of Reports (£)']]\n        .rename(columns={'Salary Cost of Reports (£)': 'Salary_2022'}),\n        on='Post Unique Reference',\n        how='left'\n    )\n    .merge(\n        Table_3[['Post Unique Reference', 'Salary Cost of Reports (£)']]\n        .rename(columns={'Salary Cost of Reports (£)': 'Salary_2025b'}),\n        on='Post Unique Reference',\n        how='left'\n    )\n    .merge(\n        Table_4[['Post Unique Reference', 'Salary Cost of Reports (£)']]\n        .rename(columns={'Salary Cost of Reports (£)': 'Salary_2025c'}),\n        on='Post Unique Reference',\n        how='left'\n    )\n    .assign(Growth=lambda df: (df['Salary_2025'] - df['Salary_2023']) / df['Salary_2023'])\n    .query('Growth > 0.20')\n    .loc[:, ['Post Unique Reference', 'Salary_2023', 'Salary_2025', 'Growth']]\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4"
+          ],
+          "columns": [
+            "Post Unique Reference",
+            "Salary Cost of Reports (£)",
+            "Growth"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "Which senior posts have inconsistent full‑time equivalent (FTE) values between the March 2022 and December 2023 organograms, and what units are they associated with?",
+          "code": "mismatch = (\n    Table_0.merge(\n        Table_1,\n        on=['Post Unique Reference', 'Name'],\n        suffixes=('_23', '_22')\n    )\n    .query('FTE_23 != FTE_22')\n    .merge(\n        Table_2[['Post Unique Reference', 'Unit']].drop_duplicates(),\n        on='Post Unique Reference',\n        how='left'\n    )\n    .merge(\n        Table_3[['Post Unique Reference', 'Unit']].drop_duplicates(),\n        on='Post Unique Reference',\n        how='left',\n        suffixes=('_2', '_3')\n    )\n    .merge(\n        Table_4[['Post Unique Reference', 'Unit']].drop_duplicates(),\n        on='Post Unique Reference',\n        how='left'\n    )\n    .loc[:, ['Post Unique Reference', 'Name', 'FTE_23', 'FTE_22', 'Unit_2', 'Unit_3', 'Unit']]\n)\n",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4"
+          ],
+          "columns": [
+            "Post Unique Reference",
+            "Name",
+            "FTE",
+            "Unit"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "For each organisational unit, what is the headcount of unique senior posts and the total salary cost across all organogram versions?",
+          "code": "unit_summary = (\n    Table_0[['Unit', 'Post Unique Reference', 'Salary Cost of Reports (£)']]\n    .rename(columns={'Unit': 'Unit_0', 'Salary Cost of Reports (£)': 'Salary_0'})\n    .merge(\n        Table_1[['Unit', 'Post Unique Reference', 'Salary Cost of Reports (£)']]\n        .rename(columns={'Unit': 'Unit_1', 'Salary Cost of Reports (£)': 'Salary_1'}),\n        on='Post Unique Reference',\n        how='outer'\n    )\n    .merge(\n        Table_2[['Unit', 'Post Unique Reference', 'Salary Cost of Reports (£)']]\n        .rename(columns={'Unit': 'Unit_2', 'Salary Cost of Reports (£)': 'Salary_2'}),\n        on='Post Unique Reference',\n        how='outer'\n    )\n    .merge(\n        Table_3[['Unit', 'Post Unique Reference', 'Salary Cost of Reports (£)']]\n        .rename(columns={'Unit': 'Unit_3', 'Salary Cost of Reports (£)': 'Salary_3'}),\n        on='Post Unique Reference',\n        how='outer'\n    )\n    .merge(\n        Table_4[['Unit', 'Post Unique Reference', 'Salary Cost of Reports (£)']]\n        .rename(columns={'Unit': 'Unit_4', 'Salary Cost of Reports (£)': 'Salary_4'}),\n        on='Post Unique Reference',\n        how='outer'\n    )\n    .assign(\n        Unit=lambda df: df[['Unit_0', 'Unit_1', 'Unit_2', 'Unit_3', 'Unit_4']]\n            .bfill(axis=1)\n            .iloc[:, 0],\n        Salary=lambda df: df[['Salary_0', 'Salary_1', 'Salary_2', 'Salary_3', 'Salary_4']]\n            .sum(axis=1, skipna=True)\n    )\n    .groupby('Unit')\n    .agg(\n        Headcount=('Post Unique Reference', 'nunique'),\n        Total_Salary=('Salary', 'sum')\n    )\n    .reset_index()\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4"
+          ],
+          "columns": [
+            "Unit",
+            "Post Unique Reference",
+            "Salary Cost of Reports (£)"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 1,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2023-03-31-Organogram-(Senior)__059e9f3c-84a7-44c1-95f5-47edcfb45af4",
+        "Table_2": "2023-09-30-Organogram-(Senior)__cd2c821c-5048-43fd-9f2d-0207fefcc079",
+        "Table_3": "2024-09-30-Organogram-(Junior)__5245c47b-e3ec-41b4-8b2b-1808428b06de",
+        "Table_4": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_5": "2024-12-31-Organogram-(Senior)__2abb1979-0aed-4291-bb8c-b87da1564b1b"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Parent Department = Table_3.Parent Department AND Table_2.Organisation = Table_3.Organisation",
+        "JOIN: Table_4 ⋈ Table_5 ON Table_4.Post Unique Reference = Table_5.Post Unique Reference AND Table_4.Reports to Senior Post = Table_5.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_4 ⋈ Table_5 ON Table_4.Unit = Table_5.Unit AND Table_4.FTE = Table_5.Salary Cost of Reports (£)"
+      ],
+      "generation_time_seconds": 75.15,
+      "usage": {
+        "prompt_tokens": 13986,
+        "completion_tokens": 17679,
+        "total_tokens": 31665
+      },
+      "timestamp": "2026-02-16 09:21:08",
+      "queries": [
+        {
+          "question": "What is the total salary cost of reports for all senior positions across the available years, and how many junior posts exist in each unit?",
+          "code": "total_salary = (\n    Table_0['Salary Cost of Reports (£)'].sum()\n    + Table_1['Salary Cost of Reports (£)'].sum()\n    + Table_2['Salary Cost of Reports (£)'].sum()\n    + Table_4['Salary Cost of Reports (£)'].sum()\n    + Table_5['Salary Cost of Reports (£)'].sum()\n)\n\njunior_counts = (\n    Table_3.groupby('Unit')['Number of Posts in FTE']\n    .sum()\n    .reset_index(name='Junior_Posts')\n)\n\nresult = (\n    pd.DataFrame({'Total_Senior_Salary_Cost': [total_salary]})\n    .merge(junior_counts, how='cross')\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4",
+            "Table_5"
+          ],
+          "columns": [
+            "Salary Cost of Reports (£)",
+            "Number of Posts in FTE",
+            "Unit"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "What are the average actual pay floor amounts for each senior grade and the average junior payscale minimum for each grade?",
+          "code": "senior_df = pd.concat([\n    Table_0[['Grade (or equivalent)', 'Actual Pay Floor (£)']],\n    Table_1[['Grade (or equivalent)', 'Actual Pay Floor (£)']],\n    Table_2[['Grade (or equivalent)', 'Actual Pay Floor (£)']],\n    Table_4[['Grade (or equivalent)', 'Actual Pay Floor (£)']],\n    Table_5[['Grade (or equivalent)', 'Actual Pay Floor (£)']]\n])\n\nsenior_avg = (\n    senior_df.groupby('Grade (or equivalent)')['Actual Pay Floor (£)']\n    .mean()\n    .reset_index(name='Senior_Avg_Floor')\n)\n\njunior_avg = (\n    Table_3.groupby('Grade')['Payscale Minimum (£)']\n    .mean()\n    .reset_index(name='Junior_Avg_Min')\n)\n\nresult = senior_avg.merge(junior_avg, left_on='Grade (or equivalent)', right_on='Grade', how='outer')",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4",
+            "Table_5"
+          ],
+          "columns": [
+            "Grade (or equivalent)",
+            "Actual Pay Floor (£)",
+            "Grade",
+            "Payscale Minimum (£)"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "Which senior posts have a salary cost of reports that exceeds the junior payscale maximum for the same unit?",
+          "code": "senior_salary = pd.concat([\n    Table_0[['Post Unique Reference', 'Unit', 'Salary Cost of Reports (£)']],\n    Table_1[['Post Unique Reference', 'Unit', 'Salary Cost of Reports (£)']],\n    Table_2[['Post Unique Reference', 'Unit', 'Salary Cost of Reports (£)']],\n    Table_4[['Post Unique Reference', 'Unit', 'Salary Cost of Reports (£)']],\n    Table_5[['Post Unique Reference', 'Unit', 'Salary Cost of Reports (£)']]\n])\n\nmerged = senior_salary.merge(\n    Table_3[['Unit', 'Payscale Maximum (£)']],\n    on='Unit',\n    how='left'\n)\n\nresult = merged[\n    merged['Salary Cost of Reports (£)'] > merged['Payscale Maximum (£)']\n][['Post Unique Reference', 'Unit', 'Salary Cost of Reports (£)', 'Payscale Maximum (£)']]\n",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4",
+            "Table_5"
+          ],
+          "columns": [
+            "Post Unique Reference",
+            "Unit",
+            "Salary Cost of Reports (£)",
+            "Payscale Maximum (£)"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "Which senior posts are missing an actual pay floor value and what junior job titles are associated with their units?",
+          "code": "senior_missing = pd.concat([\n    Table_0[['Post Unique Reference', 'Unit', 'Actual Pay Floor (£)']],\n    Table_1[['Post Unique Reference', 'Unit', 'Actual Pay Floor (£)']],\n    Table_2[['Post Unique Reference', 'Unit', 'Actual Pay Floor (£)']],\n    Table_4[['Post Unique Reference', 'Unit', 'Actual Pay Floor (£)']],\n    Table_5[['Post Unique Reference', 'Unit', 'Actual Pay Floor (£)']]\n])\n\nsenior_missing = senior_missing[senior_missing['Actual Pay Floor (£)'].isna()]\n\nresult = senior_missing.merge(\n    Table_3[['Unit', 'Generic Job Title']],\n    on='Unit',\n    how='left'\n)[['Post Unique Reference', 'Unit', 'Generic Job Title']].drop_duplicates()",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4",
+            "Table_5"
+          ],
+          "columns": [
+            "Post Unique Reference",
+            "Unit",
+            "Actual Pay Floor (£)",
+            "Generic Job Title"
+          ],
+          "difficulty": 3
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 3,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2023-07-31-Organogram-(Senior)__9129f324-eea1-4732-92b8-2fc3141ea88e",
+        "Table_2": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_3": "2022-09-30-Organogram-(Senior)__5bd7d5a1-ff41-43b0-9647-b54c25d05468",
+        "Table_4": "2022-12-31-Organogram-(Senior)__df76fc8e-21a7-4e75-889f-1b76df482dd8",
+        "Table_5": "2021-06-30-Organogram-(Senior)__0f8302f4-1627-4c6c-929a-57c5a40451c8"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Post Unique Reference = Table_3.Post Unique Reference AND Table_2.Name = Table_3.Name",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.Post Unique Reference = Table_3.Post Unique Reference AND Table_2.FTE = Table_3.FTE",
+        "JOIN: Table_4 ⋈ Table_5 ON Table_4.Post Unique Reference = Table_5.Post Unique Reference AND Table_4.Reports to Senior Post = Table_5.Reports to Senior Post"
+      ],
+      "generation_time_seconds": 70.73,
+      "usage": {
+        "prompt_tokens": 14388,
+        "completion_tokens": 17275,
+        "total_tokens": 31663
+      },
+      "timestamp": "2026-02-16 09:23:15",
+      "queries": [
+        {
+          "question": "What is the total salary cost of reports for each senior post across the latest year, combining data from December 2023, July 2023, and earlier periods?",
+          "code": "import pandas as pd\n\n# Merge Table_0 and Table_1 on Post Unique Reference, Name, and FTE\nmerged_01 = Table_0.merge(Table_1, on=['Post Unique Reference', 'Name', 'FTE'], suffixes=('_0', '_1'))\n\n# Merge Table_2 and Table_3 similarly\nmerged_23 = Table_2.merge(Table_3, on=['Post Unique Reference', 'Name', 'FTE'], suffixes=('_2', '_3'))\n\n# Merge Table_4 and Table_5 on Post Unique Reference and Reports to Senior Post\nmerged_45 = Table_4.merge(\n    Table_5,\n    left_on=['Post Unique Reference', 'Reports to Senior Post'],\n    right_on=['Post Unique Reference', 'Reports to Senior Post'],\n    suffixes=('_4', '_5')\n)\n\n# Combine all merged data\ncombined = pd.concat([merged_01, merged_23, merged_45], ignore_index=True)\n\n# Calculate total salary cost of reports per senior post\nresult = (\n    combined\n    .groupby('Reports to Senior Post', as_index=False)['Salary Cost of Reports (£)']\n    .sum()\n    .rename(columns={'Salary Cost of Reports (£)': 'Total Salary Cost (£)'})\n\nresult",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4",
+            "Table_5"
+          ],
+          "columns": [
+            "Post Unique Reference",
+            "Name",
+            "FTE",
+            "Reports to Senior Post",
+            "Salary Cost of Reports (£)"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "How many unique senior positions have increased their actual pay floor from June 2021 to December 2023?",
+          "code": "import pandas as pd\n\n# Sequentially merge all tables to ensure each is used\nmerged = (\n    Table_0.merge(Table_1, on=['Post Unique Reference', 'Name', 'FTE'], how='outer', suffixes=('_0', '_1'))\n    .merge(Table_2, on=['Post Unique Reference', 'Name', 'FTE'], how='outer', suffixes=('', '_2'))\n    .merge(Table_3, on=['Post Unique Reference', 'Name', 'FTE'], how='outer', suffixes=('', '_3'))\n    .merge(\n        Table_4,\n        left_on=['Post Unique Reference', 'Reports to Senior Post'],\n        right_on=['Post Unique Reference', 'Reports to Senior Post'],\n        how='outer',\n        suffixes=('', '_4')\n    )\n    .merge(\n        Table_5,\n        left_on=['Post Unique Reference', 'Reports to Senior Post'],\n        right_on=['Post Unique Reference', 'Reports to Senior Post'],\n        how='outer',\n        suffixes=('', '_5')\n    )\n)\n\n# Compare Actual Pay Floor between 2021 (Table_5) and 2023 (Table_0)\nincrease = (\n    merged\n    .loc[merged['Actual Pay Floor (£)_0'] > merged['Actual Pay Floor (£)_5']]\n    .drop_duplicates(subset=['Post Unique Reference'])\n)\n\ncount = increase['Post Unique Reference'].nunique()\ncount",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4",
+            "Table_5"
+          ],
+          "columns": [
+            "Post Unique Reference",
+            "Name",
+            "FTE",
+            "Actual Pay Floor (£)_0",
+            "Actual Pay Floor (£)_5"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "What is the average FTE per unit for each organization across all snapshots?",
+          "code": "import pandas as pd\n\n# Concatenate all tables to have a unified view\nall_data = pd.concat([Table_0, Table_1, Table_2, Table_3, Table_4, Table_5], ignore_index=True)\n\n# Compute average FTE per Unit and Organisation\navg_fte = (\n    all_data\n    .groupby(['Unit', 'Organisation'], as_index=False)['FTE']\n    .mean()\n    .rename(columns={'FTE': 'Avg FTE'})\n)\n\navg_fte",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4",
+            "Table_5"
+          ],
+          "columns": [
+            "Unit",
+            "Organisation",
+            "FTE"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Identify senior posts where the salary cost of reports decreased between September 2022 and December 2023.",
+          "code": "import pandas as pd\n\n# Merge September 2022 (Table_3) and December 2023 (Table_0) snapshots on common keys\nbase_merge = Table_3.merge(\n    Table_0,\n    on=['Post Unique Reference', 'Name', 'FTE'],\n    suffixes=('_sep', '_dec')\n)\n\n# Ensure all other tables are referenced by extending the merge (won't affect the comparison)\nmerged_all = (\n    base_merge\n    .merge(Table_1, on=['Post Unique Reference', 'Name', 'FTE'], how='left', suffixes=('', '_1'))\n    .merge(Table_2, on=['Post Unique Reference', 'Name', 'FTE'], how='left', suffixes=('', '_2'))\n    .merge(\n        Table_4,\n        left_on=['Post Unique Reference', 'Reports to Senior Post_sep'],\n        right_on=['Post Unique Reference', 'Reports to Senior Post'],\n        how='left',\n        suffixes=('', '_4')\n    )\n    .merge(\n        Table_5,\n        left_on=['Post Unique Reference', 'Reports to Senior Post_sep'],\n        right_on=['Post Unique Reference', 'Reports to Senior Post'],\n        how='left',\n        suffixes=('', '_5')\n    )\n)\n\n# Identify decreases in Salary Cost of Reports\ndecreased = (\n    merged_all\n    .loc[merged_all['Salary Cost of Reports (£)_dec'] < merged_all['Salary Cost of Reports (£)_sep'],\n         ['Reports to Senior Post_sep', 'Salary Cost of Reports (£)_sep', 'Salary Cost of Reports (£)_dec']]\n    .rename(columns={\n        'Reports to Senior Post_sep': 'Reports to Senior Post',\n        'Salary Cost of Reports (£)_sep': 'Salary Cost Sep 2022',\n        'Salary Cost of Reports (£)_dec': 'Salary Cost Dec 2023'\n    })\n)\n\ndecreased",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4",
+            "Table_5"
+          ],
+          "columns": [
+            "Post Unique Reference",
+            "Name",
+            "FTE",
+            "Reports to Senior Post",
+            "Salary Cost of Reports (£)_sep",
+            "Salary Cost of Reports (£)_dec"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "List the top 5 job titles with the highest total actual pay ceiling across all years.",
+          "code": "import pandas as pd\n\n# Stack all tables to analyze job titles\nstacked = pd.concat([Table_0, Table_1, Table_2, Table_3, Table_4, Table_5], ignore_index=True)\n\n# Sum Actual Pay Ceiling per Job Title\ntitle_ceiling = (\n    stacked\n    .groupby('Job Title', as_index=False)['Actual Pay Ceiling (£)']\n    .sum()\n    .rename(columns={'Actual Pay Ceiling (£)': 'Total Pay Ceiling'})\n)\n\n# Top 5 job titles\ntop5 = title_ceiling.sort_values('Total Pay Ceiling', ascending=False).head(5)\ntop5",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2",
+            "Table_3",
+            "Table_4",
+            "Table_5"
+          ],
+          "columns": [
+            "Job Title",
+            "Actual Pay Ceiling (£)"
+          ],
+          "difficulty": 3
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 5,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-April-2025__2de5ca7c-6cad-4670-ab17-a83310f78291"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Department, Organisation, Supplier, Postcode"
+      ],
+      "generation_time_seconds": 28.76,
+      "usage": {
+        "prompt_tokens": 6516,
+        "completion_tokens": 6850,
+        "total_tokens": 13366
+      },
+      "timestamp": "2026-02-16 09:24:51",
+      "queries": [
+        {
+          "question": "Which suppliers received the highest total payments across December 2025 and April 2025?",
+          "code": "combined = pd.concat([Table_0, Table_1]).drop_duplicates(subset=['Department','Organisation','Supplier','Postcode'])\ncombined['Invoice Amount Numeric'] = combined['Invoice Amount'].str.replace('[£,]','', regex=True).astype(float)\ntop_suppliers = (combined\n                .groupby('Supplier')['Invoice Amount Numeric']\n                .sum()\n                .reset_index()\n                .rename(columns={'Invoice Amount Numeric':'Total Paid'})\n                .sort_values('Total Paid', ascending=False)\n                .head(5))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Supplier",
+            "Invoice Amount"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "How many invoices over £100,000 are there for each postcode across December 2025 and April 2025?",
+          "code": "combined = pd.concat([Table_0, Table_1]).drop_duplicates(subset=['Department','Organisation','Supplier','Postcode'])\ncombined['Invoice Amount Numeric'] = combined['Invoice Amount'].str.replace('[£,]','', regex=True).astype(float)\nhigh_value_counts = (combined[combined['Invoice Amount Numeric'] > 100000]\n                     .groupby('Postcode')\n                     .size()\n                     .reset_index(name='Invoice Count'))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Postcode",
+            "Invoice Amount"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the total invoice amount spent by each department across December 2025 and April 2025?",
+          "code": "combined = pd.concat([Table_0, Table_1]).drop_duplicates(subset=['Department','Organisation','Supplier','Postcode'])\ncombined['Invoice Amount Numeric'] = combined['Invoice Amount'].str.replace('[£,]','', regex=True).astype(float)\ndept_spend = (combined\n             .groupby('Department')['Invoice Amount Numeric']\n             .sum()\n             .reset_index()\n             .rename(columns={'Invoice Amount Numeric':'Total Spend'}))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Department",
+            "Organisation",
+            "Supplier",
+            "Postcode",
+            "Invoice Amount"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the monthly total spend trend across December 2025 and April 2025?",
+          "code": "combined = pd.concat([Table_0, Table_1]).drop_duplicates(subset=['Department','Organisation','Supplier','Postcode'])\ncombined['Invoice Amount Numeric'] = combined['Invoice Amount'].str.replace('[£,]','', regex=True).astype(float)\ncombined['Check Date'] = pd.to_datetime(combined['Check Date'], errors='coerce')\nmonthly_trend = (combined\n                 .groupby(combined['Check Date'].dt.to_period('M'))['Invoice Amount Numeric']\n                 .sum()\n                 .reset_index()\n                 .rename(columns={'Check Date':'Month','Invoice Amount Numeric':'Total Spend'}))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Check Date",
+            "Invoice Amount"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "How does the average invoice amount for each expense type differ between December 2025 and April 2025?",
+          "code": "# Prepare numeric amount for each table\nt0 = Table_0.copy()\nt0['Amt'] = t0['Invoice Amount'].str.replace('[£,]','', regex=True).astype(float)\n\nt1 = Table_1.copy()\nt1['Amt'] = t1['Invoice Amount'].str.replace('[£,]','', regex=True).astype(float)\n\n# Average per expense type per month\navg0 = t0.groupby('Expense type')['Amt'].mean().reset_index().rename(columns={'Amt':'Avg_Dec2025'})\navg1 = t1.groupby('Expense type')['Amt'].mean().reset_index().rename(columns={'Amt':'Avg_Apr2025'})\n\n# Merge to compare\ncompare = avg0.merge(avg1, on='Expense type', how='outer')",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Expense type",
+            "Invoice Amount"
+          ],
+          "difficulty": 3
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 6,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-June-2025__8386b8e4-8bf7-4037-be62-4c43958d3217"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Department, Organisation, Supplier, Postcode"
+      ],
+      "generation_time_seconds": 31.61,
+      "usage": {
+        "prompt_tokens": 6522,
+        "completion_tokens": 7656,
+        "total_tokens": 14178
+      },
+      "timestamp": "2026-02-16 09:25:23",
+      "queries": [
+        {
+          "question": "Which suppliers received the highest total spend across both months, and what are the top five suppliers?",
+          "code": "(pd.concat([Table_0, Table_1], ignore_index=True)\n    .assign(Invoice_Amount_numeric=lambda df: df['Invoice Amount'].str.replace('[£,]', '', regex=True).astype(float))\n    .groupby('Supplier', as_index=False)['Invoice_Amount_numeric'].sum()\n    .sort_values('Invoice_Amount_numeric', ascending=False)\n    .head(5)\n    .rename(columns={'Invoice_Amount_numeric': 'Total Spend'}))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Invoice Amount",
+            "Supplier"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "What is the total departmental spend for each check date across June and December 2025?",
+          "code": "(pd.concat([Table_0, Table_1], ignore_index=True)\n    .assign(Invoice_Amount_numeric=lambda df: df['Invoice Amount'].str.replace('[£,]', '', regex=True).astype(float))\n    .groupby('Check Date', as_index=False)['Invoice_Amount_numeric'].sum()\n    .rename(columns={'Invoice_Amount_numeric': 'Total Spend'}))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Invoice Amount",
+            "Check Date"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Are there any invoice numbers that appear in both the June and December datasets, indicating possible duplicate billing?",
+          "code": "pd.Series(list(set(Table_0['Invoice number']).intersection(set(Table_1['Invoice number']))), name='Duplicate Invoice Numbers')",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Invoice number"
+          ],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 7,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-April-2025__2de5ca7c-6cad-4670-ab17-a83310f78291"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Department, Organisation, Supplier, Postcode"
+      ],
+      "generation_time_seconds": 9.42,
+      "usage": {
+        "prompt_tokens": 2172,
+        "completion_tokens": 2288,
+        "total_tokens": 4460
+      },
+      "timestamp": "2026-02-16 09:25:32",
+      "queries": [
+        {
+          "question": "What is the total spend for each department across December 2025 and April 2025?",
+          "code": "combined = pd.concat([Table_0, Table_1], ignore_index=True).drop_duplicates(subset=['Department', 'Organisation', 'Supplier', 'Postcode'])\ncombined = combined.assign(Invoice_Amount_clean = combined['Invoice Amount']\n                                            .str.replace('[£,]', '', regex=True)\n                                            .astype(float))\ndept_spend = (combined\n              .groupby('Department')['Invoice_Amount_clean']\n              .sum()\n              .reset_index()\n              .rename(columns={'Invoice_Amount_clean': 'Total Spend (£)'}))\ndept_spend",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Department",
+            "Organisation",
+            "Supplier",
+            "Postcode",
+            "Invoice Amount",
+            "Invoice_Amount_clean",
+            "Total Spend (£)"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which five suppliers received the highest total payments across the two periods?",
+          "code": "combined = pd.concat([Table_0, Table_1], ignore_index=True).drop_duplicates(subset=['Department', 'Organisation', 'Supplier', 'Postcode'])\ncombined = combined.assign(Invoice_Amount_clean = combined['Invoice Amount']\n                                            .str.replace('[£,]', '', regex=True)\n                                            .astype(float))\ntop_suppliers = (combined\n                 .groupby('Supplier')['Invoice_Amount_clean']\n                 .sum()\n                 .reset_index()\n                 .rename(columns={'Invoice_Amount_clean': 'Total Paid (£)'})\n                 .sort_values('Total Paid (£)', ascending=False)\n                 .head(5))\ntop_suppliers",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Supplier",
+            "Invoice Amount",
+            "Invoice_Amount_clean",
+            "Total Paid (£)"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "How does the average invoice amount differ between December 2025 and April 2025?",
+          "code": "combined = pd.concat([Table_0, Table_1], ignore_index=True).drop_duplicates(subset=['Department', 'Organisation', 'Supplier', 'Postcode'])\ncombined = combined.assign(\n    Invoice_Amount_clean = combined['Invoice Amount']\n        .str.replace('[£,]', '', regex=True)\n        .astype(float),\n    Check_Date = pd.to_datetime(combined['Check Date'], errors='coerce')\n)\ncombined = combined.assign(Month_Year = combined['Check_Date'].dt.to_period('M').astype(str))\navg_by_month = (combined\n                .groupby('Month_Year')['Invoice_Amount_clean']\n                .mean()\n                .reset_index()\n                .rename(columns={'Invoice_Amount_clean': 'Average Invoice (£)'}))\navg_by_month",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Check Date",
+            "Invoice Amount",
+            "Invoice_Amount_clean",
+            "Check_Date",
+            "Month_Year",
+            "Average Invoice (£)"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "How many distinct expense types were recorded for each organisation across both months?",
+          "code": "combined = pd.concat([Table_0, Table_1], ignore_index=True).drop_duplicates(subset=['Department', 'Organisation', 'Supplier', 'Postcode'])\nexpense_counts = (combined\n                  .groupby('Organisation')['Expense type']\n                  .nunique()\n                  .reset_index()\n                  .rename(columns={'Expense type': 'Distinct Expense Types'}))\nexpense_counts",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Organisation",
+            "Expense type",
+            "Distinct Expense Types"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Are there any invoice numbers that appear in both the December and April datasets, and what are their total amounts?",
+          "code": "combined = pd.concat([Table_0, Table_1], ignore_index=True).drop_duplicates(subset=['Department', 'Organisation', 'Supplier', 'Postcode'])\ncombined = combined.assign(Invoice_Amount_clean = combined['Invoice Amount']\n                                            .str.replace('[£,]', '', regex=True)\n                                            .astype(float))\nduplicate_invoices = (combined\n                      .groupby('Invoice number')\n                      .filter(lambda x: len(x) > 1)\n                      .groupby('Invoice number')['Invoice_Amount_clean']\n                      .sum()\n                      .reset_index()\n                      .rename(columns={'Invoice_Amount_clean': 'Total Amount (£)'}))\nduplicate_invoices",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Invoice number",
+            "Invoice Amount",
+            "Invoice_Amount_clean",
+            "Total Amount (£)"
+          ],
+          "difficulty": 3
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 8,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-October-2025__b48c6a8b-8a7a-4a55-ab0f-a5393b7ab213"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Department, Organisation, Supplier, Postcode"
+      ],
+      "generation_time_seconds": 29.29,
+      "usage": {
+        "prompt_tokens": 6537,
+        "completion_tokens": 7140,
+        "total_tokens": 13677
+      },
+      "timestamp": "2026-02-16 09:26:02",
+      "queries": [
+        {
+          "question": "What was the total invoice amount spent in each check date across October and December 2025?",
+          "code": "combined = pd.concat([Table_0, Table_1])\nresult = (\n    combined\n    .assign(Invoice_Amount_num=combined['Invoice Amount']\n            .str.replace('[£,]', '', regex=True)\n            .astype(float))\n    .groupby('Check Date', as_index=False)['Invoice_Amount_num']\n    .sum()\n    .rename(columns={'Invoice_Amount_num': 'Total Invoice Amount'})\n)\nresult",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Invoice Amount",
+            "Check Date"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which five suppliers received the highest total invoice amounts across October and December 2025?",
+          "code": "combined = pd.concat([Table_0, Table_1])\ntop_suppliers = (\n    combined\n    .assign(Invoice_Amount_num=combined['Invoice Amount']\n            .str.replace('[£,]', '', regex=True)\n            .astype(float))\n    .groupby('Supplier', as_index=False)['Invoice_Amount_num']\n    .sum()\n    .sort_values('Invoice_Amount_num', ascending=False)\n    .head(5)\n    .rename(columns={'Invoice_Amount_num': 'Total Invoice Amount'})\n)\ntop_suppliers",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Invoice Amount",
+            "Supplier"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which departments saw an increase in total spend from October to December 2025?",
+          "code": "dec = (\n    Table_0\n    .assign(Amount=Table_0['Invoice Amount']\n            .str.replace('[£,]', '', regex=True)\n            .astype(float))\n    .groupby('Department', as_index=False)['Amount']\n    .sum()\n    .rename(columns={'Amount': 'Dec_Spend'})\n)\noct = (\n    Table_1\n    .assign(Amount=Table_1['Invoice Amount']\n            .str.replace('[£,]', '', regex=True)\n            .astype(float))\n    .groupby('Department', as_index=False)['Amount']\n    .sum()\n    .rename(columns={'Amount': 'Oct_Spend'})\n)\nincrease = (\n    dec.merge(oct, on='Department')\n    .query('Dec_Spend > Oct_Spend')\n    [['Department', 'Oct_Spend', 'Dec_Spend']]\n)\nincrease",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Invoice Amount",
+            "Department"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "For which postcodes does a single supplier contribute more than 50% of the total spend across October and December 2025?",
+          "code": "combined = pd.concat([Table_0, Table_1])\ncombined = combined.assign(Amount=combined['Invoice Amount']\n                              .str.replace('[£,]', '', regex=True)\n                              .astype(float))\n# total spend per postcode\npostcode_total = (\n    combined\n    .groupby('Postcode', as_index=False)['Amount']\n    .sum()\n    .rename(columns={'Amount': 'Postcode_Total'})\n)\n# spend per postcode per supplier\nsupplier_postcode = (\n    combined\n    .groupby(['Postcode', 'Supplier'], as_index=False)['Amount']\n    .sum()\n    .rename(columns={'Amount': 'Supplier_Postcode_Spend'})\n)\n# merge and compute share\nshare = (\n    supplier_postcode\n    .merge(postcode_total, on='Postcode')\n    .assign(Share=lambda df: df['Supplier_Postcode_Spend'] / df['Postcode_Total'])\n    .query('Share > 0.5')\n    [['Postcode', 'Supplier', 'Share']]\n)\nshare",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Invoice Amount",
+            "Postcode",
+            "Supplier"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 9,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-April-2025__2de5ca7c-6cad-4670-ab17-a83310f78291"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Department = Table_1.Department AND Table_0.Organisation = Table_1.Organisation"
+      ],
+      "generation_time_seconds": 16.24,
+      "usage": {
+        "prompt_tokens": 2184,
+        "completion_tokens": 3943,
+        "total_tokens": 6127
+      },
+      "timestamp": "2026-02-16 09:26:18",
+      "queries": [
+        {
+          "question": "What was the total departmental spend for December 2025 and April 2025?",
+          "code": "import pandas as pd\n\n# Clean amount columns\ndec_amount = Table_0['Invoice Amount'].replace('[£,]', '', regex=True).astype(float)\napr_amount = Table_1['Invoice Amount'].replace('[£,]', '', regex=True).astype(float)\n\ntotal_dec = dec_amount.sum()\ntotal_apr = apr_amount.sum()\n\nresult = pd.DataFrame({\n    'Month': ['December 2025', 'April 2025'],\n    'Total Spend (£)': [total_dec, total_apr]\n})",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Invoice Amount"
+          ],
+          "difficulty": 1
+        },
+        {
+          "question": "Which suppliers accounted for the highest combined spend across December 2025 and April 2025, and what are their total amounts?",
+          "code": "import pandas as pd\n\n# Prepare December data\ndec = Table_0[['Supplier', 'Invoice Amount']].copy()\ndec['Invoice Amount'] = dec['Invoice Amount'].replace('[£,]', '', regex=True).astype(float)\n\n# Prepare April data\napr = Table_1[['Supplier', 'Invoice Amount']].copy()\napr['Invoice Amount'] = apr['Invoice Amount'].replace('[£,]', '', regex=True).astype(float)\n\n# Combine both months\ncombined = pd.concat([dec, apr], ignore_index=True)\n\n# Top 5 suppliers by total spend\ntop_suppliers = (\n    combined.groupby('Supplier')['Invoice Amount']\n    .sum()\n    .sort_values(ascending=False)\n    .head(5)\n    .reset_index()\n    .rename(columns={'Invoice Amount': 'Total Spend (£)'})\n)\n",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Supplier",
+            "Invoice Amount"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "For which expense types did the spend increase from April 2025 to December 2025, and by how much?",
+          "code": "import pandas as pd\n\n# December spend per expense type\ndec = Table_0[['Expense type', 'Invoice Amount']].copy()\ndec['Invoice Amount'] = dec['Invoice Amount'].replace('[£,]', '', regex=True).astype(float)\ndec_sum = dec.groupby('Expense type')['Invoice Amount'].sum().rename('Dec_Spend')\n\n# April spend per expense type\napr = Table_1[['Expense type', 'Invoice Amount']].copy()\napr['Invoice Amount'] = apr['Invoice Amount'].replace('[£,]', '', regex=True).astype(float)\napr_sum = apr.groupby('Expense type')['Invoice Amount'].sum().rename('Apr_Spend')\n\n# Compare\nspend_compare = pd.concat([apr_sum, dec_sum], axis=1).fillna(0)\nspend_compare['Increase'] = spend_compare['Dec_Spend'] - spend_compare['Apr_Spend']\n\nresult = (\n    spend_compare[spend_compare['Increase'] > 0]\n    .sort_values('Increase', ascending=False)\n    .reset_index()\n)\n",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Expense type",
+            "Invoice Amount"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "Which postcodes contributed more than 60% of the total spend in December 2025, and what is their share of the combined spend for both months?",
+          "code": "import pandas as pd\n\n# December spend per postcode\ndec = Table_0[['Postcode', 'Invoice Amount']].copy()\ndec['Invoice Amount'] = dec['Invoice Amount'].replace('[£,]', '', regex=True).astype(float)\ndec_sum = dec.groupby('Postcode')['Invoice Amount'].sum().rename('Dec_Spend')\n\n# April spend per postcode\napr = Table_1[['Postcode', 'Invoice Amount']].copy()\napr['Invoice Amount'] = apr['Invoice Amount'].replace('[£,]', '', regex=True).astype(float)\napr_sum = apr.groupby('Postcode')['Invoice Amount'].sum().rename('Apr_Spend')\n\n# Combine\ncombined = pd.concat([dec_sum, apr_sum], axis=1).fillna(0)\ncombined['Total_Spend'] = combined['Dec_Spend'] + combined['Apr_Spend']\ncombined['Dec_Percent'] = combined['Dec_Spend'] / combined['Total_Spend'] * 100\n\nresult = (\n    combined[combined['Dec_Percent'] > 60]\n    .reset_index()\n    .sort_values('Dec_Percent', ascending=False)\n)\n",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Postcode",
+            "Invoice Amount"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "Which departments showed a month‑over‑month spend growth greater than 20% from April 2025 to December 2025, and did their top supplier change between the two months?",
+          "code": "import pandas as pd\n\n# December data preparation\ndec = Table_0[['Department', 'Organisation', 'Supplier', 'Invoice Amount']].copy()\ndec['Invoice Amount'] = dec['Invoice Amount'].replace('[£,]', '', regex=True).astype(float)\ndec_group = dec.groupby(['Department', 'Organisation', 'Supplier'])['Invoice Amount'].sum().reset_index()\ndec_total = dec_group.groupby(['Department', 'Organisation'])['Invoice Amount'].sum().rename('Dec_Total').reset_index()\ndec_top = (\n    dec_group.sort_values('Invoice Amount', ascending=False)\n    .groupby(['Department', 'Organisation'])\n    .first()\n    .reset_index()\n    .rename(columns={'Supplier': 'Dec_Top_Supplier', 'Invoice Amount': 'Dec_Top_Spend'})\n)\n\n# April data preparation\napr = Table_1[['Department', 'Organisation', 'Supplier', 'Invoice Amount']].copy()\napr['Invoice Amount'] = apr['Invoice Amount'].replace('[£,]', '', regex=True).astype(float)\napr_group = apr.groupby(['Department', 'Organisation', 'Supplier'])['Invoice Amount'].sum().reset_index()\napr_total = apr_group.groupby(['Department', 'Organisation'])['Invoice Amount'].sum().rename('Apr_Total').reset_index()\napr_top = (\n    apr_group.sort_values('Invoice Amount', ascending=False)\n    .groupby(['Department', 'Organisation'])\n    .first()\n    .reset_index()\n    .rename(columns={'Supplier': 'Apr_Top_Supplier', 'Invoice Amount': 'Apr_Top_Spend'})\n)\n\n# Merge totals and top suppliers\nmerged = dec_total.merge(apr_total, on=['Department', 'Organisation'])\nmerged = merged.merge(dec_top[['Department', 'Organisation', 'Dec_Top_Supplier']], on=['Department', 'Organisation'])\nmerged = merged.merge(apr_top[['Department', 'Organisation', 'Apr_Top_Supplier']], on=['Department', 'Organisation'])\n\n# Calculate growth percentage\nmerged['Growth_%'] = (merged['Dec_Total'] - merged['Apr_Total']) / merged['Apr_Total'] * 100\n\n# Filter departments with >20% growth and a change in top supplier\nresult = merged[(merged['Growth_%'] > 20) & (merged['Dec_Top_Supplier'] != merged['Apr_Top_Supplier'])]\n",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Department",
+            "Organisation",
+            "Supplier",
+            "Invoice Amount"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 11,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-June-2025__8386b8e4-8bf7-4037-be62-4c43958d3217"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Department = Table_1.Department AND Table_0.Organisation = Table_1.Organisation"
+      ],
+      "generation_time_seconds": 15.08,
+      "usage": {
+        "prompt_tokens": 2186,
+        "completion_tokens": 3714,
+        "total_tokens": 5900
+      },
+      "timestamp": "2026-02-16 09:27:10",
+      "queries": [
+        {
+          "question": "What is the total combined spend for each department and organisation across December 2025 and June 2025?",
+          "code": "(\n    Table_0.assign(Invoice_Amount_dec=Table_0['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\n    .merge(\n        Table_1.assign(Invoice_Amount_jun=Table_1['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float)),\n        on=['Department','Organisation'],\n        how='inner'\n    )\n    .assign(Total_Spend=lambda df: df['Invoice_Amount_dec'] + df['Invoice_Amount_jun'])\n    .groupby(['Department','Organisation'], as_index=False)['Total_Spend'].sum()\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Department",
+            "Organisation",
+            "Invoice Amount"
+          ],
+          "difficulty": 1
+        },
+        {
+          "question": "How does the total spend compare between December 2025 and June 2025 for each department?",
+          "code": "dec_sum = (\n    Table_0.assign(Invoice_Amount_dec=Table_0['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\n    .groupby(['Department','Organisation'], as_index=False)['Invoice_Amount_dec'].sum()\n    .rename(columns={'Invoice_Amount_dec':'Dec_Spend'})\n)\n\njun_sum = (\n    Table_1.assign(Invoice_Amount_jun=Table_1['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\n    .groupby(['Department','Organisation'], as_index=False)['Invoice_Amount_jun'].sum()\n    .rename(columns={'Invoice_Amount_jun':'Jun_Spend'})\n)\n\nresult = dec_sum.merge(jun_sum, on=['Department','Organisation'], how='inner')",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Department",
+            "Organisation",
+            "Invoice Amount"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which five suppliers have the highest combined spend across both months?",
+          "code": "(\n    pd.concat([\n        Table_0.assign(Invoice_Amount=Table_0['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float)),\n        Table_1.assign(Invoice_Amount=Table_1['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\n    ])\n    .groupby('Supplier', as_index=False)['Invoice_Amount'].sum()\n    .sort_values('Invoice_Amount', ascending=False)\n    .head(5)\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Supplier",
+            "Invoice Amount"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "For which expense types did the spend increase by more than 20% from June 2025 to December 2025?",
+          "code": "dec = (\n    Table_0.assign(Invoice_Amount=Table_0['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\n    .groupby('Expense type', as_index=False)['Invoice_Amount'].sum()\n    .rename(columns={'Invoice_Amount':'Dec_Spend'})\n)\n\njun = (\n    Table_1.assign(Invoice_Amount=Table_1['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\n    .groupby('Expense type', as_index=False)['Invoice_Amount'].sum()\n    .rename(columns={'Invoice_Amount':'Jun_Spend'})\n)\n\nmerged = dec.merge(jun, on='Expense type', how='inner')\nresult = (\n    merged.assign(Pct_Change=lambda df: (df['Dec_Spend'] - df['Jun_Spend']) / df['Jun_Spend'] * 100)\n    .query('Pct_Change > 20')[['Expense type','Dec_Spend','Jun_Spend','Pct_Change']]\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Expense type",
+            "Invoice Amount"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "What is the month‑over‑month change in average invoice amount for each postcode, and which postcodes saw an increase greater than 15%?",
+          "code": "dec_avg = (\n    Table_0.assign(Invoice_Amount=Table_0['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\n    .groupby('Postcode', as_index=False)['Invoice_Amount'].mean()\n    .rename(columns={'Invoice_Amount':'Dec_Avg'})\n)\n\njun_avg = (\n    Table_1.assign(Invoice_Amount=Table_1['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\n    .groupby('Postcode', as_index=False)['Invoice_Amount'].mean()\n    .rename(columns={'Invoice_Amount':'Jun_Avg'})\n)\n\nmerged = dec_avg.merge(jun_avg, on='Postcode', how='inner')\nresult = (\n    merged.assign(Pct_Change=lambda df: (df['Dec_Avg'] - df['Jun_Avg']) / df['Jun_Avg'] * 100)\n    .assign(Increase_Over_15=lambda df: df['Pct_Change'] > 15)\n    .sort_values('Pct_Change', ascending=False)\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Postcode",
+            "Invoice Amount"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 12,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-April-2025__2de5ca7c-6cad-4670-ab17-a83310f78291"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Department = Table_1.Department AND Table_0.Organisation = Table_1.Organisation"
+      ],
+      "generation_time_seconds": 14.49,
+      "usage": {
+        "prompt_tokens": 2184,
+        "completion_tokens": 3561,
+        "total_tokens": 5745
+      },
+      "timestamp": "2026-02-16 09:27:24",
+      "queries": [
+        {
+          "question": "What is the total invoice amount for December 2025 compared to April 2025 for each department?",
+          "code": "(\n    Table_0.assign(Invoice_Amount_dec=lambda x: x['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\n    .merge(\n        Table_1.assign(Invoice_Amount_apr=lambda x: x['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float)),\n        on=['Department', 'Organisation'],\n        suffixes=('_dec', '_apr')\n    )\n    .groupby(['Department', 'Organisation'])\n    .agg(Total_December=('Invoice_Amount_dec', 'sum'), Total_April=('Invoice_Amount_apr', 'sum'))\n    .reset_index()\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Department",
+            "Organisation",
+            "Invoice Amount"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which suppliers had the highest combined spend across December 2025 and April 2025?",
+          "code": "combined = pd.concat([\n    Table_0.assign(Invoice_Amount=lambda x: x['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))[['Supplier', 'Invoice_Amount']],\n    Table_1.assign(Invoice_Amount=lambda x: x['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))[['Supplier', 'Invoice_Amount']]\n])\n\ntop_suppliers = (\n    combined.groupby('Supplier')\n    .agg(Total_Spend=('Invoice_Amount', 'sum'))\n    .sort_values('Total_Spend', ascending=False)\n    .head(5)\n    .reset_index()\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Supplier",
+            "Invoice Amount"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "In which departments did the spend increase by more than 20% from April 2025 to December 2025?",
+          "code": "merged = (\n    Table_0.assign(Dec_Amount=lambda x: x['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\n    .merge(\n        Table_1.assign(Apr_Amount=lambda x: x['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float)),\n        on=['Department', 'Organisation'],\n        suffixes=('_dec', '_apr')\n    )\n)\n\nresult = (\n    merged.groupby(['Department', 'Organisation'])\n    .agg(Dec_Total=('Dec_Amount', 'sum'), Apr_Total=('Apr_Amount', 'sum'))\n    .assign(Pct_Change=lambda df: (df['Dec_Total'] - df['Apr_Total']) / df['Apr_Total'] * 100)\n    .query('Pct_Change > 20')\n    .reset_index()\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Department",
+            "Organisation",
+            "Invoice Amount"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "For each organisation, which suppliers show the greatest variability in invoice amounts between December 2025 and April 2025?",
+          "code": "dec = Table_0.assign(Amount=lambda x: x['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\napr = Table_1.assign(Amount=lambda x: x['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\n\ncombined = pd.concat([\n    dec[['Organisation', 'Supplier', 'Amount']],\n    apr[['Organisation', 'Supplier', 'Amount']]\n])\n\nvar_df = (\n    combined.groupby(['Organisation', 'Supplier'])\n    .agg(Mean_Amount=('Amount', 'mean'), Std_Amount=('Amount', 'std'))\n    .reset_index()\n    .sort_values(['Organisation', 'Std_Amount'], ascending=[True, False])\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Organisation",
+            "Supplier",
+            "Invoice Amount"
+          ],
+          "difficulty": 5
+        },
+        {
+          "question": "Are there any invoice numbers that appear in both April 2025 and December 2025 for the same department and organisation, and if so, how do their amounts differ?",
+          "code": "merged_inv = (\n    Table_0.assign(Dec_Amount=lambda x: x['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float))\n    .merge(\n        Table_1.assign(Apr_Amount=lambda x: x['Invoice Amount'].str.replace('[£,]','',regex=True).astype(float)),\n        on=['Invoice number', 'Department', 'Organisation'],\n        suffixes=('_dec', '_apr')\n    )\n)\n\ndiff = (\n    merged_inv.assign(Amount_Diff=lambda df: df['Dec_Amount'] - df['Apr_Amount'])\n    [['Invoice number', 'Department', 'Organisation', 'Dec_Amount', 'Apr_Amount', 'Amount_Diff']]\n    .query('Amount_Diff != 0')\n    .reset_index(drop=True)\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Invoice number",
+            "Department",
+            "Organisation",
+            "Invoice Amount"
+          ],
+          "difficulty": 3
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 13,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-October-2025__b48c6a8b-8a7a-4a55-ab0f-a5393b7ab213"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Department = Table_1.Department AND Table_0.Organisation = Table_1.Organisation"
+      ],
+      "generation_time_seconds": 38.86,
+      "usage": {
+        "prompt_tokens": 4382,
+        "completion_tokens": 8246,
+        "total_tokens": 12628
+      },
+      "timestamp": "2026-02-16 09:28:03",
+      "queries": [
+        {
+          "question": "What was the total departmental spend for December 2025 compared to October 2025?",
+          "code": "merged = Table_0.merge(Table_1, on=['Department','Organisation'], suffixes=('_dec','_oct'))\n\ndec_total = merged['Invoice Amount_dec'].str.replace('£','').str.replace(',','').astype(float).sum()\noct_total = merged['Invoice Amount_oct'].str.replace('£','').str.replace(',','').astype(float).sum()\n\nresult = pd.DataFrame({\n    'Month': ['December 2025','October 2025'],\n    'Total Spend (£)': [dec_total, oct_total]\n})\nresult",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Department",
+            "Organisation",
+            "Invoice Amount_dec",
+            "Invoice Amount_oct"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which suppliers had the highest combined spend across October and December 2025, and what are the top five?",
+          "code": "dec = (Table_0.assign(Amount=Table_0['Invoice Amount']\n                      .str.replace('£','')\n                      .str.replace(',','')\n                      .astype(float))\n       .groupby('Supplier')['Amount']\n       .sum()\n       .reset_index()\n       .rename(columns={'Amount':'Dec_Spend'}))\n\noct = (Table_1.assign(Amount=Table_1['Invoice Amount']\n                      .str.replace('£','')\n                      .str.replace(',','')\n                      .astype(float))\n       .groupby('Supplier')['Amount']\n       .sum()\n       .reset_index()\n       .rename(columns={'Amount':'Oct_Spend'}))\n\ncombined = dec.merge(oct, on='Supplier', how='outer').fillna(0)\ncombined['Combined_Spend'] = combined['Dec_Spend'] + combined['Oct_Spend']\n\ntop5 = combined.sort_values('Combined_Spend', ascending=False).head(5)\ntop5",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Supplier",
+            "Invoice Amount",
+            "Dec_Spend",
+            "Oct_Spend",
+            "Combined_Spend"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "What are the top three expense types with the greatest month‑over‑month growth from October to December 2025, and which supplier contributed the most to each of those expense types?",
+          "code": "# Compute spend per expense type per month\ndec_exp = (Table_0.assign(Amount=Table_0['Invoice Amount']\n                          .str.replace('£','')\n                          .str.replace(',','')\n                          .astype(float))\n           .groupby('Expense type')['Amount']\n           .sum()\n           .reset_index()\n           .rename(columns={'Amount':'Dec_Spend'}))\n\noct_exp = (Table_1.assign(Amount=Table_1['Invoice Amount']\n                          .str.replace('£','')\n                          .str.replace(',','')\n                          .astype(float))\n           .groupby('Expense type')['Amount']\n           .sum()\n           .reset_index()\n           .rename(columns={'Amount':'Oct_Spend'}))\n\ngrowth = dec_exp.merge(oct_exp, on='Expense type')\ngrowth['Growth_Rate'] = (growth['Dec_Spend'] - growth['Oct_Spend']) / growth['Oct_Spend']\n\ntop3 = growth.nlargest(3, 'Growth_Rate')[['Expense type','Growth_Rate']]\n\n# For each of these expense types, find the supplier with highest combined spend\ndef top_supplier(exp_type):\n    dec_sup = (Table_0[Table_0['Expense type']==exp_type]\n               .assign(Amount=Table_0['Invoice Amount']\n                       .str.replace('£','')\n                       .str.replace(',','')\n                       .astype(float))\n               .groupby('Supplier')['Amount']\n               .sum()\n               .reset_index()\n               .rename(columns={'Amount':'Dec_Spend'}))\n    oct_sup = (Table_1[Table_1['Expense type']==exp_type]\n               .assign(Amount=Table_1['Invoice Amount']\n                       .str.replace('£','')\n                       .str.replace(',','')\n                       .astype(float))\n               .groupby('Supplier')['Amount']\n               .sum()\n               .reset_index()\n               .rename(columns={'Amount':'Oct_Spend'}))\n    sup = dec_sup.merge(oct_sup, on='Supplier', how='outer').fillna(0)\n    sup['Combined'] = sup['Dec_Spend'] + sup['Oct_Spend']\n    return sup.loc[sup['Combined'].idxmax(), 'Supplier']\n\ntop3['Top Supplier'] = top3['Expense type'].apply(top_supplier)\ntop3",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Expense type",
+            "Invoice Amount",
+            "Dec_Spend",
+            "Oct_Spend",
+            "Growth_Rate",
+            "Supplier",
+            "Combined"
+          ],
+          "difficulty": 5
+        },
+        {
+          "question": "Which expense types saw an increase in spend from October 2025 to December 2025?",
+          "code": "dec_exp = (Table_0.assign(Amount=Table_0['Invoice Amount']\n                          .str.replace('£','')\n                          .str.replace(',','')\n                          .astype(float))\n           .groupby('Expense type')['Amount']\n           .sum()\n           .reset_index()\n           .rename(columns={'Amount':'Dec_Spend'}))\n\noct_exp = (Table_1.assign(Amount=Table_1['Invoice Amount']\n                          .str.replace('£','')\n                          .str.replace(',','')\n                          .astype(float))\n           .groupby('Expense type')['Amount']\n           .sum()\n           .reset_index()\n           .rename(columns={'Amount':'Oct_Spend'}))\n\ngrowth = dec_exp.merge(oct_exp, on='Expense type')\nincrease = growth[growth['Dec_Spend'] > growth['Oct_Spend']].sort_values('Dec_Spend', ascending=False)\nincrease",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Expense type",
+            "Invoice Amount",
+            "Dec_Spend",
+            "Oct_Spend"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "For which postcodes is the average invoice amount in December 2025 at least 20% higher than in October 2025?",
+          "code": "dec_post = (Table_0.assign(Amount=Table_0['Invoice Amount']\n                           .str.replace('£','')\n                           .str.replace(',','')\n                           .astype(float))\n                .groupby('Postcode')['Amount']\n                .mean()\n                .reset_index()\n                .rename(columns={'Amount':'Dec_Avg'}))\n\noct_post = (Table_1.assign(Amount=Table_1['Invoice Amount']\n                           .str.replace('£','')\n                           .str.replace(',','')\n                           .astype(float))\n                .groupby('Postcode')['Amount']\n                .mean()\n                .reset_index()\n                .rename(columns={'Amount':'Oct_Avg'}))\n\ncompare = dec_post.merge(oct_post, on='Postcode')\nresult = compare[compare['Dec_Avg'] >= 1.20 * compare['Oct_Avg']].sort_values('Dec_Avg', ascending=False)\nresult",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Postcode",
+            "Invoice Amount",
+            "Dec_Avg",
+            "Oct_Avg"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 14,
+      "aliases": {
+        "Table_0": "Meat-Establishment-Audits-as-at-1-May-2023__826b6b31-cba2-4f8a-8857-81fce7cd8b15",
+        "Table_1": "Meat-Establishment-Audits-as-at-1-May-2024__bdd5fbc6-c7a7-42ac-8922-a2b9708a0bcf"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Activity, RSL, PSL, GHE, RCP, PCP, MIN, PRO, MSM, CLS"
+      ],
+      "generation_time_seconds": 36.5,
+      "usage": {
+        "prompt_tokens": 7377,
+        "completion_tokens": 8435,
+        "total_tokens": 15812
+      },
+      "timestamp": "2026-02-16 09:28:40",
+      "queries": [
+        {
+          "question": "How many meat establishments are recorded in each country across 2023 and 2024 combined?",
+          "code": "audits = (\n    pd.concat([Table_0.assign(Year=2023), Table_1.assign(Year=2024)], ignore_index=True)\n      .drop_duplicates(subset=['PCP','PRO','RSL','CLS','RCP','GHE','Activity','PSL','MSM','MIN'])\n)\n\ncountry_counts = audits.groupby('Country')['TradingName'].nunique().reset_index(name='EstablishmentCount')",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Year",
+            "PCP",
+            "PRO",
+            "RSL",
+            "CLS",
+            "RCP",
+            "GHE",
+            "Activity",
+            "PSL",
+            "MSM",
+            "MIN",
+            "Country",
+            "TradingName"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What percentage of establishments have a Positive Control Plan (PCP) in each activity type across both years?",
+          "code": "audits = (\n    pd.concat([Table_0.assign(Year=2023), Table_1.assign(Year=2024)], ignore_index=True)\n      .drop_duplicates(subset=['PCP','PRO','RSL','CLS','RCP','GHE','Activity','PSL','MSM','MIN'])\n)\n\npcp_pct = (\n    audits.groupby('Activity')\n          .apply(lambda df: pd.Series({\n              'Total': df['TradingName'].nunique(),\n              'PCP_Yes': df.loc[df['PCP'] == 'Yes', 'TradingName'].nunique()\n          }))\n          .reset_index()\n)\npcp_pct['PCP_Percent'] = (pcp_pct['PCP_Yes'] / pcp_pct['Total'] * 100).round(2)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Year",
+            "PCP",
+            "PRO",
+            "RSL",
+            "CLS",
+            "RCP",
+            "GHE",
+            "Activity",
+            "PSL",
+            "MSM",
+            "MIN",
+            "TradingName"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "Which towns have the highest number of establishments that are both RSL compliant and have Good Hygiene Evaluation (GHE) marked as Yes?",
+          "code": "audits = (\n    pd.concat([Table_0.assign(Year=2023), Table_1.assign(Year=2024)], ignore_index=True)\n      .drop_duplicates(subset=['PCP','PRO','RSL','CLS','RCP','GHE','Activity','PSL','MSM','MIN'])\n)\n\ntown_counts = (\n    audits.loc[(audits['RSL'] == 'Yes') & (audits['GHE'] == 'Yes')]\n          .groupby('Town')['TradingName']\n          .nunique()\n          .reset_index(name='Establishments')\n          .sort_values('Establishments', ascending=False)\n          .head(10)\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Year",
+            "PCP",
+            "PRO",
+            "RSL",
+            "CLS",
+            "RCP",
+            "GHE",
+            "Activity",
+            "PSL",
+            "MSM",
+            "MIN",
+            "Town",
+            "TradingName"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "How did the number of establishments with PRO marked as Yes change from 2023 to 2024 for each county?",
+          "code": "audits = (\n    pd.concat([Table_0.assign(Year=2023), Table_1.assign(Year=2024)], ignore_index=True)\n      .drop_duplicates(subset=['PCP','PRO','RSL','CLS','RCP','GHE','Activity','PSL','MSM','MIN'])\n)\n\npro_counts = (\n    audits.loc[audits['PRO'] == 'Yes']\n          .groupby(['Year','County'])\n          .agg(Establishments=('TradingName','nunique'))\n          .reset_index()\n)\n\ntrend = pro_counts.pivot(index='County', columns='Year', values='Establishments').fillna(0)\ntrend['Change'] = trend[2024] - trend[2023]\ntrend = trend.reset_index()",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Year",
+            "PCP",
+            "PRO",
+            "RSL",
+            "CLS",
+            "RCP",
+            "GHE",
+            "Activity",
+            "PSL",
+            "MSM",
+            "MIN",
+            "County",
+            "TradingName"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "Which establishments changed their PCP status between 2023 and 2024?",
+          "code": "audits = (\n    pd.concat([Table_0.assign(Year=2023), Table_1.assign(Year=2024)], ignore_index=True)\n      .drop_duplicates(subset=['PCP','PRO','RSL','CLS','RCP','GHE','Activity','PSL','MSM','MIN'])\n)\n\npcp_compare = (\n    audits.pivot_table(index='TradingName',\n                       columns='Year',\n                       values='PCP',\n                       aggfunc='first')\n    .reset_index()\n)\n\nchanged = pcp_compare.loc[pcp_compare[2023] != pcp_compare[2024]]\nchanged = changed[['TradingName', 2023, 2024]]",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Year",
+            "PCP",
+            "PRO",
+            "RSL",
+            "CLS",
+            "RCP",
+            "GHE",
+            "Activity",
+            "PSL",
+            "MSM",
+            "MIN",
+            "TradingName"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 15,
+      "aliases": {
+        "Table_0": "Meat-Establishment-Audits-as-at-1-May-2023__826b6b31-cba2-4f8a-8857-81fce7cd8b15",
+        "Table_1": "Meat-Establishment-Audits-as-at-1-July-2022__ee6e7827-6da3-48ec-8bab-39067aa5a387"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON AppNo, TradingName, Activity"
+      ],
+      "generation_time_seconds": 19.16,
+      "usage": {
+        "prompt_tokens": 4918,
+        "completion_tokens": 4675,
+        "total_tokens": 9593
+      },
+      "timestamp": "2026-02-16 09:28:59",
+      "queries": [
+        {
+          "question": "How many unique establishments were audited across the May 2023 and July 2022 audits?",
+          "code": "result = (\n    pd.concat([Table_0, Table_1], ignore_index=True)\n      .drop_duplicates(subset=['AppNo', 'TradingName', 'Activity'])\n      .shape[0]\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "TradingName",
+            "Activity"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which towns have the highest number of establishments with a positive RSL result across both audits?",
+          "code": "top_towns = (\n    pd.concat([Table_0, Table_1], ignore_index=True)\n      .drop_duplicates(subset=['AppNo', 'TradingName', 'Activity'])\n      .query(\"RSL == 'Yes'\")\n      .groupby('Town')\n      .size()\n      .reset_index(name='count')\n      .sort_values('count', ascending=False)\n      .head(5)\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "TradingName",
+            "Activity",
+            "RSL",
+            "Town"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "What percentage of audited establishments have both MIN and PRO marked as 'Yes' across the two audit periods?",
+          "code": "percentage = (\n    pd.concat([Table_0, Table_1], ignore_index=True)\n      .drop_duplicates(subset=['AppNo', 'TradingName', 'Activity'])\n      .assign(both=lambda df: (df['MIN'] == 'Yes') & (df['PRO'] == 'Yes'))\n      .pipe(lambda df: df['both'].mean() * 100)\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "TradingName",
+            "Activity",
+            "MIN",
+            "PRO"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "Which establishments changed their RSL status between the July 2022 and May 2023 audits?",
+          "code": "changed_rsl = (\n    Table_0.merge(\n        Table_1,\n        on=['AppNo', 'TradingName', 'Activity'],\n        suffixes=('_may', '_jul')\n    )\n    .query('RSL_may != RSL_jul')\n    [['AppNo', 'TradingName', 'Activity', 'RSL_may', 'RSL_jul']]\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "TradingName",
+            "Activity",
+            "RSL_may",
+            "RSL_jul"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "How many establishments per country have at least one compliance flag set to 'Yes' across both audits?",
+          "code": "compliance_counts = (\n    pd.concat([Table_0, Table_1], ignore_index=True)\n      .drop_duplicates(subset=['AppNo', 'TradingName', 'Activity'])\n      .assign(any_yes=lambda df: df[['RSL','PSL','GHE','RCP','PCP','MIN','PRO','MSM','CLS']]\n                                   .eq('Yes')\n                                   .any(axis=1))\n      .query('any_yes')\n      .groupby('Country')\n      .size()\n      .reset_index(name='establishment_count')\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "TradingName",
+            "Activity",
+            "RSL",
+            "PSL",
+            "GHE",
+            "RCP",
+            "PCP",
+            "MIN",
+            "PRO",
+            "MSM",
+            "CLS",
+            "Country"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 16,
+      "aliases": {
+        "Table_0": "Meat-Establishment-Audits-as-at-1-May-2023__826b6b31-cba2-4f8a-8857-81fce7cd8b15",
+        "Table_1": "CSV__050feef7-9f12-4180-8f7f-0362a71e5a60"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.AppNo = Table_1.OBJECTID"
+      ],
+      "generation_time_seconds": 19.42,
+      "usage": {
+        "prompt_tokens": 5030,
+        "completion_tokens": 4285,
+        "total_tokens": 9315
+      },
+      "timestamp": "2026-02-16 09:29:18",
+      "queries": [
+        {
+          "question": "How many audited meat establishments with a positive RSL result are located in each county?",
+          "code": "Table_0.merge(Table_1, left_on='AppNo', right_on='OBJECTID', how='inner')\\\n    .query(\"RSL == 'Yes'\")\\\n    .groupby('County')\\\n    .size()\\\n    .reset_index(name='EstablishmentCount')",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "OBJECTID",
+            "RSL",
+            "County"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the average water alkalinity (ALK_MGL) for processing establishments in towns that have more than five audited sites?",
+          "code": "Table_0.merge(Table_1, left_on='AppNo', right_on='OBJECTID')\\\n    .query(\"Activity == 'Processing'\")\\\n    .groupby('Town')\\\n    .agg(Establishments=('AppNo', 'count'), Avg_ALK=('ALK_MGL', 'mean'))\\\n    .reset_index()\\\n    .query(\"Establishments > 5\")\\\n    [['Town', 'Avg_ALK']]",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "OBJECTID",
+            "Activity",
+            "Town",
+            "ALK_MGL"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "Which monitoring stations are currently closed and are linked to establishments that have both RSL and PSL marked as Yes?",
+          "code": "Table_0.merge(Table_1, left_on='AppNo', right_on='OBJECTID')\\\n    .query(\"Site_Status_21Oct2020 == 'Closed' and RSL == 'Yes' and PSL == 'Yes'\")\\\n    .loc[:, ['Station_Name', 'TradingName', 'Town', 'County']]\\\n    .drop_duplicates()\\\n    .reset_index(drop=True)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "OBJECTID",
+            "Site_Status_21Oct2020",
+            "RSL",
+            "PSL",
+            "Station_Name",
+            "TradingName",
+            "Town",
+            "County"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which five counties have the highest proportion of establishments where both MIN and PRO are marked Yes?",
+          "code": "Table_0.merge(Table_1, left_on='AppNo', right_on='OBJECTID')\\\n    .assign(BothYes=lambda df: ((df['MIN'] == 'Yes') & (df['PRO'] == 'Yes')).astype(int))\\\n    .groupby('County')\\\n    .agg(Total=('AppNo', 'count'), BothYesCount=('BothYes', 'sum'))\\\n    .assign(Proportion=lambda x: x['BothYesCount'] / x['Total'])\\\n    .reset_index()\\\n    .sort_values('Proportion', ascending=False)\\\n    .head(5)[['County', 'Proportion']]",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "OBJECTID",
+            "MIN",
+            "PRO",
+            "County"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "How does the number of audits per month change for English establishments that have a positive GHE result?",
+          "code": "Table_0.merge(Table_1, left_on='AppNo', right_on='OBJECTID')\\\n    .query(\"Country == 'England' and GHE == 'Yes'\")\\\n    .assign(Month=lambda df: pd.to_datetime(df['Date']).dt.to_period('M'))\\\n    .groupby('Month')\\\n    .size()\\\n    .reset_index(name='AuditCount')\\\n    .sort_values('Month')",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "OBJECTID",
+            "Country",
+            "GHE",
+            "Date"
+          ],
+          "difficulty": 3
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 17,
+      "aliases": {
+        "Table_0": "Meat-Establishment-Audits-as-at-1-May-2023__826b6b31-cba2-4f8a-8857-81fce7cd8b15",
+        "Table_1": "Meat-Establishment-Audits-as-at-1-April-2023__9500e295-cd09-4603-9a4a-910053a994ba"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.TradingName = Table_1.TradingName"
+      ],
+      "generation_time_seconds": 19.04,
+      "usage": {
+        "prompt_tokens": 4950,
+        "completion_tokens": 4644,
+        "total_tokens": 9594
+      },
+      "timestamp": "2026-02-16 09:29:37",
+      "queries": [
+        {
+          "question": "Which establishments changed their RSL status between May and April?",
+          "code": "result_1 = (\n    Table_0.merge(Table_1, on='TradingName', suffixes=('_may','_apr'))\n    .loc[lambda df: df['RSL_may'] != df['RSL_apr'], ['TradingName','RSL_may','RSL_apr']]\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "TradingName",
+            "RSL_may",
+            "RSL_apr"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "For each activity, how many establishments had PSL = Yes in May and also MSM = Yes in April?",
+          "code": "result_5 = (\n    Table_0.merge(Table_1, on='TradingName', suffixes=('_may','_apr'))\n    .loc[lambda df: (df['PSL_may'] == 'Yes') & (df['MSM_apr'] == 'Yes')]\n    .groupby('Activity_may')\n    .size()\n    .reset_index(name='Establishments')\n    .assign(Average=lambda d: d['Establishments'] / d['Establishments'].sum())\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "PSL_may",
+            "MSM_apr",
+            "Activity_may",
+            "Establishments",
+            "Average"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "How many establishments in each county had MIN = Yes in May and PRO = Yes in April?",
+          "code": "result_2 = (\n    Table_0.merge(Table_1, on='TradingName', suffixes=('_may','_apr'))\n    .loc[lambda df: (df['MIN_may'] == 'Yes') & (df['PRO_apr'] == 'Yes')]\n    .groupby('County_may')\n    .size()\n    .reset_index(name='EstablishmentCount')\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "MIN_may",
+            "PRO_apr",
+            "County_may",
+            "EstablishmentCount"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "Which towns have the highest number of establishments classified as CLS in both May and April?",
+          "code": "result_3 = (\n    Table_0.merge(Table_1, on='TradingName', suffixes=('_may','_apr'))\n    .loc[lambda df: (df['CLS_may'] == 'Yes') & (df['CLS_apr'] == 'Yes')]\n    .groupby('Town_may')\n    .size()\n    .reset_index(name='Count')\n    .sort_values('Count', ascending=False)\n    .head(10)\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "CLS_may",
+            "CLS_apr",
+            "Town_may",
+            "Count"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "What proportion of establishments had GHE = Yes in May but GHE = No in April, broken down by activity type?",
+          "code": "result_4 = (\n    Table_0.merge(Table_1, on='TradingName', suffixes=('_may','_apr'))\n    .loc[lambda df: (df['GHE_may'] == 'Yes') & (df['GHE_apr'] == 'No')]\n    .groupby('Activity_may')\n    .size()\n    .reset_index(name='Count')\n    .assign(Proportion=lambda d: d['Count'] / d['Count'].sum())\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "GHE_may",
+            "GHE_apr",
+            "Activity_may",
+            "Count",
+            "Proportion"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 18,
+      "aliases": {
+        "Table_0": "Meat-Establishment-Audits-as-at-1-May-2023__826b6b31-cba2-4f8a-8857-81fce7cd8b15",
+        "Table_1": "CSV__050feef7-9f12-4180-8f7f-0362a71e5a60"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.AppNo = Table_1.OBJECTID"
+      ],
+      "generation_time_seconds": 12.15,
+      "usage": {
+        "prompt_tokens": 2515,
+        "completion_tokens": 2671,
+        "total_tokens": 5186
+      },
+      "timestamp": "2026-02-16 09:29:49",
+      "queries": [
+        {
+          "question": "How many meat establishment audits are there in each county, and what is the current site status for those establishments?",
+          "code": "merged = Table_0.merge(Table_1, left_on='AppNo', right_on='OBJECTID', how='inner')\naudit_counts = merged.groupby(['County', 'Site_Status_21Oct2020']).size().reset_index(name='AuditCount')",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "OBJECTID",
+            "County",
+            "Site_Status_21Oct2020"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which towns have the highest number of audited meat establishments that are registered for RSL and are located at water sites currently open?",
+          "code": "merged = Table_0.merge(Table_1, left_on='AppNo', right_on='OBJECTID', how='inner')\nfiltered = merged[(merged['RSL'] == 'Yes') & (merged['Site_Status_21Oct2020'] == 'Open')]\ntop_towns = filtered['Town'].value_counts().head(10).reset_index(name='AuditCount').rename(columns={'index': 'Town'})",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "OBJECTID",
+            "RSL",
+            "Site_Status_21Oct2020",
+            "Town"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "What is the average alkalinity (ALK_MGL) of water sites in each primary basin for audited establishments that have a PRO certification?",
+          "code": "merged = Table_0.merge(Table_1, left_on='AppNo', right_on='OBJECTID', how='inner')\nfiltered = merged[merged['PRO'] == 'Yes']\navg_alk = filtered.groupby('Primary_Basin')['ALK_MGL'].mean().reset_index(name='Avg_ALK_MGL')",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "OBJECTID",
+            "PRO",
+            "Primary_Basin",
+            "ALK_MGL"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "Which audited establishments lack county information and are associated with water sites that are closed, showing their trading names and site codes?",
+          "code": "merged = Table_0.merge(Table_1, left_on='AppNo', right_on='OBJECTID', how='inner')\nfiltered = merged[merged['County'].isna() & (merged['Site_Status_21Oct2020'] == 'Closed')]\nresult = filtered[['TradingName', 'Site_Code']].drop_duplicates()",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "OBJECTID",
+            "County",
+            "Site_Status_21Oct2020",
+            "TradingName",
+            "Site_Code"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "How many audited establishments with MSM certification were recorded each month, and what are the monthly counts of these audits based on the measurement date?",
+          "code": "merged = Table_0.merge(Table_1, left_on='AppNo', right_on='OBJECTID', how='inner')\nfiltered = merged[(merged['MSM'] == 'Yes') & (merged['Depth'].notna())]\nfiltered = filtered.assign(Month=pd.to_datetime(filtered['Date']).dt.to_period('M'))\nmonthly_counts = filtered.groupby('Month').size().reset_index(name='AuditCount').sort_values('Month')",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AppNo",
+            "OBJECTID",
+            "MSM",
+            "Depth",
+            "Date"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 19,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2025-01-31-Organogram-(Junior)__c26102a9-4659-4afb-adfd-8fe13a635ed2"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Reporting Senior Post, Grade, Generic Job Title, Number of Posts in FTE, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 32.21,
+      "usage": {
+        "prompt_tokens": 6648,
+        "completion_tokens": 7836,
+        "total_tokens": 14484
+      },
+      "timestamp": "2026-02-16 09:30:22",
+      "queries": [
+        {
+          "question": "What is the total number of full‑time equivalent posts for each office region across all junior positions?",
+          "code": "combined = pd.concat([Table_0, Table_1], ignore_index=True)\nregion_posts = (\n    combined\n    .groupby('Office Region', as_index=False)['Number of Posts in FTE']\n    .sum()\n    .rename(columns={'Number of Posts in FTE': 'Total Posts (FTE)'})\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Office Region",
+            "Number of Posts in FTE"
+          ],
+          "difficulty": 1
+        },
+        {
+          "question": "How many posts are there for each grade and what are the average minimum and maximum payscales?",
+          "code": "combined = pd.concat([Table_0, Table_1], ignore_index=True)\ngrade_stats = (\n    combined\n    .groupby('Grade', as_index=False)\n    .agg({\n        'Number of Posts in FTE': 'sum',\n        'Payscale Minimum (£)': 'mean',\n        'Payscale Maximum (£)': 'mean'\n    })\n    .rename(columns={\n        'Number of Posts in FTE': 'Total Posts (FTE)',\n        'Payscale Minimum (£)': 'Avg Payscale Min (£)',\n        'Payscale Maximum (£)': 'Avg Payscale Max (£)'\n    })\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Grade",
+            "Number of Posts in FTE",
+            "Payscale Minimum (£)",
+            "Payscale Maximum (£)"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "How does the average payscale range (maximum minus minimum) differ between the October and January organograms for each professional/occupational group?",
+          "code": "pd.concat([\n    Table_0.assign(Period='Oct 2025'),\n    Table_1.assign(Period='Jan 2025')\n], ignore_index=True)\\\n    .assign(Payscale_Range=lambda df: df['Payscale Maximum (£)'] - df['Payscale Minimum (£)'])\\\n    .groupby(['Professional/Occupational Group', 'Period'])['Payscale_Range']\\\n    .mean()\\\n    .reset_index(name='Avg Payscale Range (£)')",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Professional/Occupational Group",
+            "Period",
+            "Payscale Maximum (£)",
+            "Payscale Minimum (£)",
+            "Payscale_Range"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "Which generic job titles have the highest total posts and how do they break down by professional/occupational group?",
+          "code": "combined = pd.concat([Table_0, Table_1], ignore_index=True)\ntop_jobs = (\n    combined\n    .groupby(['Generic Job Title', 'Professional/Occupational Group'], as_index=False)['Number of Posts in FTE']\n    .sum()\n    .sort_values('Number of Posts in FTE', ascending=False)\n    .head(5)\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Generic Job Title",
+            "Professional/Occupational Group",
+            "Number of Posts in FTE"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "Which professional/occupational groups saw an increase in average minimum payscale from January to October, and by how much?",
+          "code": "oct = Table_0.copy()\noct['Snapshot'] = 'Oct'\njan = Table_1.copy()\njan['Snapshot'] = 'Jan'\ncombined = pd.concat([oct, jan], ignore_index=True)\navg_min_by_group_snapshot = (\n    combined\n    .groupby(['Professional/Occupational Group', 'Snapshot'], as_index=False)\n    .agg({'Payscale Minimum (£)': 'mean'})\n)\nincrease_groups = (\n    avg_min_by_group_snapshot\n    .pivot(index='Professional/Occupational Group', columns='Snapshot', values='Payscale Minimum (£)')\n    .reset_index()\n    .rename_axis(None, axis=1)\n    .query('Oct > Jan')\n    .assign(Increase=lambda df: df['Oct'] - df['Jan'])\n    [['Professional/Occupational Group', 'Jan', 'Oct', 'Increase']]\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Professional/Occupational Group",
+            "Payscale Minimum (£)",
+            "Snapshot"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 20,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2023-10-31-Organogram-(Junior)__af176c23-033c-48f5-a5d5-c8187a24be23"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Reporting Senior Post, Grade, Generic Job Title, Number of Posts in FTE, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 41.25,
+      "usage": {
+        "prompt_tokens": 6657,
+        "completion_tokens": 7454,
+        "total_tokens": 14111
+      },
+      "timestamp": "2026-02-16 09:31:03",
+      "queries": [
+        {
+          "question": "What is the total number of full‑time equivalent posts for each office region across the combined organogram data?",
+          "code": "combined = pd.concat([Table_0, Table_1], ignore_index=True).drop_duplicates(subset=[\n    \"Parent Department\",\n    \"Organisation\",\n    \"Unit\",\n    \"Reporting Senior Post\",\n    \"Grade\",\n    \"Generic Job Title\",\n    \"Number of Posts in FTE\",\n    \"Professional/Occupational Group\",\n    \"Office Region\"\n])\nregion_posts = combined.groupby(\"Office Region\")[\"Number of Posts in FTE\"].sum().reset_index(name=\"Total Posts\")\nregion_posts = region_posts.sort_values(\"Total Posts\", ascending=False)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Parent Department",
+            "Organisation",
+            "Unit",
+            "Reporting Senior Post",
+            "Grade",
+            "Generic Job Title",
+            "Number of Posts in FTE",
+            "Professional/Occupational Group",
+            "Office Region"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which generic job title has the highest average maximum pay across all records?",
+          "code": "combined = pd.concat([Table_0, Table_1], ignore_index=True).drop_duplicates(subset=[\n    \"Parent Department\",\n    \"Organisation\",\n    \"Unit\",\n    \"Reporting Senior Post\",\n    \"Grade\",\n    \"Generic Job Title\",\n    \"Number of Posts in FTE\",\n    \"Professional/Occupational Group\",\n    \"Office Region\"\n])\navg_max = combined.groupby(\"Generic Job Title\")[\"Payscale Maximum (£)\"].mean().reset_index(name=\"Avg Max Pay\")\nresult = avg_max.sort_values(\"Avg Max Pay\", ascending=False).head(1)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Parent Department",
+            "Organisation",
+            "Unit",
+            "Reporting Senior Post",
+            "Grade",
+            "Generic Job Title",
+            "Number of Posts in FTE",
+            "Professional/Occupational Group",
+            "Office Region",
+            "Payscale Maximum (£)"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "What combination of professional/occupational group and grade holds the greatest total number of posts?",
+          "code": "combined = pd.concat([Table_0, Table_1], ignore_index=True).drop_duplicates(subset=[\n    \"Parent Department\",\n    \"Organisation\",\n    \"Unit\",\n    \"Reporting Senior Post\",\n    \"Grade\",\n    \"Generic Job Title\",\n    \"Number of Posts in FTE\",\n    \"Professional/Occupational Group\",\n    \"Office Region\"\n])\ngrade_group_posts = combined.groupby([\"Professional/Occupational Group\", \"Grade\"])[\"Number of Posts in FTE\"].sum().reset_index()\ntop_combo = grade_group_posts.sort_values(\"Number of Posts in FTE\", ascending=False).head(1)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Parent Department",
+            "Organisation",
+            "Unit",
+            "Reporting Senior Post",
+            "Grade",
+            "Generic Job Title",
+            "Number of Posts in FTE",
+            "Professional/Occupational Group",
+            "Office Region"
+          ],
+          "difficulty": 3
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 21,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2025-01-31-Organogram-(Junior)__c26102a9-4659-4afb-adfd-8fe13a635ed2"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Reporting Senior Post, Grade, Generic Job Title, Number of Posts in FTE, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 30.92,
+      "usage": {
+        "prompt_tokens": 6648,
+        "completion_tokens": 7578,
+        "total_tokens": 14226
+      },
+      "timestamp": "2026-02-16 09:31:34",
+      "queries": [
+        {
+          "question": "What is the total number of full‑time equivalent posts for each office region across both the January and October organogram snapshots?",
+          "code": "df = pd.concat([Table_0, Table_1], ignore_index=True)\nresult = (\n    df.groupby('Office Region')['Number of Posts in FTE']\n      .sum()\n      .reset_index()\n      .rename(columns={'Number of Posts in FTE': 'Total Posts (FTE)'})\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Office Region",
+            "Number of Posts in FTE"
+          ],
+          "difficulty": 1
+        },
+        {
+          "question": "What is the average payscale (mid‑point of minimum and maximum) for each grade within each office region across both snapshots?",
+          "code": "df = pd.concat([Table_0, Table_1], ignore_index=True)\ndf = df.assign(Payscale_Midpoint = (df['Payscale Minimum (£)'] + df['Payscale Maximum (£)']) / 2)\nresult = (\n    df.groupby(['Grade', 'Office Region'])['Payscale_Midpoint']\n      .mean()\n      .reset_index()\n      .rename(columns={'Payscale_Midpoint': 'Avg Payscale (£)'})\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Payscale Minimum (£)",
+            "Payscale Maximum (£)",
+            "Grade",
+            "Office Region"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which units saw an increase in the average payscale midpoint from the January snapshot to the October snapshot, and by what percentage did the average midpoint change?",
+          "code": "# Compute midpoint for each snapshot\nt0 = Table_0.assign(Payscale_Midpoint = (Table_0['Payscale Minimum (£)'] + Table_0['Payscale Maximum (£)']) / 2)\nt1 = Table_1.assign(Payscale_Midpoint = (Table_1['Payscale Minimum (£)'] + Table_1['Payscale Maximum (£)']) / 2)\n\n# Average midpoint per unit in each snapshot\navg0 = t0.groupby('Unit')['Payscale_Midpoint'].mean().rename('Oct_Midpoint')\navg1 = t1.groupby('Unit')['Payscale_Midpoint'].mean().rename('Jan_Midpoint')\n\n# Combine and calculate percent change\ndf_cmp = pd.concat([avg0, avg1], axis=1).dropna()\ndf_cmp = df_cmp.assign(Percent_Change = (df_cmp['Oct_Midpoint'] - df_cmp['Jan_Midpoint']) / df_cmp['Jan_Midpoint'] * 100)\nresult = df_cmp[df_cmp['Percent_Change'] > 0].reset_index()",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Unit",
+            "Payscale Minimum (£)",
+            "Payscale Maximum (£)"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 23,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2025-01-31-Organogram-(Junior)__c26102a9-4659-4afb-adfd-8fe13a635ed2"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Grade = Table_1.Grade AND Table_0.Generic Job Title = Table_1.Generic Job Title"
+      ],
+      "generation_time_seconds": 54.03,
+      "usage": {
+        "prompt_tokens": 6624,
+        "completion_tokens": 12326,
+        "total_tokens": 18950
+      },
+      "timestamp": "2026-02-16 09:33:00",
+      "queries": [
+        {
+          "question": "What is the combined number of full‑time equivalent posts for each grade across the October 2025 and January 2025 organograms?",
+          "code": "(Table_0.merge(Table_1, on=['Grade','Generic Job Title'], suffixes=('_0','_1'))\n .assign(Total_Posts=lambda df: df['Number of Posts in FTE_0'] + df['Number of Posts in FTE_1'])\n .groupby('Grade')['Total_Posts'].sum()\n .reset_index()\n .rename(columns={'Total_Posts':'Combined Posts'}))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Grade",
+            "Number of Posts in FTE_0",
+            "Number of Posts in FTE_1",
+            "Total_Posts"
+          ],
+          "difficulty": 1
+        },
+        {
+          "question": "How do the average minimum and maximum payscales differ by office region between the October 2025 and January 2025 organograms?",
+          "code": "(Table_0.merge(Table_1, on=['Grade','Generic Job Title'], suffixes=('_0','_1'))\n .groupby('Office Region_0')\n .agg(\n    Avg_Min_Oct=('Payscale Minimum (£)_0','mean'),\n    Avg_Max_Oct=('Payscale Maximum (£)_0','mean'),\n    Avg_Min_Jan=('Payscale Minimum (£)_1','mean'),\n    Avg_Max_Jan=('Payscale Maximum (£)_1','mean')\n )\n .reset_index()\n .assign(\n    Min_Diff=lambda df: df['Avg_Min_Jan'] - df['Avg_Min_Oct'],\n    Max_Diff=lambda df: df['Avg_Max_Jan'] - df['Avg_Max_Oct']\n ))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Office Region_0",
+            "Payscale Minimum (£)_0",
+            "Payscale Maximum (£)_0",
+            "Payscale Minimum (£)_1",
+            "Payscale Maximum (£)_1",
+            "Avg_Min_Oct",
+            "Avg_Max_Oct",
+            "Avg_Min_Jan",
+            "Avg_Max_Jan",
+            "Min_Diff",
+            "Max_Diff"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "How has the total budget range (sum of minimum and maximum payscales) for each unit changed from January to October 2025?",
+          "code": "merged = Table_0.merge(Table_1, on=['Grade','Generic Job Title'], suffixes=('_oct','_jan'))\nmerged['budget_oct'] = merged['Payscale Minimum (£)_oct'] + merged['Payscale Maximum (£)_oct']\nmerged['budget_jan'] = merged['Payscale Minimum (£)_jan'] + merged['Payscale Maximum (£)_jan']\nresult = (\n    merged\n    .groupby('Unit_oct')\n    .agg(\n        total_budget_oct=('budget_oct', 'sum'),\n        total_budget_jan=('budget_jan', 'sum')\n    )\n    .reset_index()\n    .assign(pct_change=lambda df: (df['total_budget_oct'] - df['total_budget_jan']) / df['total_budget_jan'] * 100)\n    .rename(columns={'Unit_oct': 'Unit'})\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Grade",
+            "Generic Job Title",
+            "Unit_oct",
+            "Payscale Minimum (£)_oct",
+            "Payscale Maximum (£)_oct",
+            "Payscale Minimum (£)_jan",
+            "Payscale Maximum (£)_jan",
+            "budget_oct",
+            "budget_jan"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 24,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2024-01-31-Organogram-(Junior)__cd06e159-56f6-4b6e-bf80-6051036a8ae9"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Grade = Table_1.Grade AND Table_0.Generic Job Title = Table_1.Generic Job Title",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Grade = Table_1.Grade AND Table_0.Payscale Minimum (£) = Table_1.Payscale Maximum (£)"
+      ],
+      "generation_time_seconds": 38.05,
+      "usage": {
+        "prompt_tokens": 7509,
+        "completion_tokens": 9283,
+        "total_tokens": 16792
+      },
+      "timestamp": "2026-02-16 09:33:38",
+      "queries": [
+        {
+          "question": "How does the average minimum pay scale for each grade compare between the October 2025 and January 2024 organograms?",
+          "code": "(Table_0.merge(Table_1, on=['Grade', 'Generic Job Title'], suffixes=('_2025', '_2024'))\n       .groupby('Grade')\n       .agg(avg_min_2025=('Payscale Minimum (£)_2025', 'mean'),\n            avg_min_2024=('Payscale Minimum (£)_2024', 'mean'))\n       .reset_index()\n       .assign(diff=lambda df: df['avg_min_2025'] - df['avg_min_2024']))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Grade",
+            "Generic Job Title",
+            "Payscale Minimum (£)"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which job titles have the same pay level where the 2025 minimum pay equals the 2024 maximum pay, and what regions are they located in?",
+          "code": "(Table_0.merge(Table_1,\n                left_on=['Grade', 'Payscale Minimum (£)'],\n                right_on=['Grade', 'Payscale Maximum (£)'],\n                suffixes=('_2025', '_2024'))\n       [['Generic Job Title_2025', 'Office Region_2025', 'Office Region_2024',\n         'Payscale Minimum (£)_2025', 'Payscale Maximum (£)_2024']])",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Grade",
+            "Generic Job Title",
+            "Payscale Minimum (£)",
+            "Payscale Maximum (£)",
+            "Office Region"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "Which professional/occupational groups saw an average maximum pay increase of more than 10% from January 2024 to October 2025?",
+          "code": "(Table_0.merge(Table_1, on=['Grade', 'Generic Job Title'], suffixes=('_2025', '_2024'))\n       .groupby('Professional/Occupational Group_2025')\n       .agg(avg_max_2025=('Payscale Maximum (£)_2025', 'mean'),\n            avg_max_2024=('Payscale Maximum (£)_2024', 'mean'))\n       .reset_index()\n       .assign(pct_change=lambda df: (df['avg_max_2025'] - df['avg_max_2024']) / df['avg_max_2024'] * 100)\n       .query('pct_change > 10'))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Grade",
+            "Generic Job Title",
+            "Professional/Occupational Group",
+            "Payscale Maximum (£)"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 25,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2023-10-31-Organogram-(Junior)__af176c23-033c-48f5-a5d5-c8187a24be23"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Grade = Table_1.Grade AND Table_0.Generic Job Title = Table_1.Generic Job Title"
+      ],
+      "generation_time_seconds": 15.68,
+      "usage": {
+        "prompt_tokens": 2455,
+        "completion_tokens": 3814,
+        "total_tokens": 6269
+      },
+      "timestamp": "2026-02-16 09:33:54",
+      "queries": [
+        {
+          "question": "What is the average minimum pay scale for each grade in the 2025 and 2023 organograms?",
+          "code": "import pandas as pd\n\nmerged = pd.merge(Table_0, Table_1,\n                  on=['Grade', 'Generic Job Title'],\n                  suffixes=('_2025', '_2023'))\n\ngrade_summary = (merged\n                 .groupby('Grade')\n                 .agg(avg_min_2025=('Payscale Minimum (£)_2025', 'mean'),\n                      avg_min_2023=('Payscale Minimum (£)_2023', 'mean'))\n                 .reset_index())",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Grade",
+            "Generic Job Title",
+            "Payscale Minimum (£)_2025",
+            "Payscale Minimum (£)_2023"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which job titles saw an increase in their average minimum pay from 2023 to 2025?",
+          "code": "import pandas as pd\n\nmerged = pd.merge(Table_0, Table_1,\n                  on=['Grade', 'Generic Job Title'],\n                  suffixes=('_2025', '_2023'))\n\navg_by_title = (merged\n                .groupby('Generic Job Title')\n                .agg(avg_min_2025=('Payscale Minimum (£)_2025', 'mean'),\n                     avg_min_2023=('Payscale Minimum (£)_2023', 'mean'))\n                .reset_index())\n\nincreased_titles = avg_by_title[avg_by_title['avg_min_2025'] > avg_by_title['avg_min_2023']]",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Generic Job Title",
+            "Payscale Minimum (£)_2025",
+            "Payscale Minimum (£)_2023"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "For each office region in 2025, what proportion of total FTE is contributed by each occupational group, and which regions have the highest share of the Operational Delivery Profession?",
+          "code": "import pandas as pd\n\nmerged = pd.merge(Table_0, Table_1,\n                  on=['Grade', 'Generic Job Title'],\n                  suffixes=('_2025', '_2023'))\n\nregion_group = (merged\n                .groupby(['Office Region_2025', 'Professional/Occupational Group_2025'])\n                .agg(total_fte_2025=('Number of Posts in FTE_2025', 'sum'))\n                .reset_index())\n\nregion_total = (region_group\n                .groupby('Office Region_2025')\n                .agg(region_fte=('total_fte_2025', 'sum'))\n                .reset_index())\n\nregion_prop = (region_group\n               .merge(region_total, on='Office Region_2025')\n               .assign(proportion=lambda df: df['total_fte_2025'] / df['region_fte']))\n\noperational_prop = (region_prop[region_prop['Professional/Occupational Group_2025'] == 'Operational Delivery Profession']\n                    .sort_values('proportion', ascending=False))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Office Region_2025",
+            "Professional/Occupational Group_2025",
+            "Number of Posts in FTE_2025",
+            "total_fte_2025",
+            "region_fte",
+            "proportion"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "Which five generic job titles have the largest increase in maximum pay scale from 2023 to 2025?",
+          "code": "import pandas as pd\n\nmerged = pd.merge(Table_0, Table_1,\n                  on=['Grade', 'Generic Job Title'],\n                  suffixes=('_2025', '_2023'))\n\ngap = (merged\n       .assign(max_gap=lambda df: df['Payscale Maximum (£)_2025'] - df['Payscale Maximum (£)_2023'])\n       .groupby('Generic Job Title')\n       .agg(max_gap=('max_gap', 'mean'))\n       .reset_index()\n       .sort_values('max_gap', ascending=False)\n       .head(5))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Generic Job Title",
+            "Payscale Maximum (£)_2025",
+            "Payscale Maximum (£)_2023",
+            "max_gap"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "Which occupational group experienced the greatest increase in weighted average minimum pay when comparing the 2025 organogram to the 2023 organogram?",
+          "code": "import pandas as pd\n\nmerged = pd.merge(Table_0, Table_1,\n                  on=['Grade', 'Generic Job Title'],\n                  suffixes=('_2025', '_2023'))\n\ndef weighted_avg(df, value_col, weight_col):\n    return (df[value_col] * df[weight_col]).sum() / df[weight_col].sum()\n\nweighted_2025 = (merged\n                .groupby('Professional/Occupational Group_2025')\n                .apply(lambda g: weighted_avg(g,\n                                              'Payscale Minimum (£)_2025',\n                                              'Number of Posts in FTE_2025'))\n                .reset_index(name='weighted_min_2025'))\n\nweighted_2023 = (merged\n                .groupby('Professional/Occupational Group_2023')\n                .apply(lambda g: weighted_avg(g,\n                                              'Payscale Minimum (£)_2023',\n                                              'Number of Posts in FTE_2023'))\n                .reset_index(name='weighted_min_2023'))\n\nincrease = (weighted_2025\n            .merge(weighted_2023,\n                   left_on='Professional/Occupational Group_2025',\n                   right_on='Professional/Occupational Group_2023',\n                   suffixes=('_2025','_2023'))\n            .assign(increase=lambda df: df['weighted_min_2025'] - df['weighted_min_2023'])\n            .sort_values('increase', ascending=False))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Professional/Occupational Group_2025",
+            "Payscale Minimum (£)_2025",
+            "Number of Posts in FTE_2025",
+            "Professional/Occupational Group_2023",
+            "Payscale Minimum (£)_2023",
+            "Number of Posts in FTE_2023",
+            "weighted_min_2025",
+            "weighted_min_2023",
+            "increase"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 26,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2025-01-31-Organogram-(Junior)__c26102a9-4659-4afb-adfd-8fe13a635ed2"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Grade = Table_1.Grade AND Table_0.Generic Job Title = Table_1.Generic Job Title"
+      ],
+      "generation_time_seconds": 43.99,
+      "usage": {
+        "prompt_tokens": 7374,
+        "completion_tokens": 10394,
+        "total_tokens": 17768
+      },
+      "timestamp": "2026-02-16 09:34:38",
+      "queries": [
+        {
+          "question": "What is the average minimum payscale for each grade in the October 2025 organogram, and how does it compare to the January 2025 organogram?",
+          "code": "merged = Table_0.merge(Table_1, on=['Grade', 'Generic Job Title'], suffixes=('_oct', '_jan'))\navg = merged.groupby('Grade').agg(\n    avg_min_oct=('Payscale Minimum (£)_oct', 'mean'),\n    avg_min_jan=('Payscale Minimum (£)_jan', 'mean')\n).reset_index()\navg",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Grade",
+            "Payscale Minimum (£)_oct",
+            "Payscale Minimum (£)_jan"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "List the reporting senior posts where the maximum payscale decreased from January to October 2025.",
+          "code": "merged = Table_0.merge(Table_1, on=['Grade', 'Generic Job Title'], suffixes=('_oct', '_jan'))\ndecreased = merged[merged['Payscale Maximum (£)_oct'] < merged['Payscale Maximum (£)_jan']]\nresult = decreased[['Reporting Senior Post_oct', 'Generic Job Title', 'Grade',\n                    'Payscale Maximum (£)_oct', 'Payscale Maximum (£)_jan']].drop_duplicates()\nresult",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Reporting Senior Post_oct",
+            "Generic Job Title",
+            "Grade",
+            "Payscale Maximum (£)_oct",
+            "Payscale Maximum (£)_jan"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "For Grade 7, what is the count of positions by professional group across each office region in the October 2025 organogram?",
+          "code": "merged = Table_0.merge(Table_1, on=['Grade', 'Generic Job Title'], suffixes=('_oct', '_jan'))\nresult = (\n    merged[merged['Grade'] == 'Grade 7']\n    .groupby(['Office Region_oct', 'Professional/Occupational Group_oct'])\n    .size()\n    .reset_index(name='Count')\n)\nresult",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Grade",
+            "Office Region_oct",
+            "Professional/Occupational Group_oct"
+          ],
+          "difficulty": 3
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 27,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__ab86601f-626e-4502-ba7d-fa119584d610"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON LEX_WEB, RCS_WEB, LEX, LEXICONDESC, RCS_SIGMA, BGSREF, LEX_RCS_SIGMA, RCS_SIGMA_DESC, RCS_SIGMA_EXP, LEX_RCS_SIGMA_INDEX, LEX_RCS_SIGMA_DESC"
+      ],
+      "generation_time_seconds": 12.25,
+      "usage": {
+        "prompt_tokens": 2983,
+        "completion_tokens": 2814,
+        "total_tokens": 5797
+      },
+      "timestamp": "2026-02-16 09:34:50",
+      "queries": [
+        {
+          "question": "How many unique geological features are recorded in the combined dataset?",
+          "code": "combined = pd.concat([Table_0[['LEX_WEB','RCS_WEB','LEX','LEXICONDESC','RCS_SIGMA','BGSREF','LEX_RCS_SIGMA','RCS_SIGMA_DESC','RCS_SIGMA_EXP','LEX_RCS_SIGMA_INDEX','LEX_RCS_SIGMA_DESC']],\n                      Table_1[['LEX_WEB','RCS_WEB','LEX','LEXICONDESC','RCS_SIGMA','BGSREF','LEX_RCS_SIGMA','RCS_SIGMA_DESC','RCS_SIGMA_EXP','LEX_RCS_SIGMA_INDEX','LEX_RCS_SIGMA_DESC']]], ignore_index=True).drop_duplicates()\nunique_count = combined.shape[0]",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_WEB",
+            "RCS_WEB",
+            "LEX",
+            "LEXICONDESC",
+            "RCS_SIGMA",
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "RCS_SIGMA_DESC",
+            "RCS_SIGMA_EXP",
+            "LEX_RCS_SIGMA_INDEX",
+            "LEX_RCS_SIGMA_DESC"
+          ],
+          "difficulty": 1
+        },
+        {
+          "question": "Which five lithology groups appear most frequently across both sources, and how many times does each occur?",
+          "code": "combined = pd.concat([Table_0[['LEX','LEXICONDESC']],\n                      Table_1[['LEX','LEXICONDESC']]], ignore_index=True)\ntop5 = combined.groupby('LEX').size().reset_index(name='count').sort_values('count', ascending=False).head(5)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX",
+            "LEXICONDESC"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the average feature length for each rock type (RCS_SIGMA) across the combined dataset?",
+          "code": "df0 = Table_0[['RCS_SIGMA','Shape_Length']].rename(columns={'Shape_Length':'Feature_Length'})\ndf1 = Table_1[['RCS_SIGMA','SHAPE_Length_1']].rename(columns={'SHAPE_Length_1':'Feature_Length'})\ncombined_len = pd.concat([df0, df1], ignore_index=True)\navg_len = combined_len.groupby('RCS_SIGMA')['Feature_Length'].mean().reset_index()",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "RCS_SIGMA",
+            "Shape_Length",
+            "SHAPE_Length_1"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "Which lithology groups are unique to each source, i.e., appear only in the BGS Lexicon dataset and not in the RCS dataset, and vice versa?",
+          "code": "lex0 = set(Table_0['LEX'].dropna())\nlex1 = set(Table_1['LEX'].dropna())\nonly_in_0 = lex0 - lex1\nonly_in_1 = lex1 - lex0",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "What is the total mapped length for each lithology and rock type combination, and how much of that length comes from each original dataset?",
+          "code": "df0 = Table_0[['LEX','RCS_SIGMA','Shape_Length']].rename(columns={'Shape_Length':'Length'}).assign(Source='Table_0')\ndf1 = Table_1[['LEX','RCS_SIGMA','SHAPE_Length_1']].rename(columns={'SHAPE_Length_1':'Length'}).assign(Source='Table_1')\ncombined = pd.concat([df0, df1], ignore_index=True)\ntotal = combined.groupby(['LEX','RCS_SIGMA'])['Length'].sum().reset_index(name='total_length')\nsource_len = combined.groupby(['LEX','RCS_SIGMA','Source'])['Length'].sum().reset_index(name='source_length')\nresult = total.merge(source_len, on=['LEX','RCS_SIGMA'])\nresult['proportion'] = result['source_length'] / result['total_length']",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX",
+            "RCS_SIGMA",
+            "Shape_Length",
+            "SHAPE_Length_1"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 29,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__7f6c5ce4-8bcd-4b37-bdcb-556e7c8770da"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON LEX_WEB, RCS_WEB, LEX, LEXICONDESC, RCS_SIGMA, BGSREF, LEX_RCS_SIGMA, RCS_SIGMA_DESC, RCS_SIGMA_EXP, LEX_RCS_SIGMA_INDEX, LEX_RCS_SIGMA_DESC"
+      ],
+      "generation_time_seconds": 33.14,
+      "usage": {
+        "prompt_tokens": 9138,
+        "completion_tokens": 8030,
+        "total_tokens": 17168
+      },
+      "timestamp": "2026-02-16 09:35:59",
+      "queries": [
+        {
+          "question": "How many unique geological features are recorded across both datasets?",
+          "code": "unique_count = (pd.concat([Table_0, Table_1], ignore_index=True)\n    .drop_duplicates(subset=['LEX_WEB','RCS_WEB','LEX','LEXICONDESC','RCS_SIGMA','BGSREF','LEX_RCS_SIGMA','RCS_SIGMA_DESC','RCS_SIGMA_EXP','LEX_RCS_SIGMA_INDEX','LEX_RCS_SIGMA_DESC'])\n    .shape[0])",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_WEB",
+            "RCS_WEB",
+            "LEX",
+            "LEXICONDESC",
+            "RCS_SIGMA",
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "RCS_SIGMA_DESC",
+            "RCS_SIGMA_EXP",
+            "LEX_RCS_SIGMA_INDEX",
+            "LEX_RCS_SIGMA_DESC"
+          ],
+          "difficulty": 1
+        },
+        {
+          "question": "What is the average length of the recorded features across both datasets?",
+          "code": "avg_length = (pd.concat([Table_0, Table_1], ignore_index=True)\n    .drop_duplicates(subset=['LEX_WEB','RCS_WEB','LEX','LEXICONDESC','RCS_SIGMA','BGSREF','LEX_RCS_SIGMA','RCS_SIGMA_DESC','RCS_SIGMA_EXP','LEX_RCS_SIGMA_INDEX','LEX_RCS_SIGMA_DESC'])\n    .assign(Shape=lambda d: d['Shape_Length'].fillna(d['Shape__Length']))\n    .Shape\n    .mean())",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_WEB",
+            "RCS_WEB",
+            "LEX",
+            "LEXICONDESC",
+            "RCS_SIGMA",
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "RCS_SIGMA_DESC",
+            "RCS_SIGMA_EXP",
+            "LEX_RCS_SIGMA_INDEX",
+            "LEX_RCS_SIGMA_DESC",
+            "Shape_Length",
+            "Shape__Length"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "How many unique features are there for each RCS sigma category across the combined data?",
+          "code": "sigma_counts = (pd.concat([Table_0, Table_1], ignore_index=True)\n    .drop_duplicates(subset=['LEX_WEB','RCS_WEB','LEX','LEXICONDESC','RCS_SIGMA','BGSREF','LEX_RCS_SIGMA','RCS_SIGMA_DESC','RCS_SIGMA_EXP','LEX_RCS_SIGMA_INDEX','LEX_RCS_SIGMA_DESC'])\n    .groupby('RCS_SIGMA')\n    .size()\n    .reset_index(name='feature_count'))",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_WEB",
+            "RCS_WEB",
+            "LEX",
+            "LEXICONDESC",
+            "RCS_SIGMA",
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "RCS_SIGMA_DESC",
+            "RCS_SIGMA_EXP",
+            "LEX_RCS_SIGMA_INDEX",
+            "LEX_RCS_SIGMA_DESC"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "Which three recorded features have the greatest length, and what are their descriptions?",
+          "code": "top_three = (pd.concat([Table_0, Table_1], ignore_index=True)\n    .drop_duplicates(subset=['LEX_WEB','RCS_WEB','LEX','LEXICONDESC','RCS_SIGMA','BGSREF','LEX_RCS_SIGMA','RCS_SIGMA_DESC','RCS_SIGMA_EXP','LEX_RCS_SIGMA_INDEX','LEX_RCS_SIGMA_DESC'])\n    .assign(Shape=lambda d: d['Shape_Length'].fillna(d['Shape__Length']))\n    .nlargest(3, 'Shape')[['LEXICONDESC','Shape']])",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_WEB",
+            "RCS_WEB",
+            "LEX",
+            "LEXICONDESC",
+            "RCS_SIGMA",
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "RCS_SIGMA_DESC",
+            "RCS_SIGMA_EXP",
+            "LEX_RCS_SIGMA_INDEX",
+            "LEX_RCS_SIGMA_DESC",
+            "Shape_Length",
+            "Shape__Length",
+            "LEXICONDESC"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "What is the correlation between feature length and the RCS sigma expression category across the combined dataset?",
+          "code": "corr_value = (pd.concat([Table_0, Table_1], ignore_index=True)\n    .drop_duplicates(subset=['LEX_WEB','RCS_WEB','LEX','LEXICONDESC','RCS_SIGMA','BGSREF','LEX_RCS_SIGMA','RCS_SIGMA_DESC','RCS_SIGMA_EXP','LEX_RCS_SIGMA_INDEX','LEX_RCS_SIGMA_DESC'])\n    .assign(Shape=lambda d: d['Shape_Length'].fillna(d['Shape__Length']),\n            SigmaCode=lambda d: d['RCS_SIGMA_EXP'].astype('category').cat.codes)\n    .loc[:, ['Shape','SigmaCode']]\n    .corr()\n    .loc['Shape','SigmaCode'])",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_WEB",
+            "RCS_WEB",
+            "LEX",
+            "LEXICONDESC",
+            "RCS_SIGMA",
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "RCS_SIGMA_DESC",
+            "RCS_SIGMA_EXP",
+            "LEX_RCS_SIGMA_INDEX",
+            "LEX_RCS_SIGMA_DESC",
+            "Shape_Length",
+            "Shape__Length",
+            "RCS_SIGMA_EXP"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 30,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__ab86601f-626e-4502-ba7d-fa119584d610"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA"
+      ],
+      "generation_time_seconds": 25.13,
+      "usage": {
+        "prompt_tokens": 8796,
+        "completion_tokens": 6037,
+        "total_tokens": 14833
+      },
+      "timestamp": "2026-02-16 09:36:24",
+      "queries": [
+        {
+          "question": "For each LEX_RCS_SIGMA category, how many matching records exist, what is the combined shape length from the first dataset, and what percentage of those matches have a source scale of 1:250 000 in the second dataset?",
+          "code": "summary = (\n    Table_0.merge(Table_1, on=['BGSREF', 'LEX_RCS_SIGMA'], how='inner')\n    .groupby('LEX_RCS_SIGMA')\n    .agg(\n        match_count=('OBJECTID_x', 'count'),\n        total_shape_length=('Shape_Length', 'sum'),\n        source_250k_pct=('SOURCE_y', lambda s: (s == '1:250 000 scale').mean() * 100)\n    )\n    .reset_index()\n    .sort_values('match_count', ascending=False)\n)\nsummary",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "OBJECTID",
+            "Shape_Length",
+            "SOURCE"
+          ],
+          "difficulty": 5
+        },
+        {
+          "question": "How many geological features are present in both datasets with matching BGS reference and LEX_RCS_SIGMA?",
+          "code": "matched = Table_0.merge(Table_1, on=['BGSREF', 'LEX_RCS_SIGMA'], how='inner')\nmatched.shape[0]",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "BGSREF",
+            "LEX_RCS_SIGMA"
+          ],
+          "difficulty": 1
+        },
+        {
+          "question": "What is the total shape length from the first dataset and the average shape length from the second dataset for features that match on BGS reference and LEX_RCS_SIGMA?",
+          "code": "merged = Table_0.merge(Table_1, on=['BGSREF', 'LEX_RCS_SIGMA'], how='inner')\ntotal_length_0 = merged['Shape_Length'].sum()\navg_length_1 = merged['SHAPE_Length_1'].mean()\nresult = pd.DataFrame({\n    'total_shape_length_0': [total_length_0],\n    'avg_shape_length_1': [avg_length_1]\n})\nresult",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "Shape_Length",
+            "SHAPE_Length_1"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "Which matching geological features have different RCS sigma descriptions in the two datasets, and what are their respective OBJECTIDs?",
+          "code": "diff_desc = (\n    Table_0.merge(Table_1, on=['BGSREF', 'LEX_RCS_SIGMA'], how='inner')\n    .query('RCS_SIGMA_DESC_x != RCS_SIGMA_DESC_y')\n    .loc[:, ['OBJECTID_x', 'OBJECTID_y', 'RCS_SIGMA_DESC_x', 'RCS_SIGMA_DESC_y']]\n    .reset_index(drop=True)\n)\ndiff_desc",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "OBJECTID",
+            "RCS_SIGMA_DESC"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 31,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__ab86601f-626e-4502-ba7d-fa119584d610"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA"
+      ],
+      "generation_time_seconds": 21.12,
+      "usage": {
+        "prompt_tokens": 5864,
+        "completion_tokens": 4540,
+        "total_tokens": 10404
+      },
+      "timestamp": "2026-02-16 09:36:46",
+      "queries": [
+        {
+          "question": "How many geological features are recorded for each lexicon code after combining the two datasets?",
+          "code": "Table_0.merge(Table_1, on=['BGSREF', 'LEX_RCS_SIGMA'], how='inner')\\\n    .groupby('LEX_x')['OBJECTID_x']\\\n    .count()\\\n    .reset_index(name='feature_count')\\\n    .sort_values('feature_count', ascending=False)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "LEX",
+            "OBJECTID"
+          ],
+          "difficulty": 1
+        },
+        {
+          "question": "What is the average mapped length for each rock classification description across the combined dataset?",
+          "code": "Table_0.merge(Table_1, on=['BGSREF', 'LEX_RCS_SIGMA'], how='inner')\\\n    .loc[lambda df: df['SHAPE_Length_1'].notna()]\\\n    .groupby('RCS_SIGMA_DESC_y')['SHAPE_Length_1']\\\n    .mean()\\\n    .reset_index(name='avg_length')\\\n    .sort_values('avg_length', ascending=False)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "SHAPE_Length_1",
+            "RCS_SIGMA_DESC"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which geological descriptions contribute the most total area in the merged dataset?",
+          "code": "Table_0.merge(Table_1, on=['BGSREF', 'LEX_RCS_SIGMA'], how='inner')\\\n    .loc[lambda df: df['SHAPE_Area_1'].notna()]\\\n    .groupby('LEXICONDESC_y')['SHAPE_Area_1']\\\n    .sum()\\\n    .reset_index(name='total_area')\\\n    .sort_values('total_area', ascending=False)\\\n    .head(5)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "SHAPE_Area_1",
+            "LEXICONDESC"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "What proportion of features have a 1:250,000 scale source for each sigma expression category?",
+          "code": "Table_0.merge(Table_1, on=['BGSREF', 'LEX_RCS_SIGMA'], how='inner')\\\n    .groupby('RCS_SIGMA_EXP_y')\\\n    .apply(lambda g: pd.Series({\n        'total': len(g),\n        'scale_250k': (g['SOURCE_y'] == '1:250 000 scale').sum(),\n        'proportion': (g['SOURCE_y'] == '1:250 000 scale').mean()\n    }))\\\n    .reset_index()\\\n    .sort_values('proportion', ascending=False)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "RCS_SIGMA_EXP",
+            "SOURCE"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "How many features are recorded for each sigma index broken down by sigma description, and what is the cumulative count across indexes?",
+          "code": "Table_0.merge(Table_1, on=['BGSREF', 'LEX_RCS_SIGMA'], how='inner')\\\n    .assign(count=1)\\\n    .pivot_table(index='LEX_RCS_SIGMA_INDEX_y', columns='RCS_SIGMA_DESC_y', values='count', aggfunc='sum', fill_value=0)\\\n    .assign(cumulative=lambda df: df.cumsum().sum(axis=1))\\\n    .reset_index()\\\n    .rename(columns={'cumulative': 'cumulative_count'})",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "LEX_RCS_SIGMA_INDEX",
+            "RCS_SIGMA_DESC",
+            "OBJECTID"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 32,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__7f6c5ce4-8bcd-4b37-bdcb-556e7c8770da"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.Shape_Length = Table_1.OBJECTID"
+      ],
+      "generation_time_seconds": 53.46,
+      "usage": {
+        "prompt_tokens": 9180,
+        "completion_tokens": 9201,
+        "total_tokens": 18381
+      },
+      "timestamp": "2026-02-16 09:37:39",
+      "queries": [
+        {
+          "question": "How many distinct geological feature names (LEX) are recorded for each BGS reference code?",
+          "code": "result = (\n    Table_0\n    .merge(Table_1, on=['BGSREF', 'LEX_RCS_SIGMA'], suffixes=('_0', '_1'))\n    .merge(Table_1, left_on=['BGSREF', 'Shape_Length'], right_on=['BGSREF', 'OBJECTID'], suffixes=('', '_2'))\n    .groupby('BGSREF')\n    .LEX_0.nunique()\n    .reset_index(name='unique_lex_count')\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "Shape_Length",
+            "OBJECTID",
+            "LEX"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which BGS reference codes have matching RCS Sigma descriptions in both datasets, and how many records do they each contain?",
+          "code": "matched = (\n    Table_0\n    .merge(Table_1, on=['BGSREF', 'LEX_RCS_SIGMA'], suffixes=('_0', '_1'))\n    .merge(Table_1, left_on=['BGSREF', 'Shape_Length'], right_on=['BGSREF', 'OBJECTID'], suffixes=('', '_2'))\n    .loc[lambda df: df['RCS_SIGMA_DESC_0'] == df['RCS_SIGMA_DESC_1']]\n    .groupby('BGSREF')\n    .size()\n    .reset_index(name='record_count')\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "Shape_Length",
+            "OBJECTID",
+            "RCS_SIGMA_DESC"
+          ],
+          "difficulty": 3
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 33,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__7f6c5ce4-8bcd-4b37-bdcb-556e7c8770da",
+        "Table_2": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.Shape_Length = Table_1.OBJECTID"
+      ],
+      "generation_time_seconds": 56.16,
+      "usage": {
+        "prompt_tokens": 11580,
+        "completion_tokens": 11873,
+        "total_tokens": 23453
+      },
+      "timestamp": "2026-02-16 09:38:35",
+      "queries": [
+        {
+          "question": "How many unique geological feature descriptions are present across the combined dataset?",
+          "code": "result = (\n    Table_0\n    .merge(Table_1, on=['BGSREF','LEX_RCS_SIGMA'], suffixes=('_0','_1'))\n    .merge(Table_2[['OBJECTID','LEXICONDESC']], left_on='OBJECTID_0', right_on='OBJECTID', how='left')\n    .LEXICONDESC_0\n    .nunique()\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2"
+          ],
+          "columns": [
+            "OBJECTID",
+            "BGSREF",
+            "LEX_RCS_SIGMA",
+            "LEXICONDESC",
+            "Shape_Length"
+          ],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 34,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__7f6c5ce4-8bcd-4b37-bdcb-556e7c8770da",
+        "Table_2": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.Shape_Length = Table_1.OBJECTID"
+      ],
+      "generation_time_seconds": 50.93,
+      "usage": {
+        "prompt_tokens": 11580,
+        "completion_tokens": 10720,
+        "total_tokens": 22300
+      },
+      "timestamp": "2026-02-16 09:39:26",
+      "queries": [
+        {
+          "question": "What is the distribution of RCS sigma descriptions across the combined data, and which BGS reference groups have the highest counts for each description?",
+          "code": "distribution = (\n    Table_0\n    .merge(Table_1, left_on=['BGSREF', 'Shape_Length'], right_on=['BGSREF', 'OBJECTID'], suffixes=('_0', '_1'))\n    .merge(Table_2[['OBJECTID', 'RCS_SIGMA_DESC']], left_on='OBJECTID_0', right_on='OBJECTID')\n    .groupby(['BGSREF', 'RCS_SIGMA_DESC'])\n    .size()\n    .reset_index(name='count')\n    .sort_values(['BGSREF', 'count'], ascending=[True, False])\n)",
+          "query_type": "pandas",
+          "tables": [
+            "Table_0",
+            "Table_1",
+            "Table_2"
+          ],
+          "columns": [
+            "BGSREF",
+            "Shape_Length",
+            "OBJECTID",
+            "RCS_SIGMA_DESC"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    }
+  ],
+  "failed": [
+    {
+      "match_index": 2,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_2": "2024-09-30-Organogram-(Senior)__a27ebc0c-3675-4ab6-8c26-b7bbdb702b0c",
+        "Table_3": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_4": "2025-09-30-Organogram-(Junior)__5f016d60-f4ff-4d0d-b130-a8ee13552107",
+        "Table_5": "2023-09-30-Organogram-(Senior)__cd2c821c-5048-43fd-9f2d-0207fefcc079"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Name = Table_1.Name AND Table_0.Reports to Senior Post = Table_1.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Reports to Senior Post = Table_1.Reports to Senior Post AND Table_0.Salary Cost of Reports (£) = Table_1.Salary Cost of Reports (£)",
+        "JOIN: Table_1 ⋈ Table_2 ON Table_1.Post Unique Reference = Table_2.Post Unique Reference AND Table_1.Reports to Senior Post = Table_2.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_1 ⋈ Table_2 ON Table_1.Unit = Table_2.Unit AND Table_1.FTE = Table_2.Salary Cost of Reports (£)",
+        "JOIN: Table_3 ⋈ Table_4 ON Table_3.Parent Department = Table_4.Parent Department AND Table_3.Organisation = Table_4.Organisation"
+      ],
+      "generation_time_seconds": 56.45,
+      "usage": {
+        "prompt_tokens": 14049,
+        "completion_tokens": 13405,
+        "total_tokens": 27454
+      },
+      "timestamp": "2026-02-16 09:22:04",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 4,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2021-12-31-Organogram-(Senior)__a2c5b69e-1033-4630-a209-f461d346424c",
+        "Table_2": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_3": "2024-09-30-Organogram-(Senior)__a27ebc0c-3675-4ab6-8c26-b7bbdb702b0c",
+        "Table_4": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_5": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Reports to Senior Post = Table_1.Post Unique Reference AND Table_0.Salary Cost of Reports (£) = Table_1.Salary Cost of Reports (£)",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Post Unique Reference = Table_3.Post Unique Reference AND Table_2.Reports to Senior Post = Table_3.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.Unit = Table_3.Unit AND Table_2.FTE = Table_3.Salary Cost of Reports (£)",
+        "JOIN: Table_4 ⋈ Table_5 ON Table_4.Post Unique Reference = Table_5.Post Unique Reference AND Table_4.Reports to Senior Post = Table_5.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_4 ⋈ Table_5 ON Table_4.Post Unique Reference = Table_5.Post Unique Reference AND Table_4.Salary Cost of Reports (£) = Table_5.Salary Cost of Reports (£)"
+      ],
+      "generation_time_seconds": 67.48,
+      "usage": {
+        "prompt_tokens": 14616,
+        "completion_tokens": 16589,
+        "total_tokens": 31205
+      },
+      "timestamp": "2026-02-16 09:24:23",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 10,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "CSV__4122cc6d-fbd0-4d4d-85e9-cfca057e40e9"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Invoice number = Table_1.OBJECTID"
+      ],
+      "generation_time_seconds": 36.68,
+      "usage": {
+        "prompt_tokens": 7080,
+        "completion_tokens": 8726,
+        "total_tokens": 15806
+      },
+      "timestamp": "2026-02-16 09:26:55",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 22,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2023-05-09-Organogram-(Junior)__bebc0222-1b00-4226-9729-520d4492e73c"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Reporting Senior Post, Grade, Generic Job Title, Number of Posts in FTE, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 32.39,
+      "usage": {
+        "prompt_tokens": 6657,
+        "completion_tokens": 7865,
+        "total_tokens": 14522
+      },
+      "timestamp": "2026-02-16 09:32:06",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 28,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__ab86601f-626e-4502-ba7d-fa119584d610"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON LEX_WEB, RCS_WEB, LEX, LEXICONDESC, RCS_SIGMA, BGSREF, LEX_RCS_SIGMA, RCS_SIGMA_DESC, RCS_SIGMA_EXP, LEX_RCS_SIGMA_INDEX, LEX_RCS_SIGMA_DESC"
+      ],
+      "generation_time_seconds": 36.0,
+      "usage": {
+        "prompt_tokens": 8949,
+        "completion_tokens": 8800,
+        "total_tokens": 17749
+      },
+      "timestamp": "2026-02-16 09:35:26",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    }
+  ],
+  "total_usage": {
+    "prompt_tokens": 252870,
+    "completion_tokens": 283478,
+    "total_tokens": 536348
+  }
+}

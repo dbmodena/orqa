@@ -1,24 +1,16 @@
-"""
-Generatore Query Semplificato
-Usa final_generation_candidates.json + tasks_results.json
-"""
 import json
 import pandas as pd
 from pathlib import Path
 import os
 from dotenv import load_dotenv
-load_dotenv()
 from statement_generator.StatementClient import LLMClientStatementGenerator
 from statement_generator.prompting import _load_prompt, DatasetDescription
 from pathlib import Path
-#import pandas as pd
 import polars as pl
-import json
 import time
 from utils import load_datasets_metadata, load_dataset_info
 import tempfile
-import os
-
+load_dotenv()
 # ============================================================================
 # CARICAMENTO
 # ============================================================================
@@ -180,13 +172,15 @@ def prepare_queries(candidates_file,tasks_file,csv_folder,output_dir):
         output_file=f"{output_dir}/matches.json"
     )
 
-def create_statements(csv_folder,output_dir,kind="PANDAS",max_cols=15,metadata=None):
+import sys
+
+def create_statements(csv_folder, output_dir, kind="PANDAS", max_cols=15, metadata=None):
     client = LLMClientStatementGenerator(Path("statement_generator/litellm.yaml"))
     with open(f"{output_dir}/matches.json", 'r', encoding='utf-8') as f:
         all_matches = json.load(f)
     
     descriptor = DatasetDescription()
-    output_file = Path(output_dir) / "validated_queries.json"
+    output_file = Path(output_dir) / f"validated_queries({kind}).json"
     
     # Initialize or load existing results
     if output_file.exists():
@@ -195,11 +189,9 @@ def create_statements(csv_folder,output_dir,kind="PANDAS",max_cols=15,metadata=N
     else:
         all_results = {"successful": [], "failed": [], "total_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
     
-    for idx, result in enumerate(all_matches[80:]):
-        #print(f"\n{'='*60}")
-        #print(f"Processing match {idx + 1}/{len(all_matches)}")
-        #print(f"{'='*60}")
-        
+    total_matches = len(all_matches)
+    
+    for idx, result in enumerate(all_matches):
         start_time = time.time()
         
         # Build dataframes and descriptions
@@ -208,8 +200,9 @@ def create_statements(csv_folder,output_dir,kind="PANDAS",max_cols=15,metadata=N
         table_descriptions = []
         aliases = result["aliases"]
         involved_columns = result["columns_by_table"]
+        present_metadata = "present"
+        
         for alias, dataset in aliases.items():
-            #print(dataset)
             specific_cols = involved_columns[alias]
             df = pd.read_csv(f"{csv_folder}/{dataset}.csv", sep=",")
 
@@ -218,10 +211,12 @@ def create_statements(csv_folder,output_dir,kind="PANDAS",max_cols=15,metadata=N
                 other_cols = [c for c in df.columns if c not in specific_cols]
                 cols_to_keep = list(specific_cols) + other_cols[:max_cols - len(specific_cols)]
                 df = df[cols_to_keep]
-            #print(df.head())
+            
             dataframes.append(df)
             table_names.append(alias)
             metadata = datasets_metadata.get(dataset, "")
+            if metadata is not None:
+                present_metadata = "absent"
             with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as tmp_file:
                 df.to_csv(tmp_file.name, index=False)
                 tmp_path = tmp_file.name
@@ -229,61 +224,76 @@ def create_statements(csv_folder,output_dir,kind="PANDAS",max_cols=15,metadata=N
             try:
                 dataset_info, _ = load_dataset_info(Path(tmp_path))
                 table_descriptions.append(
-                    f"### Dataset Alias: {alias} \n{descriptor.update(dataset, df.shape[0], df.shape[1], metadata, dataset_info["columns_details"], df.head(3))}"
+                    f"### Dataset Alias: {alias} \n{descriptor.update(dataset, df.shape[0], df.shape[1], metadata, dataset_info['columns_details'], df.head(3))}"
                 )
             finally:
                 os.unlink(tmp_path)  
 
         prompt = _load_prompt(
             "statement_generator/prompt.md",
-            "PandasCodeGeneration",
+            "SQLGeneration",
             matches="\n".join(result["matches"]),
-            #table=""
             table="\n".join(table_descriptions),
-            aliases= aliases
+            aliases=aliases
         )
-        #print(dataframes)
-        #print(prompt)
+        
         queries_result, usage = client.complete(prompt, dataframes, table_names, typology=kind)
-            
         elapsed_time = time.time() - start_time
-            
+        
         # Update total usage
         all_results["total_usage"]["prompt_tokens"] += usage["prompt_tokens"]
         all_results["total_usage"]["completion_tokens"] += usage["completion_tokens"]
         all_results["total_usage"]["total_tokens"] += usage["total_tokens"]
-            
-            # Prepare result entry
+        
+        # Prepare result entry
         entry = {
-                "match_index": idx,
-                "aliases": result["aliases"],
-                "matches": result["matches"],
-                "generation_time_seconds": round(elapsed_time, 2),
-                "usage": usage,
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-            }
-            
+            "match_index": idx,
+            "aliases": result["aliases"],
+            "matches": result["matches"],
+            "generation_time_seconds": round(elapsed_time, 2),
+            "usage": usage,
+            "metadata": present_metadata,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
         # Check if generation was successful
         if queries_result["queries"]:
-                entry["queries"] = queries_result["queries"]
-                entry["status"] = "success"
-                all_results["successful"].append(entry)
-                #print(f"✓ Success: {len(queries_result['queries'])} queries generated in {elapsed_time:.2f}s")
+            entry["queries"] = queries_result["queries"]
+            entry["status"] = "success"
+            all_results["successful"].append(entry)
         else:
-                entry["status"] = "failed"
-                entry["error"] = "No queries generated after max retries"
-                all_results["failed"].append(entry)
-                #print(f"✗ Failed: No queries generated in {elapsed_time:.2f}s")
-            
-            # Save incrementally after each match
-        with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(all_results, f, indent=2, ensure_ascii=False)
+            entry["status"] = "failed"
+            entry["error"] = "No queries generated after max retries"
+            all_results["failed"].append(entry)
         
-    #print(f"💾 Results saved to {output_file}")
+        # Save incrementally after each match
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(all_results, f, indent=2, ensure_ascii=False)
+        
+        # Update terminal message (overwrites previous line)
+        progress = idx + 1
+        success_count = len(all_results["successful"])
+        failed_count = len(all_results["failed"])
+        total_tokens = all_results["total_usage"]["total_tokens"]
+        
+        # Clear line and print updated stats
+        sys.stdout.write("\r" + " " * 120)  # Clear line
+        sys.stdout.write(
+            f"\r[{progress}/{total_matches}] "
+            f"✓ Success: {success_count} | "
+            f"✗ Failed: {failed_count} | "
+            f"🎫 Tokens: {total_tokens:,} | "
+            f"⏱️ Last: {elapsed_time:.1f}s"
+        )
+        sys.stdout.flush()
+    
+    # New line after completion
+    print()
+    print(f"\n💾 Results saved to {output_file}")
     return all_results
 
 if __name__ == "__main__":
     datasets_metadata = load_datasets_metadata(Path(r"D:\uk\metadata\metadata.json"))
     #prepare_queries(r"D:\uk\candidates_discovery\final_generation_candidates.json",r"D:\uk\candidates_discovery\tasks_results.json",r"D:\uk\datasets\csv","queries")
-    create_statements(r"D:\uk\datasets\csv","queries",datasets_metadata)
+    create_statements(r"D:\uk\datasets\csv","queries","SQL",10,datasets_metadata)
     
