@@ -1,3 +1,4 @@
+source: ckan
 seed: 0
 
 pandas:

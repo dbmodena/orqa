@@ -102,6 +102,8 @@ def evaluate_matches(
                 r_target,
             )
             match_t = time.time() - match_t
+        except ValueError:
+            pass
         except Exception as exc:
             print(f"Error with Q={Q_name}, R={R_name}: {exc}")
             raise exc

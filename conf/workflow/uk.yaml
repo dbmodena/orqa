@@ -1,3 +1,4 @@
+source: ckan
 seed: 0
 
 pandas:
@@ -6,6 +7,31 @@ pandas:
       nrows: 10_000
     json:
       nrows: 10_000
+
+blend:
+  xash_size: 128
+  max_cell_length: 128
+  clean_args:
+    lowercase: True
+    bad_tokens:
+      - "none"
+      - "null"
+      - "nan"
+      - "na"
+      - "n/a"
+      - "not available"
+      - "no data"
+      - "(null)"
+
+      # we do not want to filer all the punctuations, 
+      # or to replace all the punctuations with empty 
+      # strings or whatever; we just found that these 
+      # values are pretty common, and that are not 
+      # really useful for any analyses
+      - "-"
+      - "."
+      - "*"
+
 
 tasks:
   crawling:
@@ -19,25 +45,8 @@ tasks:
     verbose: True
 
   indexing:
-    xash_size: 128
     max_process_workers: 12
     # max_queue_size: 2000
-    clean_args:
-      lowercase: True
-      bad_tokens:
-        - "none"
-        - "null"
-        - "nan"
-        - "n/a"
-        - "n/d"
-
-        # we do not want to filer all the punctuations, 
-        # or to replace all the punctuations with empty 
-        # strings or whatever; we just found that these 
-        # values are pretty common, and that are not 
-        # really useful for any analyses
-        - "-"
-        - "."
     verbose: True
 
   candidates_discovery:

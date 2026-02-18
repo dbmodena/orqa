@@ -1,3 +1,6 @@
+seed: 42
+source: ckan
+
 pandas:
   read:
     csv:

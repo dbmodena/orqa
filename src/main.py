@@ -1,11 +1,10 @@
-from orqa.cleaning import cleaning
 import os
 import sys
 from pathlib import Path
 
 from conf import load_config
-
-from orqa.candidates_generation_stream import candidates_discovery
+from orqa.candidates_generation import candidates_discovery
+from orqa.cleaning import ckan_cleaning, socrata_cleaning
 from orqa.crawling import crawl_canada, crawl_modena, crawl_nyc, crawl_uk
 from orqa.indexing import create_blend_index
 
@@ -64,8 +63,9 @@ def nyc():
     cfg = load_config(nyc_yaml_path, data_path)
 
     # crawl_nyc(cfg)
+    # socrata_cleaning(cfg)
     create_blend_index(cfg)
-    # candidates_discovery(cfg)
+    candidates_discovery(cfg)
 
 
 def main():

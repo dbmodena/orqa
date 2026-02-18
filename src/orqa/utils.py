@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Literal
 import copy
 import json
 import re
@@ -26,6 +26,18 @@ def pl_scan_dataset(dataset_path: Path, opts: dict = {}) -> pl.LazyFrame:
             return pl.scan_csv(dataset_path, **opts.get("csv", {}))
         case ".parquet":
             return pl.scan_parquet(dataset_path, **opts.get("parquet", {}))
+        case _:
+            raise ValueError(
+                f"Unknown dataset format for file {dataset_path.absolute()}"
+            )
+
+
+def pl_write_dataset(df: pl.DataFrame, dataset_path: Path, opts: dict = {}):
+    match dataset_path.suffix:
+        case ".csv":
+            df.write_csv(dataset_path, **opts.get("csv", {}))
+        case ".parquet":
+            df.write_parquet(dataset_path, **opts.get("parquet", {}))
         case _:
             raise ValueError(
                 f"Unknown dataset format for file {dataset_path.absolute()}"
@@ -72,6 +84,7 @@ def load_datasets_metadata(
     metadata_path: Path,
     dataset_ids: Optional[list[str]] = None,
     field: str = "id",
+    source: Literal["ckan", "socrata"] = "ckan",
 ) -> dict[str, dict]:
     """
     Load the datasets metadata from the main JSON file.
@@ -91,27 +104,48 @@ def load_datasets_metadata(
 
     rv = {}
 
-    for package in metadata:
-        resources = package.get("resources", [])
-        for resource in resources:
-            if dataset_ids is None or resource.get(field) in dataset_ids:
-                if dataset_ids is not None:
-                    dataset_ids.remove(resource.get(field))
-                rv[resource.get(field)] = {
-                    "package.title": package.get("title", "N/A"),
-                    "resource.title": resource.get("title", "N/A"),
-                    "notes": clean_html_from_metadata_notes(
-                        package.get("notes", "N/A")
-                    ),
-                    "organization": package.get("organization", {}).get("title", "N/A"),
-                    "tags": [
-                        tag.get("display_name", "") for tag in package.get("tags", [])
-                    ],
-                    # "metadata_created": obj.get("metadata_created", "N/A"),
-                    # "metadata_modified": obj.get("metadata_modified", "N/A"),
-                    # "license": obj.get("license_title", "N/A"),
-                    # "url": obj.get("url", "N/A"),
-                }
+    if source == "ckan":
+        for package in metadata:
+            resources = package.get("resources", [])
+            for resource in resources:
+                if dataset_ids is None or resource.get(field) in dataset_ids:
+                    if dataset_ids is not None:
+                        dataset_ids.remove(resource.get(field))
+                    rv[resource.get(field)] = {
+                        "package.title": package.get("title", "N/A"),
+                        "resource.title": resource.get("title", "N/A"),
+                        "notes": clean_html_from_metadata_notes(
+                            package.get("notes", "N/A")
+                        ),
+                        "organization": package.get("organization", {}).get(
+                            "title", "N/A"
+                        ),
+                        "tags": [
+                            tag.get("display_name", "")
+                            for tag in package.get("tags", [])
+                        ],
+                        # "metadata_created": obj.get("metadata_created", "N/A"),
+                        # "metadata_modified": obj.get("metadata_modified", "N/A"),
+                        # "license": obj.get("license_title", "N/A"),
+                        # "url": obj.get("url", "N/A"),
+                    }
+    else:
+        for dataset in metadata:
+            resource = dataset.get("resource", {})
+            cls_dict = dataset.get("classification", {})
+
+            rv[resource["id"]] = {
+                "package.title": "N/A",
+                "resource.title": resource.get("name", "N/A"),
+                "notes": resource.get("description", "N/A"),
+                "organization": "N/A",
+                "tags": [
+                    tag
+                    for tag in cls_dict.get("domain_tags", [])
+                    + cls_dict.get("tags", [])
+                    + cls_dict.get("categories", [])
+                ],
+            }
 
     return rv
 

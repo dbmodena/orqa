@@ -8,7 +8,7 @@ import polars as pl
 from tqdm import tqdm
 
 from orqa.sloth import sloth
-from orqa.utils import pl_read_dataset, remove_null_columns, remove_null_rows
+from orqa.utils import pl_read_dataset
 
 DOCUMENT_TYPE = "csv"
 THRESHOLD = 0.5
@@ -24,7 +24,6 @@ def load_dataset_as_list_of_columns(
     path: Path, columns: list, opts: dict = {}
 ) -> list[list[Any]]:
     df = pl_read_dataset(path, opts)
-    df = remove_null_columns(df)
     columns = list(set(columns))
     if columns != []:
         if isinstance(columns[0], int):
@@ -32,7 +31,6 @@ def load_dataset_as_list_of_columns(
             columns = [pl.nth(i) for i in columns]
             # print(c, "--->", columns)
         df = df.select(*columns)
-    df = remove_null_rows(df)
 
     # Convert to column-oriented list of lists
     columns = []

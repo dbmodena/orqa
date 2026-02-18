@@ -4,6 +4,7 @@
 # since here we have column-level details, and we do not have anymore the 
 # package-resource(s) semantic, we just have "datasets".
 
+source: socrata
 seed: 0
 
 pandas:
@@ -12,6 +13,46 @@ pandas:
       nrows: 10_000
     json:
       nrows: 10_000
+
+
+blend:
+  xash_size: 128
+  max_cell_length: 128
+  clean_args:
+    lowercase: True
+    bad_tokens:
+      - "none"
+      - "null"
+      - "nan"
+      - "na"
+      - "n/a"
+      - "not available"
+      - "no data"
+      - "(null)"
+
+      # we do not want to filer all the punctuations, 
+      # or to replace all the punctuations with empty 
+      # strings or whatever; we just found that these 
+      # values are pretty common, and that are not 
+      # really useful for any analyses
+      - "-"
+      - "."
+      - "*"
+
+      # These values are extremely frequent (>10M rows)
+      # but are likely to give less information, when 
+      # considered as key elements
+      # Maybe we will lost some possibility to identify
+      # unionable tables, but we can take this risk
+      # However, only during indexing these values are 
+      # filtered, but are kept in original tables
+      - "0"
+      - "0.0"
+      - "1"
+      - "2"
+      - "no"
+      - "yes"
+      - "ny"
 
 tasks:
   crawling:
@@ -29,31 +70,16 @@ tasks:
     verbose: True
 
   indexing:
-    xash_size: 128
     max_process_workers: 12
     # max_queue_size: 2000
-    clean_args:
-      lowercase: True
-      bad_tokens:
-        - "none"
-        - "null"
-        - "nan"
-
-        # we do not want to filer all the punctuations, 
-        # or to replace all the punctuations with empty 
-        # strings or whatever; we just found that these 
-        # values are pretty common, and that are not 
-        # really useful for any analyses
-        - "-"
-        - "."
     verbose: True
 
   candidates_discovery:
-    n_random_dataset_seeds: 50
+    n_random_dataset_seeds: 20
     min_dataset_height: 10
     limit_to_n_columns: 15
     sample_size: 3
-    top_k_results_per_task: 30
+    top_k_results_per_task: 10
     qcr_hash_size: 128
     n_paths_for_dataset: 5
     max_path_length: 5

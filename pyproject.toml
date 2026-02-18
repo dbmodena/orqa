@@ -28,8 +28,8 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-blend = { git = "https://github.com/nanni00/Blend" }
 ulod = { git = "https://github.com/nanni00/ULOD" }
+blend = { git = "https://github.com/nanni00/Blend" }
 
 [tool.ty.environment]
 root = ["./src"]

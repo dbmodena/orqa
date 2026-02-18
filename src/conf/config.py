@@ -71,13 +71,22 @@ class Indexing:
     Configuration class for the Indexing stage
     """
 
-    xash_size: Literal[64, 128, 256, 512]
     index_folder_path: Path
     index_database_path: Path
     max_process_workers: int
 
-    clean_args: dict
     verbose: bool
+
+
+@dataclass
+class BLENDOpts:
+    """
+    Configuration class for BLEND
+    """
+
+    clean_args: dict
+    xash_size: Literal[64, 128, 256, 512]
+    max_cell_length: int
 
 
 @dataclass
@@ -148,10 +157,14 @@ class CandidatesDiscovery:
 
 @dataclass
 class OrQAConfig:
+    source: Literal["ckan", "socrata"]
     seed: int
     crawling: Crawling
     indexing: Indexing
     candidates_discovery: CandidatesDiscovery
+
+    # BLEND options for Indexing and Candidate Discovery
+    blend_opts: BLENDOpts
 
     # Dataframe tools configurations for read/write ops
     polars_opts: PolarsOpts = field(init=False)
@@ -236,6 +249,8 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     with open(yaml_path, "r") as file:
         parsed = yaml.safe_load(file)
 
+    source = parsed["source"]
+
     # we will use a unique seed for random operations
     seed = int(parsed["seed"])
 
@@ -262,10 +277,6 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
 
     # setup the Indexing step
     indexing_task = parsed["tasks"]["indexing"]
-    indexing_task["clean_args"] = indexing_task.get("clean_args", {})
-    indexing_task["clean_args"]["bad_tokens"] = tuple(
-        indexing_task["clean_args"].get("bad_tokens", [])
-    )
     index_folder_path = data_path.joinpath("blend")
     index_database_path = index_folder_path.joinpath("index.db")
     indexing = Indexing(
@@ -273,6 +284,11 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         index_folder_path=index_folder_path,
         index_database_path=index_database_path,
     )
+
+    parsed["blend"]["clean_args"]["bad_tokens"] = tuple(
+        parsed["blend"]["clean_args"].get("bad_tokens", [])
+    )
+    blend_opts = BLENDOpts(**parsed["blend"])
 
     # setup the Candidates Discovery step
     candidates_discovery_task = parsed["tasks"]["candidates_discovery"]
@@ -295,7 +311,9 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     )
 
     orqa_cfg = OrQAConfig(
+        source=source,
         seed=seed,
+        blend_opts=blend_opts,
         crawling=crawling,
         indexing=indexing,
         candidates_discovery=candidates_discovery,

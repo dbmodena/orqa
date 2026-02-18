@@ -9,8 +9,9 @@ def create_blend_index(cfg: OrQAConfig):
 
     index = BLEND(
         cfg.indexing.index_database_path,
-        clean_args=cfg.indexing.clean_args,
-        xash_size=cfg.indexing.xash_size,
+        clean_args=cfg.blend_opts.clean_args,
+        xash_size=cfg.blend_opts.xash_size,
+        max_cell_length=cfg.blend_opts.max_cell_length,
     )
 
     logging_path = cfg.logging_path.joinpath("indexing", "blend.log")
