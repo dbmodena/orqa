@@ -1,10 +1,11 @@
 # LLM Configuration File
 # Primary model (will be tried first)
-model: "oci/meta.llama-3.3-70b-instruct"
+model: "ollama_chat/llama3.1:8b"
 # Fallback models (tried in order if primary fails)
 fallback_models:
-   - "ollama_chat/llama3.1:8b"
+   - "oci/openai.gpt-oss-120b"
    - "groq/llama-3.3-70b-versatile"
+#   - "groq/llama-3.1-8b-instant"
 #  - "together_ai/togethercomputer/Llama-2-7B-32K-Instruct"
 
 # Provider-specific parameters
@@ -12,29 +13,30 @@ provider_params:
   ollama_chat:
     api_base: "http://localhost:11434"
     keep_alive: "24h"
-    num_ctx: 8192
+    num_ctx: 16384
     response_format: 
       type: "json_object"
   groq:
-    api_key: ${GROQ_API_KEY}
+    api_key:  os.environ/GROQ_API_KEY
     # Groq-specific params (if any)
     response_format: 
       type: "json_object"
   together_ai:
     # TogetherAI-specific params (if any)
   oci:
-    drop_params: True
     oci_region: os.environ/OCI_REGION
     oci_user: os.environ/OCI_USER
     oci_fingerprint: os.environ/OCI_FINGERPRINT
     oci_tenancy: os.environ/OCI_TENANCY
     oci_key_file: os.environ/OCI_KEY_FILE
     oci_compartment_id: os.environ/OCI_COMPARTMENT_ID
+    response_format: 
+      type: "json_object"
 
 # Common parameters (applied to all models)
 
-max_retries: 5
-temperature: 0.2
+max_retries: 3
+temperature: 0.1
 retry_delay: 10.0
 enable_json_mode: true
 
