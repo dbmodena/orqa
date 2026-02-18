@@ -53,6 +53,7 @@ def schema_matching(
     if verbose:
         print("Computing Schema Matching...")
     matches: dict[Any, float] = valentine_match(Q, R, matcher, "Q", "R")
+    matches = {(x, y): s for ((_, x), (_, y)), s in matches.items()}
     if verbose:
         print("Done.")
 
@@ -66,7 +67,7 @@ def schema_matching(
         case "U":
             filtered_values = [
                 value
-                for ((_, col1), (_, col2)), value in matches.items()
+                for (col1, col2), value in matches.items()
                 if col1 in q_columns  # and col2 in r_columns
             ]
 
@@ -77,7 +78,7 @@ def schema_matching(
             assert isinstance(r_columns, list)
             filtered_values = [
                 value
-                for ((_, col1), (_, col2)), value in matches.items()
+                for (col1, col2), value in matches.items()
                 if col1 in q_columns and col2 in r_columns
             ]
 
@@ -87,7 +88,7 @@ def schema_matching(
         case "JC":
             filtered_values = [
                 value
-                for ((_, col1), (_, col2)), value in matches.items()
+                for (col1, col2), value in matches.items()
                 if (col1 == q_key and col2 == r_key)
                 or (col1 == q_target and col2 == r_target)
             ]

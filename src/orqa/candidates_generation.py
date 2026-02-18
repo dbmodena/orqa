@@ -158,9 +158,9 @@ def _execute_single_join_search(index: BLEND, column, k):
     return index.single_column_join_search(column, k)
 
 
-@timeout(60)
+@timeout(90)
 def _execute_multi_join_search(index: BLEND, table, k):
-    return index.multi_column_join_search(table, k)
+    return index.multi_column_join_search(table, k, verbose=True)
 
 
 @timeout(30)
@@ -223,8 +223,8 @@ def execute_tasks(
                                 "Q": query_id,
                                 "R": cand_id,
                                 "task": "J",
-                                "q_join_keys": [columns[0]],
-                                "r_join_keys_pos": [r_join_key],
+                                "q_columns": [columns[0]],
+                                "r_columns": [r_join_key],
                             }
                         )
             except (TimeoutError, RuntimeError):
@@ -240,8 +240,8 @@ def execute_tasks(
                                 "Q": query_id,
                                 "R": cand_id,
                                 "task": "J",
-                                "q_join_keys": columns,
-                                "r_join_keys_pos": r_join_keys,
+                                "q_columns": columns,
+                                "r_columns": r_join_keys,
                             }
                         )
             except (TimeoutError, RuntimeError):
@@ -260,19 +260,26 @@ def execute_tasks(
 
         is_float = targets.dtype.is_numeric()
         if not is_float:
-            for method in _string_to_float_methods:
+            casting_exprs = [
+                pl.col(target_column),
+                pl.col(target_column)
+                .str.strip_chars()
+                .str.replace_all(r"[£,]", "", literal=False),
+            ]
+            for expr in casting_exprs:
                 try:
                     targets = (
-                        df.get_column(target_column)
-                        .map_elements(method, pl.String)
+                        df.lazy()  # ty: ignore
+                        .with_columns(expr)
+                        .collect()
+                        .get_column(target_column)
                         .cast(pl.Float32)
                     )
+                except pl.exceptions.InvalidOperationError as e:
+                    print(str(e).replace("\n\n", "\n"))
+                else:
                     is_float = True
                     break
-                except pl.exceptions.InvalidOperationError as e:
-                    print(f"Method: {method}")
-                    print(str(e).replace("\n\n", "\n"))
-                    continue
 
         if not is_float:
             continue
@@ -491,24 +498,11 @@ def pipeline(cfg: OrQAConfig):
         )
         print("\n" + " DONE ".center(100, "="))
 
-        # TODO: tag or filter with metadata from Valentine Schema matching:
-        #   - Joinable pairs with (almost-)identical schema should not be joined;
-        #   - Unionable pairs should have a very similar schema instead;
-        save_list_to_jsonlines(cfg.candidates_discovery.tasks_results_path, candidates)
-
-        print("\n" + " EVALUATE BLEND MATCHES WITH VALENTINE ".center(100, "="))
-        evaluate_matches(
-            cfg,
-            candidates,
-        )
-        print("\n" + " DONE ".center(100, "="))
-        save_list_to_jsonlines(cfg.candidates_discovery.tasks_results_path, candidates)
-
         # Add the identified matches to the queue of datasets that have to be analysed
         for candidate in candidates:
             filename = str(candidate["R"])
             q.add(
-                (  # ty: ignore
+                (
                     candidate["R"],
                     cfg.datasets_path / f"{candidate['R']}.{cfg.datasets_format}",
                     *(filename.split(SEP) if SEP in filename else ("", filename)),
@@ -518,9 +512,18 @@ def pipeline(cfg: OrQAConfig):
         # Once we have executed the tasks, we can add the identified
         # matches to the graph
         print("\n" + " EXTENDING GRAPH ".center(100, "="))
-        G.add(candidates, cfg.datasets_path, cfg.polars_opts.read, verbose=False)
+        G.add(
+            candidates,
+            cfg.datasets_path,
+            cfg.polars_opts.read,
+            "coma",
+            {"use_instances": False},
+            verbose=False,
+        )
         print("\n" + " DONE ".center(100, "="))
         G.save(cfg.candidates_discovery.matches_graph_path)
+
+        save_list_to_jsonlines(cfg.candidates_discovery.tasks_results_path, candidates)
 
     G.save(cfg.candidates_discovery.matches_graph_path)
 

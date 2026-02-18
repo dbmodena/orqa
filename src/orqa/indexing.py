@@ -19,6 +19,7 @@ def create_blend_index(cfg: OrQAConfig):
 
     cfg.tmp_path.mkdir(parents=True, exist_ok=True)
 
+    print(" INDEXING TABLES WITH BLEND ".center(100, "="))
     index_tables(
         index,
         cfg.datasets_path,
@@ -27,5 +28,6 @@ def create_blend_index(cfg: OrQAConfig):
         load_opts=cfg.polars_opts.scan[cfg.crawling.download_format],
         max_workers=cfg.indexing.max_process_workers,
         max_queue_size=1000,
-        # tmp_path=cfg.tmp_path,
+        # tmp_path=cfg.tmp_path
     )
+    print(" INDEXING COMPLETED ".center(100, "="))

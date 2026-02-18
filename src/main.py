@@ -64,7 +64,7 @@ def nyc():
 
     # crawl_nyc(cfg)
     # socrata_cleaning(cfg)
-    create_blend_index(cfg)
+    # create_blend_index(cfg)
     candidates_discovery(cfg)
 
 

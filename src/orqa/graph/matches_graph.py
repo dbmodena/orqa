@@ -1,12 +1,13 @@
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 import networkx as nx
-import polars as pl
 from tqdm import tqdm
 
+from orqa.schema_matching.valentine_matcher import instantiate_matcher, schema_matching
 from orqa.sloth import sloth
 from orqa.utils import pl_read_dataset
 
@@ -14,84 +15,11 @@ DOCUMENT_TYPE = "csv"
 THRESHOLD = 0.5
 MAX_WORKERS = 10
 OVERLAP_RATIO_THRESHOLD = 0.5
+ROUND = 5
 
 
 def overlap_ratio_only_predicate(edge_data: dict, overlap_threshold: float) -> bool:
     return edge_data["overlap_ratio"] >= overlap_threshold
-
-
-def load_dataset_as_list_of_columns(
-    path: Path, columns: list, opts: dict = {}
-) -> list[list[Any]]:
-    df = pl_read_dataset(path, opts)
-    columns = list(set(columns))
-    if columns != []:
-        if isinstance(columns[0], int):
-            # c = columns
-            columns = [pl.nth(i) for i in columns]
-            # print(c, "--->", columns)
-        df = df.select(*columns)
-
-    # Convert to column-oriented list of lists
-    columns = []
-    for col_name in df.columns:
-        columns.append(df[col_name].to_list())
-    return columns
-
-
-def calculate_overlap_ratio(
-    table: list[list[Any]], result: list[tuple], metrics: list
-) -> dict:
-    """
-    Calculate the overlap ratio using metrics and r_tab
-
-    Args:
-        r_tab: The R table as list of columns
-        result: The SLOTH result [(mapping, overlap_rows), ...]
-        metrics: The metrics returned by SLOTH
-
-    Returns:
-        dictionary with overlap statistics
-    """
-    if not result or not result[0] or not metrics:
-        return {
-            "overlap_area": 0,
-            "r_involved_area": 0,
-            "overlap_ratio": 0.0,
-            "num_columns_involved": 0,
-            "num_rows_in_r": 0,
-            "num_rows_overlapping": 0,
-        }
-
-    # Extract from metrics (already calculated by SLOTH)
-    overlap_area = metrics[-2]  # Area from metrics
-    num_rows_overlapping = metrics[-3]  # Height from metrics
-    num_columns_involved = metrics[-4]  # Width from metrics
-
-    # Extract mapping from result
-    mapping, overlap_rows = result[0]
-
-    # Get R column indices involved
-    r_column_indices = [col_pair[0] for col_pair in mapping]
-
-    # Calculate R involved area
-    num_rows_in_r = len(table[r_column_indices[0]]) if r_column_indices else 0
-    r_involved_area = num_columns_involved * num_rows_in_r
-
-    # Calculate ratio
-    overlap_ratio = (
-        (overlap_area / r_involved_area * 100) if r_involved_area > 0 else 0.0
-    )
-
-    return {
-        "overlap_area": overlap_area,
-        "r_involved_area": r_involved_area,
-        "overlap_ratio": overlap_ratio,
-        "num_columns_involved": num_columns_involved,
-        "num_rows_in_r": num_rows_in_r,
-        "num_rows_overlapping": num_rows_overlapping,
-        "r_column_indices": r_column_indices,
-    }
 
 
 def compute_overlap_metrics(
@@ -113,68 +41,154 @@ def compute_overlap_metrics(
 
     # Run SLOTH
     result, metrics = sloth(left_table, right_table, metrics=metrics, verbose=verbose)
-    # Calculate overlap statistics
-    stats = calculate_overlap_ratio(left_table, result, metrics)
-    return {"overlap_ratio": stats["overlap_ratio"]}
+
+    if not result or not result[0] or not metrics:
+        return {
+            "overlap_area": 0,
+            "r_involved_area": 0,
+            "overlap_ratio": 0.0,
+            "num_columns_involved": 0,
+            "num_rows_in_r": 0,
+            "num_rows_overlapping": 0,
+        }
+
+    # Extract from metrics (already calculated by SLOTH)
+    overlap_area = metrics[-2]  # Area from metrics
+    num_rows_overlapping = metrics[-3]  # Height from metrics
+    num_columns_involved = metrics[-4]  # Width from metrics
+
+    # Extract mapping from result
+    mapping, overlap_rows = result[0]
+
+    left_area = len(left_table) * len(left_table[0])
+    right_area = len(right_table) * len(right_table[0])
+
+    min_area = min(left_area, right_area)
+    overlap_ratio = overlap_area / min_area * 100
+
+    return {
+        "overlap_area": overlap_area,
+        "overlap_ratio": round(overlap_ratio, ROUND),
+        "num_columns_involved": num_columns_involved,
+        "num_rows_overlapping": num_rows_overlapping,
+    }
 
 
 def process_edge(
-    entry: dict, datasets_folder: Path, read_opts: dict = {}, verbose: bool = False
-) -> tuple[str, str, str, dict] | None:
+    entry: dict,
+    entry_idx: int,
+    datasets_folder: Path,
+    read_opts: dict = {},
+    matcher_name: str = "coma",
+    matcher_kwargs: Optional[dict] = None,
+    verbose: bool = False,
+) -> tuple[int, str, str, str, list, dict, list] | None:
     """Helper function to process a single edge in parallel"""
     q_node = entry["Q"]
     r_node = entry["R"]
-    task_label = entry["task"]
+    task = entry["task"]
+
+    metrics = {}
 
     if q_node == r_node:
         return None
 
-    match task_label:
-        case "U":
-            left_columns = entry["q_columns"]
-            right_columns = []
-        case "J":
-            try:
-                left_columns = entry["q_join_keys"]
-                right_columns = entry["r_join_keys_pos"]
-            except KeyError:
-                try:
-                    left_columns = [entry["q_join_key"]]
-                    right_columns = [entry["r_join_key_pos"]]
-                except KeyError:
-                    print("Whatafuck", entry)
+    Q = pl_read_dataset(datasets_folder / f"{q_node}.csv", read_opts)
+    R = pl_read_dataset(datasets_folder / f"{r_node}.csv", read_opts)
 
+    q_columns = r_columns = None
+    q_key = r_key = None
+    q_target = r_target = None
+
+    match task:
+        case "U":
+            q_columns = entry["q_columns"]
+            r_columns = []
+        case "J" | "MJ":
+            q_columns = entry["q_columns"]
+            r_columns = entry["r_columns"]
+
+            r_columns = [R.columns[idx] for idx in r_columns]
         case "JC":
-            left_columns = [entry["q_key"], entry["q_target"]]
-            right_columns = [entry["r_key"], entry["r_target"]]
+            q_key = entry["q_key"]
+            q_target = entry["q_target"]
+
+            r_key = R.columns[entry["r_key"]]
+            r_target = R.columns[entry["r_target"]]
+
+            q_columns = [q_key]
+            r_columns = [r_key]
+        case _:
+            raise ValueError(f"Unknown task: {task}")
 
     try:
-        left_path = datasets_folder.joinpath(f"{q_node}.{DOCUMENT_TYPE}")
-        right_path = datasets_folder.joinpath(f"{r_node}.{DOCUMENT_TYPE}")
-
-        left_table = load_dataset_as_list_of_columns(left_path, left_columns, read_opts)
-        right_table = load_dataset_as_list_of_columns(
-            right_path, right_columns, read_opts
-        )
-
-        # the metrics dictionary stores stats collected from
-        # schema matching and overlap methods
-        metrics = {
-            "sm_global_avg": entry["sm_global_avg"],
-            "sm_spec_avg": entry["sm_spec_avg"],
-            "sm_total_matches": entry["#matches"],
-        }
+        # Prepare datasets for SLOTH
+        q_columns_values = [Q.get_column(col).to_list() for col in q_columns]
+        r_columns_values = [
+            R.get_column(col).to_list()
+            for col in (r_columns if r_columns else R.columns)
+        ]
 
         # we force an overlap with at least #(left_table_involved_columns) width
-        metrics |= compute_overlap_metrics(
-            left_table, right_table, min_width=len(left_columns), verbose=verbose
+        overlap_t = time.time()
+        metrics = compute_overlap_metrics(
+            q_columns_values,
+            r_columns_values,
+            min_width=len(q_columns),
+            verbose=verbose,
         )
-
-        return (q_node, r_node, task_label, metrics)
+        overlap_t = time.time() - overlap_t
     except Exception as e:
-        print("Error while processing edge: ", e)
-        # raise e
-        return None
+        print(f"Error while processing edge with SLOTH: {e}")
+        metrics["overlap_ratio"] = None
+        metrics["overlap_time"] = None
+    else:
+        metrics["overlap_time"] = round(overlap_t, ROUND)
+
+    try:
+        # Prepare datasets for Schema Matching
+        Q = Q.to_pandas()
+        R = R.to_pandas()
+
+        matcher_kwargs = {} if matcher_kwargs is None else matcher_kwargs
+        matcher = instantiate_matcher(matcher_name, **matcher_kwargs)
+
+        match_t = time.time()
+        matches, macro_avg, micro_avg = schema_matching(
+            matcher,
+            task,
+            Q,
+            R,
+            q_columns,
+            r_columns,
+            q_key,
+            r_key,
+        )
+        match_t = time.time() - match_t
+    except Exception as e:
+        print(f"Error wile processing edge with Schema Matcher {matcher_name}: {e}")
+        metrics["sm_macro_avg"] = None
+        metrics["sm_micro_avg"] = None
+        metrics["sm_n_matches"] = None
+        metrics["sm_time"] = None
+    else:
+        metrics["sm_macro_avg"] = round(macro_avg, ROUND)
+        metrics["sm_micro_avg"] = round(micro_avg, ROUND)
+        metrics["sm_n_matches"] = len(matches)
+        metrics["sm_time"] = round(match_t, ROUND)
+
+    if task == "JC":
+        r_columns = [r_key, r_target]
+
+    return (
+        entry_idx,
+        q_node,
+        r_node,
+        task,
+        r_columns,
+        metrics,
+        [(c1, c2, round(s, ROUND)) for (c1, c2), s in matches.items()],
+    )
 
 
 def overlap_ratio_predicate(node: dict) -> bool:
@@ -187,45 +201,56 @@ class DatasetMatchesGraph:
 
     def add(
         self,
-        matches: list[dict],
+        blend_matches: list[dict],
         datasets_folder: Path,
         read_opts: dict,
+        matcher_name: str,
+        matcher_kwargs: Optional[dict] = None,
         max_workers: Optional[int] = None,
         verbose: bool = False,
     ):
-        # Add all nodes first
-        for entry in matches:
-            # print(f"Analyzing {entry}")
+        for entry in blend_matches:
             self._G.add_node(entry["Q"])
             self._G.add_node(entry["R"])
 
-        # Process edges in parallel
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            # Submit all tasks
             futures = {
                 executor.submit(
                     process_edge,
                     entry,
+                    idx,
                     datasets_folder,
                     read_opts,
+                    matcher_name,
+                    matcher_kwargs,
                     verbose,
                 )
-                for entry in matches
+                for idx, entry in enumerate(blend_matches)
             }
 
-            # Collect results as they complete
             for future in tqdm(
                 as_completed(futures),
                 desc="Adding edges to the graph",
-                total=len(matches),
+                total=len(blend_matches),
             ):
                 try:
                     result = future.result(60)
                     if result:
-                        q_node, r_node, task_label, metrics = result
-                        self._G.add_edge(q_node, r_node, label=task_label, **metrics)
+                        entry_idx, q_node, r_node, task, r_columns, metrics, matches = (
+                            result
+                        )
+
+                        if task != "JC":
+                            blend_matches[entry_idx]["r_columns"] = r_columns
+                        else:
+                            blend_matches[entry_idx]["r_key"] = r_columns[0]
+                            blend_matches[entry_idx]["r_target"] = r_columns[1]
+
+                        blend_matches[entry_idx]["matches"] = matches
+                        blend_matches[entry_idx]["metrics"] = metrics
+                        self._G.add_edge(q_node, r_node, task=task, **metrics)
                 except Exception as e:
-                    print("Error within main process: ", e)
+                    print(f"Error within main process: {e}")
 
     def expand_one_hop(
         self,

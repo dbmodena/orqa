@@ -1,6 +1,6 @@
 # LLM Configuration File
 # Primary model (will be tried first)
-model: "ollama_chat/llama3.1-8b"
+model: "ollama_chat/llama3.1:8b-fake"
 # Fallback models (tried in order if primary fails)
 fallback_models:
   # - "groq/llama-3.3-70b-versatile"
