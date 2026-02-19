@@ -13,9 +13,9 @@ from orqa.utils import pl_read_dataset
 
 DOCUMENT_TYPE = "csv"
 THRESHOLD = 0.5
-MAX_WORKERS = 10
+MAX_WORKERS = 5
 OVERLAP_RATIO_THRESHOLD = 0.5
-ROUND = 5
+ROUND = 3
 
 
 def overlap_ratio_only_predicate(edge_data: dict, overlap_threshold: float) -> bool:
@@ -98,7 +98,7 @@ def process_edge(
 
     q_columns = r_columns = None
     q_key = r_key = None
-    q_target = r_target = None
+    _q_target = r_target = None
 
     match task:
         case "U":
@@ -111,7 +111,7 @@ def process_edge(
             r_columns = [R.columns[idx] for idx in r_columns]
         case "JC":
             q_key = entry["q_key"]
-            q_target = entry["q_target"]
+            _q_target = entry["q_target"]
 
             r_key = R.columns[entry["r_key"]]
             r_target = R.columns[entry["r_target"]]
@@ -137,13 +137,14 @@ def process_edge(
             min_width=len(q_columns),
             verbose=verbose,
         )
-        overlap_t = time.time() - overlap_t
     except Exception as e:
         print(f"Error while processing edge with SLOTH: {e}")
-        metrics["overlap_ratio"] = None
-        metrics["overlap_time"] = None
+        metrics["overlap_ratio"] = -1
     else:
         metrics["overlap_time"] = round(overlap_t, ROUND)
+    finally:
+        overlap_t = time.time() - overlap_t
+        metrics["overlap_time"] = overlap_t
 
     try:
         # Prepare datasets for Schema Matching
@@ -164,19 +165,22 @@ def process_edge(
             q_key,
             r_key,
         )
-        match_t = time.time() - match_t
     except Exception as e:
         print(f"Error wile processing edge with Schema Matcher {matcher_name}: {e}")
-        metrics["sm_macro_avg"] = None
-        metrics["sm_micro_avg"] = None
-        metrics["sm_n_matches"] = None
-        metrics["sm_time"] = None
+        metrics["sm_macro_avg"] = -1
+        metrics["sm_micro_avg"] = -1
+        metrics["sm_n_matches"] = -1
     else:
         metrics["sm_macro_avg"] = round(macro_avg, ROUND)
         metrics["sm_micro_avg"] = round(micro_avg, ROUND)
         metrics["sm_n_matches"] = len(matches)
         metrics["sm_time"] = round(match_t, ROUND)
+    finally:
+        match_t = time.time() - match_t
+        metrics["sm_time"] = match_t
 
+    if task == "U":
+        r_columns = [c2 for (_, c2) in matches.keys()]
     if task == "JC":
         r_columns = [r_key, r_target]
 

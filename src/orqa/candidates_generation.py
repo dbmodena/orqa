@@ -4,32 +4,6 @@ Candidates Discovery Stage
 In this stage, candidates for actual dataset generation in next steps
 are proposed through an agentic step.
 
-1. A first AI Agent analyses a random subset of datasets
-    drawned from the whole available collection;
-        a. for each dataset, it inspects its available metadata and a sample
-            of few rows;
-        b. if the dataset is valid, the Agent proposes a set of data discovery
-            tasks to perform on it against the BLEND index.
-2. The proposed tasks are executed and each identified pair of candidate
-    matching datasets is stored.
-        a. Schema matching techniques are applied on the Join-discovered candidates,
-            avoiding to consider datasets with nearly-identical or identical schema
-            as joinable, while instead would be better to consider them only as unionable.
-3. The identified matches are used to build a graph representing the relationships
-    discovered among datasets: also, the graph is enriched with metadata about the
-    overlap ratio between each pair of tables, and metrics from schema matching
-    techniques.
-4. The graph is navigated in a random-walk or metadata-driven fashion to generate
-    paths of related involved, with 1...N datasets involved.
-    If a boolean predicate is specified, the generation is conducted on the sub-graph
-    induced by the predicate.
-        a. In the random-walk case, the graph is just traversed focusing only on
-            a specified type or relationships (e.g. Union-only), avoiding loops
-            and repeteated nodes.
-        b. In the metadata-driven case, the graph is again traversed in a random-walk
-            style, but giving more weight to one of the available metrics (overlap_ratio, ...)
-    In both case, each generated path is then used as final candidate.
-
 The workflow changes now:
     For each dataset seed:
         1. Propose tasks
@@ -38,16 +12,15 @@ The workflow changes now:
         4. Go to 1
 """
 
+import faulthandler
 import json
 import os
 import random
 import resource
 import time
-from functools import lru_cache
 from pathlib import Path
 
 import dotenv
-import networkx as nx
 import polars as pl
 from blend import BLEND
 from tqdm import tqdm
@@ -57,8 +30,12 @@ from conf import OrQAConfig
 
 from .agent.agent import CandidatesDiscoveryAgent
 from .graph import matches_graph
-from .schema_matching.valentine_matcher import instantiate_matcher, schema_matching
 from .utils import load_datasets_metadata, pl_read_dataset, remove_file_extension
+
+SEP = "__"
+COMPLETION_CALLS_TIMEOUT = 1
+PRINT_PAD = 120
+
 
 # make the API key for LLM available
 dotenv.load_dotenv(Path(__file__).parent.parent.joinpath(".env"))
@@ -75,10 +52,6 @@ def memory_limit_half():
     resource.setrlimit(resource.RLIMIT_AS, (int(get_memory() * 1024 / 2), hard))
 
 
-SEP = "__"
-COMPLETION_CALLS_TIMEOUT = 1
-
-
 def get_memory():
     with open("/proc/meminfo", "r") as mem:
         free_memory = 0
@@ -87,18 +60,6 @@ def get_memory():
             if str(sline[0]) in ("MemFree:", "Buffers:", "Cached:"):
                 free_memory += int(sline[1])
     return free_memory  # KiB
-
-
-def _f_nop(x: str):
-    return x
-
-
-def _f_comma_dot_filter_tokens(x: str):
-    x = x.strip().replace(",", "").replace("£", "").lower()
-    return x if x != "total" else None
-
-
-_string_to_float_methods = [_f_nop, _f_comma_dot_filter_tokens]
 
 
 def sample_seed_datasets(
@@ -158,7 +119,7 @@ def _execute_single_join_search(index: BLEND, column, k):
     return index.single_column_join_search(column, k)
 
 
-@timeout(90)
+@timeout(60)
 def _execute_multi_join_search(index: BLEND, table, k):
     return index.multi_column_join_search(table, k, verbose=True)
 
@@ -191,11 +152,9 @@ def execute_tasks(
     print(f"Join-Correlation tasks: {len(join_correlation_tasks)}")
 
     for task in tqdm(union_tasks, desc="Union tasks", position=1, leave=False):
-        columns = task["columns"]
-        table = df.select(columns).rows()
-
         try:
-            top_res = _execute_union_search(index, table, top_k)
+            columns = task["columns"]
+            top_res = _execute_union_search(index, df, top_k)
             for candidate in top_res:
                 cand_id = candidate[0]
                 if cand_id != query_id:
@@ -207,8 +166,10 @@ def execute_tasks(
                             "q_columns": columns,
                         }
                     )
-        except (TimeoutError, RuntimeError):
-            print(f"Timeout on Union: {query_id}")
+        except TimeoutError as e:
+            print(f"Timeout on Union for {query_id}: {e}")
+        except (RuntimeError, MemoryError) as e:
+            print(f"Timeout on Union for {query_id}: {e}")
 
     for task in tqdm(join_tasks, desc="Join tasks", position=1, leave=False):
         columns = task["columns"]
@@ -227,12 +188,13 @@ def execute_tasks(
                                 "r_columns": [r_join_key],
                             }
                         )
-            except (TimeoutError, RuntimeError):
-                print(f"Timeout on Single-Join: {query_id}")
+            except TimeoutError as e:
+                print(f"Timeout on Join for {query_id}: {e}")
+            except (RuntimeError, MemoryError) as e:
+                print(f"Timeout on Join for {query_id}: {e}")
         else:
-            table = df.select(columns).unique().rows()
             try:
-                top_res = _execute_multi_join_search(index, table, top_k)
+                top_res = _execute_multi_join_search(index, df.select(columns), top_k)
                 for cand_id, r_join_keys, _ in top_res:
                     if cand_id != query_id:
                         candidates.append(
@@ -244,8 +206,10 @@ def execute_tasks(
                                 "r_columns": r_join_keys,
                             }
                         )
-            except (TimeoutError, RuntimeError):
-                print(f"Timeout on Multi-Join: {query_id}")
+            except TimeoutError as e:
+                print(f"Timeout on Multi-Join for {query_id}: {e}")
+            except (RuntimeError, MemoryError) as e:
+                print(f"Timeout on Multi-Join for {query_id}: {e}")
 
     for task in tqdm(
         join_correlation_tasks, desc="Join-Correlation tasks", position=1, leave=False
@@ -261,22 +225,26 @@ def execute_tasks(
         is_float = targets.dtype.is_numeric()
         if not is_float:
             casting_exprs = [
-                pl.col(target_column),
+                pl.col(target_column).cast(pl.Float32),
                 pl.col(target_column)
                 .str.strip_chars()
-                .str.replace_all(r"[£,]", "", literal=False),
+                .str.replace_all(r"[£,*]", "", literal=False)
+                .cast(pl.Float32),
+                pl.col(target_column).cast(pl.Float32, strict=False),
             ]
-            for expr in casting_exprs:
+            for i, expr in enumerate(casting_exprs):
                 try:
                     targets = (
                         df.lazy()  # ty: ignore
                         .with_columns(expr)
+                        .select(target_column)
                         .collect()
                         .get_column(target_column)
-                        .cast(pl.Float32)
                     )
                 except pl.exceptions.InvalidOperationError as e:
-                    print(str(e).replace("\n\n", "\n"))
+                    print(
+                        f"Cast failed for JC attempt {i + 1}/{len(casting_exprs)}: {str(e).replace('\n\n', '\n')}"
+                    )
                 else:
                     is_float = True
                     break
@@ -304,95 +272,19 @@ def execute_tasks(
                             "r_target": r_target_column,
                         }
                     )
-        except (TimeoutError, RuntimeError):
-            print(f"Timeout on Join-Correlation: {query_id}")
+        except TimeoutError as e:
+            print(f"Timeout on Join-Correlation for {query_id}: {e}")
+        except (RuntimeError, MemoryError) as e:
+            print(f"Timeout on Join-Correlation for {query_id}: {e}")
+
     return candidates
 
 
-@lru_cache(64)
-def _load_dataframe(path: Path, opts: str, seed: int) -> pl.DataFrame:
-    df = pl_read_dataset(path, json.loads(opts))
-    return df.sample(min(30, df.height), seed=seed)
-
-
-def load_dataframe(path: Path, opts: dict, seed: int) -> pl.DataFrame:
-    return _load_dataframe(path, json.dumps(opts), seed)
-
-
-def evaluate_matches(
-    cfg: OrQAConfig,
-    blend_matches: list[dict],
-):
-    matcher_name = "coma"
-
-    matcher = instantiate_matcher(matcher_name, use_instances=False)
-
-    for blend_match in tqdm(blend_matches, desc="Scanning BLEND matches"):
-        Q_name = blend_match["Q"]
-        R_name = blend_match["R"]
-        task = blend_match["task"]
-
-        Q = load_dataframe(
-            cfg.datasets_path / f"{Q_name}.csv", cfg.polars_opts.read, cfg.seed
-        )
-        R = load_dataframe(
-            cfg.datasets_path / f"{R_name}.csv", cfg.polars_opts.read, cfg.seed
-        )
-
-        q_columns = r_columns = None
-        q_key = r_key = None
-        q_target = r_target = None
-
-        match task:
-            case "U":
-                q_columns = blend_match["q_columns"]
-            case "J" | "MJ":
-                q_columns = blend_match["q_join_keys"]
-
-                r_columns_pos = blend_match["r_join_keys_pos"]
-                r_columns = [R.columns[i] for i in r_columns_pos]
-            case "JC":
-                q_key = blend_match["q_key"]
-                q_target = blend_match["q_target"]
-
-                r_key_pos = blend_match["r_key"]
-                r_target_pos = blend_match["r_target"]
-                r_key = R.columns[r_key_pos]
-                r_target = R.columns[r_target_pos]
-
-        try:
-            match_t = time.time()
-            matches, global_avg, spec_avg = schema_matching(
-                matcher,
-                task,
-                Q.to_pandas(),
-                R.to_pandas(),
-                q_columns,  # ty: ignore
-                r_columns,
-                q_key,
-                r_key,
-                q_target,
-                r_target,
-            )
-            match_t = time.time() - match_t
-        except Exception as exc:
-            print(f"Error with Q={Q_name}, R={R_name}: {exc}")
-            blend_match["sm_global_avg"] = None
-            blend_match["sm_spec_avg"] = None
-            blend_match["#matches"] = None
-        else:
-            blend_match["sm_global_avg"] = global_avg
-            blend_match["sm_spec_avg"] = spec_avg
-            blend_match["#matches"] = len(matches)
-            blend_match["time(s)"] = match_t
-        finally:
-            blend_match["#Q_schema"] = len(Q.columns)
-            blend_match["#R_schema"] = len(R.columns)
-            blend_match["#Q_req_columns"] = len(q_columns) if q_columns else None
-            blend_match["#R_req_columns"] = len(r_columns) if r_columns else None
-
-
 def pipeline(cfg: OrQAConfig):
+    memory_limit_half()
+    faulthandler.enable()
+
+    time_stat_records = []
     seed_datasets = get_seed_datasets(cfg)
 
     # save seed datasets
@@ -417,7 +309,7 @@ def pipeline(cfg: OrQAConfig):
     agent = CandidatesDiscoveryAgent(litellm_config_path)
 
     tokens_budget = 1_000_000
-    n_datasets_limit = 500
+    n_datasets_limit = 1000
 
     _format = cfg.datasets_format
 
@@ -440,6 +332,7 @@ def pipeline(cfg: OrQAConfig):
     # Place the candidates inside q. Once we have analyzed all the
     # initial seeds, switch to the candidates.
     q = set()
+    print([s[0] for s in seed_datasets])
 
     while seed_datasets or q:
         # first pop the seeds, then switch to the candidates
@@ -456,76 +349,108 @@ def pipeline(cfg: OrQAConfig):
         if tokens_budget <= 0 or n_datasets_limit <= 0:
             break
 
-        print("\n" + f" DATASET {dataset_id} ".center(100, "=") + "\n")
+        try:
+            print("\n" + f" DATASET {dataset_id} ".center(PRINT_PAD, "=") + "\n")
 
-        # get its metadata
-        metadata = datasets_metadata[resource_id]
+            # get its metadata
+            metadata = datasets_metadata[resource_id]
 
-        # Propose tasks for this dataset
-        tasks_completion = generate_tasks(cfg, dataset_path, metadata, agent)
-        if not tasks_completion:
-            continue
+            # Propose tasks for this dataset
+            g_t = time.time()
+            tasks_completion = generate_tasks(cfg, dataset_path, metadata, agent)
+            if not tasks_completion:
+                continue
+            g_t = time.time() - g_t
 
-        total_tokens = tasks_completion["token_usage"]["total_tokens"]
-        tasks = tasks_completion["tasks"]
-        tokens_budget -= total_tokens
-        n_datasets_limit -= 1
+            total_tokens = tasks_completion["token_usage"]["total_tokens"]
+            tasks = tasks_completion["tasks"]
+            tokens_budget -= total_tokens
+            n_datasets_limit -= 1
 
-        if isinstance(tasks, str):
-            continue
+            if isinstance(tasks, str):
+                continue
 
-        print("\n" + " BUDGET UPDATE ".center(100, "="))
-        print(f" Remaining tokens: {tokens_budget} ".center(100, "-"))
-        print(f" Remaining datasets: {n_datasets_limit} ".center(100, "-"))
-        print("=" * 100 + "\n")
+            print("\n" + " BUDGET UPDATE ".center(PRINT_PAD, "="))
+            print(f" Remaining tokens: {tokens_budget} ".center(PRINT_PAD, "-"))
+            print(f" Remaining datasets: {n_datasets_limit} ".center(PRINT_PAD, "-"))
+            print("=" * 100 + "\n")
 
-        # wait some time (for remote groq calls...)
-        time.sleep(COMPLETION_CALLS_TIMEOUT)
-        save_list_to_jsonlines(
-            cfg.candidates_discovery.proposed_tasks_path, [tasks_completion]
-        )
-
-        # execute the tasks
-        print("\n" + " EXECUTING TASKS ".center(100, "="))
-        candidates = execute_tasks(
-            index,
-            top_k,
-            tasks,
-            dataset_id,
-            dataset_path,
-            cfg.polars_opts.read,
-            cfg.candidates_discovery.qcr_hash_size,
-        )
-        print("\n" + " DONE ".center(100, "="))
-
-        # Add the identified matches to the queue of datasets that have to be analysed
-        for candidate in candidates:
-            filename = str(candidate["R"])
-            q.add(
-                (
-                    candidate["R"],
-                    cfg.datasets_path / f"{candidate['R']}.{cfg.datasets_format}",
-                    *(filename.split(SEP) if SEP in filename else ("", filename)),
-                )
+            # wait some time (for remote groq calls...)
+            time.sleep(COMPLETION_CALLS_TIMEOUT)
+            save_list_to_jsonlines(
+                cfg.candidates_discovery.proposed_tasks_path, [tasks_completion]
             )
 
-        # Once we have executed the tasks, we can add the identified
-        # matches to the graph
-        print("\n" + " EXTENDING GRAPH ".center(100, "="))
-        G.add(
-            candidates,
-            cfg.datasets_path,
-            cfg.polars_opts.read,
-            "coma",
-            {"use_instances": False},
-            verbose=False,
-        )
-        print("\n" + " DONE ".center(100, "="))
-        G.save(cfg.candidates_discovery.matches_graph_path)
+            # execute the tasks
+            print("\n" + " EXECUTING TASKS ".center(PRINT_PAD, "="))
+            e_t = time.time()
+            candidates = execute_tasks(
+                index,
+                top_k,
+                tasks,
+                dataset_id,
+                dataset_path,
+                cfg.polars_opts.read,
+                cfg.candidates_discovery.qcr_hash_size,
+            )
+            e_t = time.time() - e_t
+            print("\n" + " DONE ".center(PRINT_PAD, "="))
 
-        save_list_to_jsonlines(cfg.candidates_discovery.tasks_results_path, candidates)
+            # Add the identified matches to the queue of datasets that have to be analysed
+            for candidate in candidates:
+                filename = str(candidate["R"])
+                q.add(
+                    (
+                        candidate["R"],
+                        cfg.datasets_path / f"{candidate['R']}.{cfg.datasets_format}",
+                        *(filename.split(SEP) if SEP in filename else ("", filename)),
+                    )
+                )
+
+            # Once we have executed the tasks, we can add the identified
+            # matches to the graph
+            print("\n" + " EXTENDING GRAPH ".center(PRINT_PAD, "="))
+            a_t = time.time()
+            G.add(
+                candidates,
+                cfg.datasets_path,
+                cfg.polars_opts.read,
+                "coma",
+                {"use_instances": False},
+                verbose=False,
+            )
+            print("\n" + " DONE ".center(PRINT_PAD, "="))
+            a_t = time.time()
+            G.save(cfg.candidates_discovery.matches_graph_path)
+            save_list_to_jsonlines(
+                cfg.candidates_discovery.tasks_results_path, candidates
+            )
+
+            time_stat_records.append(
+                {
+                    "Q": dataset_id,
+                    "tasks_proposal_time": g_t,
+                    "tasks_execution_time": e_t,
+                    "graph_increment_time": a_t,
+                }
+            )
+            save_time_statistics(
+                time_stat_records, cfg.statistics_path / "generation_time_stats.csv"
+            )
+        except OSError as e:
+            print(f"SegFault (?): {e}")
 
     G.save(cfg.candidates_discovery.matches_graph_path)
+
+
+def save_time_statistics(records: list, path: Path):
+    if path.exists():
+        with open(path, "a") as file:
+            pl.DataFrame(records).write_csv(
+                file, include_header=False, float_precision=3
+            )
+    else:
+        pl.DataFrame(records).write_csv(path, float_precision=3)
 
 
 def save_list_to_jsonlines(path: Path, objects: list):
@@ -593,52 +518,3 @@ def candidates_discovery(cfg: OrQAConfig):
     # G = DatasetMatchesGraph()
     # G.add(candidates, cfg.datasets_path, cfg.polars_opts.read, verbose=False)
     # G.save(cfg.candidates_discovery.matches_graph_path)
-
-
-def candidates_discovery_old(cfg: OrQAConfig):
-    # TODO: export these as configuration options
-    GENERATE_TASKS = False
-    EXECUTE_TASKS = False
-    BUILD_GRAPH = True
-    EXPLORE_GRAPH = True
-
-    # TODO: consider as seeds only valid datasets
-    # (i.e. datasets with at least N rows in general)
-    seed_datasets = get_seed_datasets(cfg)
-
-    if GENERATE_TASKS:
-        generate_tasks(cfg, seed_datasets)
-    with open(cfg.candidates_discovery.proposed_tasks_path, "r") as file:
-        generated_tasks = json.load(file)
-
-    memory_limit_half()
-
-    if EXECUTE_TASKS:
-        discovered_candidates = execute_tasks(cfg, generated_tasks)
-    else:
-        try:
-            with open(
-                cfg.candidates_discovery.tasks_results_path,
-                "r",
-            ) as file:
-                discovered_candidates = json.load(file)
-
-        except FileNotFoundError:
-            print(
-                f"File {cfg.candidates_discovery.tasks_results_path} not found: have you executed tasks yet?"
-            )
-            return
-
-    if BUILD_GRAPH:
-        G = build_matches_graph(cfg, discovered_candidates)
-    else:
-        try:
-            G = nx.read_gml(cfg.candidates_discovery.matches_graph_path)
-        except FileNotFoundError:
-            print(
-                f"File {cfg.candidates_discovery.matches_graph_path} not found: have you generated the graph yet?"
-            )
-            return
-
-    if EXPLORE_GRAPH:
-        explore_matches_graph(cfg, G, seed_datasets)
