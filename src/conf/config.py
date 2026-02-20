@@ -227,6 +227,31 @@ class OrQAConfig:
 
         self.statistics_path = self.data_path / "statistics"
 
+@dataclass
+class StatementGenerationConfig:
+    """
+    Configuration for the Statement Generation pipeline.
+
+    An agent takes a set of datasets involved in a candidate task
+    (join, union, or correlation) and generates executable statements
+    (Pandas or SQL) to perform the operation, based on dataset metadata
+    and a sample of rows.
+    """
+
+    # The kind of statements to generate: "PANDAS" or "SQL"
+    kind: str
+
+    # Maximum number of columns passed to the agent per dataset
+    max_cols: int
+
+    # Number of randomly sampled rows passed to the LLM as a dataset snapshot
+    sample_size: int
+
+    # If True, skip match building and use an existing matches.json
+    skip_matching: bool 
+
+
+
 
 def to_bytes(b: str) -> int:
     m = re.match(r"^(\d+)((K|M|G)B)$", b)

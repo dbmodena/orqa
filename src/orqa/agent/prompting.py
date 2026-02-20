@@ -153,3 +153,60 @@ class CandidatesDiscoveryPrompt(Prompt):
         )
 
         return self._update(query_dataset_description=query_dataset_description)
+
+
+
+
+
+class PandasStatementGenerationPrompt(Prompt):
+    _prompt_path = PROMPT_PATH.joinpath("pandas_statement_generation.md")
+
+    def update(
+        self,
+        dataset_name: str,
+        num_rows: int,
+        num_columns: int,
+        dataset_metadata: dict,
+        column_details: dict,
+        sample_data,
+        aliases,
+        matches
+    ) -> str:
+        query_dataset_prompt = DatasetDescription()
+        query_dataset_description = query_dataset_prompt.update(
+            dataset_name,
+            num_rows,
+            num_columns,
+            dataset_metadata,
+            column_details,
+            sample_data,
+        )
+
+        return self._update(table=query_dataset_description,matches=matches,aliases=aliases)
+
+
+class SQLStatementGenerationPrompt(Prompt):
+    _prompt_path = PROMPT_PATH.joinpath("sql_statement_generation.md")
+
+    def update(
+        self,
+        dataset_name: str,
+        num_rows: int,
+        num_columns: int,
+        dataset_metadata: dict,
+        column_details: dict,
+        sample_data,
+        aliases,
+        matches
+    ) -> str:
+        query_dataset_prompt = DatasetDescription()
+        query_dataset_description = query_dataset_prompt.update(
+            dataset_name,
+            num_rows,
+            num_columns,
+            dataset_metadata,
+            column_details,
+            sample_data,
+        )
+
+        return self._update(table=query_dataset_description,matches=matches,aliases=aliases)

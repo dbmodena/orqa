@@ -7,7 +7,7 @@ from LLMClientStructured import LLMClientStructured
 from pydantic import ValidationError
 
 
-class LLMClientTableAnalyzer(LLMClientStructured):
+class TaskProposerClient(LLMClientStructured):
     """
     LiteLLM client with YAML configuration and structured output support.
     """

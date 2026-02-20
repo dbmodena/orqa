@@ -12,9 +12,9 @@ from pydantic import BaseModel, ValidationError
 
 
 import pandas as pd
-from statement_generator.prompting import DatasetDescription, _load_prompt
+from .prompting import DatasetDescription, _load_prompt
 from pathlib import Path
-from statement_generator.structured_outputs import QuerySet, Query
+from .structured_outputs import QuerySet, Query
 import duckdb
 
 
@@ -28,9 +28,9 @@ from io import StringIO
 import pandas as pd
 from pathlib import Path
 import duckdb
-from statement_generator.LLMClientStructured import LLMClientStructured
-from statement_generator.SQLValidator import SQLValidator
-from statement_generator.PandasValidator import PandasValidator
+from .LLMClientStructured import LLMClientStructured
+from .validators.SQLValidator import SQLValidator
+from .validators.PandasValidator import PandasValidator
 import re
 
 class LLMClientStatementGenerator(LLMClientStructured):
@@ -131,6 +131,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                         pydantic = self.reform_prompt_constraint("")
                         messages.append({"role": "user", "content": f"You generated a bad formatted output, that gave the following error message:\n{error_msg}\n{pydantic}"})
                         time.sleep(self.retry_delay)
+                        #print(last_error)
                         continue
                 except ValidationError as e:
                     # Pydantic validation failed
@@ -145,6 +146,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                         messages.append({"role": "user","content": f"Genereated queries are not valid, the error message geneated:\n{error_msg}\n{pydantic}"})
                         # Add error feedback as user message
                         #print("💬 Sending validation errors to LLM...\n")
+                        #print(last_error)
                         time.sleep(self.retry_delay)
                         continue
 
@@ -160,6 +162,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                         # Add error feedback as user message
                         messages.append({"role": "user", "content": f"Genereated queries that are not valid, error message geneated\n{e}\nMake a unique JSON compliant to the Pydantic format:\n{json.dumps(self.response_model.model_json_schema(), indent=2)}"})
                         #print("💬 Sending validation errors to LLM...\n")
+                        #print(last_error)
                         time.sleep(self.retry_delay)
 
         # All retries exhausted
@@ -170,7 +173,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
         #if len(good_queries.values())>0:
             #print("Managed to create the following queries")
             #print(good_queries.values())
-
+        #print(last_error)
         return {"queries": list(good_queries.values())}, usage_total
 
     def validate_queries(self, dataframes, result, table_names,type):

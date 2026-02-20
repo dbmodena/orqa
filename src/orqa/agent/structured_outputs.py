@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import List
-
+from typing import List, Literal, Union
 
 class DatasetAnalysisResult(BaseModel):
     """Result of dataset analysis with UNION and JOIN suggestions"""
@@ -127,3 +126,65 @@ class Result(BaseModel):
                 seen.add(col_pair)
                 unique_tasks.append(task)
         return unique_tasks
+
+
+
+
+
+class Query(BaseModel):
+    """
+    A structured query (SQL or Pandas) paired with a natural language question
+    that expresses the intent of the query.
+    """
+    question: str = Field(
+        ...,
+        description=(
+            "A natural language question that the code answers. "
+            "The question must describe the business or analytical intent, "
+            "NOT the operations or technical implementation details."
+        )
+    )
+
+    code: str = Field(
+        ...,
+        description=(
+            "The executable code (SQL query or Pandas operation) that answers "
+            "the natural language question."
+        )
+    )
+    
+    query_type: Literal["sql", "pandas"] = Field(
+        ...,
+        description="Type of query: 'sql' for SQL queries or 'pandas' for Pandas operations."
+    )
+
+    tables: List[str] = Field(
+        ...,
+        description=(
+            "List of table names (for SQL) or DataFrame names (for Pandas) "
+            "used in the code."
+        )
+    )
+
+    columns: List[str] = Field(
+        ...,
+        description="List of column names referenced in the code."
+    )
+
+
+    difficulty: str = Field(
+        ...,
+        description=(
+            "Query complexity from simple, hard or challenging. "
+        )
+    )
+
+
+class QuerySet(BaseModel):
+    """
+    Container for multiple queries (SQL or Pandas) generated together.
+    """
+    queries: List[Query] = Field(
+        ...,
+        description="List of queries with matching natural language questions."
+    )

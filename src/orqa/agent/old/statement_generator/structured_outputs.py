@@ -172,14 +172,11 @@ class Query(BaseModel):
         description="List of column names referenced in the code."
     )
 
-    difficulty: int = Field(
+
+    difficulty: str = Field(
         ...,
-        ge=1,
-        le=5,
         description=(
-            "Query complexity from 1 (simple) to 5 (very complex). "
-            "For SQL: 1=basic SELECT, 5=complex subqueries/CTEs. "
-            "For Pandas: 1=filter/merge, 5=transform/window/correlation."
+            "Query complexity from simple, hard or challenging. "
         )
     )
 

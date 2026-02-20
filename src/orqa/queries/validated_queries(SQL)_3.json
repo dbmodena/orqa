@@ -1,0 +1,3186 @@
+{
+  "successful": [
+    {
+      "match_index": 0,
+      "aliases": {
+        "Table_0": "c2acb43f-750a-4147-9b61-c6b789f388d8",
+        "Table_1": "53bdeec2-1758-4356-bf7e-e575f79cf07c"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON TradingName, Address1, Address2, Address3, Address4, Address5, PostCode"
+      ],
+      "generation_time_seconds": 24.85,
+      "usage": {
+        "prompt_tokens": 6522,
+        "completion_tokens": 1875,
+        "total_tokens": 8397
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 12:57:08",
+      "queries": [
+        {
+          "question": "What is the total number of Raw Drinking Milk premises in England, Wales and Northern Ireland?",
+          "code": "SELECT COUNT(*) FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1) AS combined",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "*"
+          ],
+          "difficulty": 1
+        },
+        {
+          "question": "What is the distribution of raw drinking milk premises by species in England, Wales and Northern Ireland?",
+          "code": "SELECT HasCows, HasSheep, HasGoats FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1) AS combined_table GROUP BY HasCows, HasSheep, HasGoats",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "HasCows",
+            "HasSheep",
+            "HasGoats"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 2,
+      "aliases": {
+        "Table_0": "c2acb43f-750a-4147-9b61-c6b789f388d8",
+        "Table_1": "53bdeec2-1758-4356-bf7e-e575f79cf07c"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.TradingName = Table_1.TradingName AND Table_0.Address1 = Table_1.Address1 AND Table_0.PostCode = Table_1.PostCode"
+      ],
+      "generation_time_seconds": 36.04,
+      "usage": {
+        "prompt_tokens": 6573,
+        "completion_tokens": 2706,
+        "total_tokens": 9279
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 12:58:07",
+      "queries": [
+        {
+          "question": "What is the total number of raw drinking milk premises in England, Wales and Northern Ireland?",
+          "code": "SELECT COUNT(*) FROM Table_0 JOIN Table_1 ON Table_0.TradingName = Table_1.TradingName AND Table_0.Address1 = Table_1.Address1 AND Table_0.PostCode = Table_1.PostCode;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [],
+          "difficulty": 1
+        },
+        {
+          "question": "Which trading premises have cows and are present in both datasets?",
+          "code": "SELECT * FROM Table_0 JOIN Table_1 ON Table_0.TradingName = Table_1.TradingName AND Table_0.Address1 = Table_1.Address1 AND Table_0.PostCode = Table_1.PostCode WHERE Table_0.HasCows = 'YES' OR Table_1.HasCows = 'YES';",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "*"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "How many trading premises are present in each dataset for each unique trading name?",
+          "code": "SELECT Table_0.TradingName, COUNT(*) AS count FROM Table_0 JOIN Table_1 ON Table_0.TradingName = Table_1.TradingName AND Table_0.Address1 = Table_1.Address1 AND Table_0.PostCode = Table_1.PostCode GROUP BY Table_0.TradingName;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "TradingName",
+            "count"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "Which trading premises have multiple matching addresses in the second dataset?",
+          "code": "SELECT * FROM Table_0 JOIN ( SELECT TradingName, Address1, PostCode FROM Table_1 GROUP BY TradingName, Address1, PostCode HAVING COUNT(*) > 1 ) AS subquery ON Table_0.TradingName = subquery.TradingName AND Table_0.Address1 = subquery.Address1 AND Table_0.PostCode = subquery.PostCode;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "*"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 10,
+      "aliases": {
+        "Table_0": "Dental-Surgery-List-June-2019__4e0f7eef-ebf8-4c15-9f8c-5693226d7b1f",
+        "Table_1": "Dentist-Contractor-List-September-2023__fd3317a0-9c20-4d4b-8379-81993db3acd9"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.LCG = Table_1.LCG AND Table_0.LGD = Table_1.LCG"
+      ],
+      "generation_time_seconds": 27.56,
+      "usage": {
+        "prompt_tokens": 6507,
+        "completion_tokens": 2108,
+        "total_tokens": 8615
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:02:11",
+      "queries": [
+        {
+          "question": "What is the total number of dentists in Northern Ireland?",
+          "code": "SELECT COUNT(DISTINCT Table_1.DENTIST_NAME) FROM Table_0 INNER JOIN Table_1 ON Table_0.LCG = Table_1.LCG AND Table_0.LGD = Table_1.LCG;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the number of dentists in each Local Commissioning Group (LCG) who have performed more than 100 surgeries?",
+          "code": "SELECT Table_1.DENTIST_NAME, Table_0.LCG FROM Table_0 INNER JOIN Table_1 ON Table_0.LCG = Table_1.LCG AND Table_0.LGD = Table_1.LCG GROUP BY Table_1.DENTIST_NAME, Table_0.LCG HAVING COUNT(Table_0.LGD) > 100;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 19,
+      "aliases": {
+        "Table_0": "2025-04-30-Organogram-(Junior)__22bdbad8-7bf6-4b0f-9e62-ef5caf882662",
+        "Table_1": "2023-04-28-Organogram-(Junior)__5f9a8ed2-a661-491a-a2db-3a32c8b905d3"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Reporting Senior Post, Grade, Generic Job Title, Number of Posts in FTE, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 29.11,
+      "usage": {
+        "prompt_tokens": 6192,
+        "completion_tokens": 2220,
+        "total_tokens": 8412
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:06:33",
+      "queries": [
+        {
+          "question": "What is the total number of employees in each department?",
+          "code": "SELECT Organisation, COUNT(*) as Total_Employees FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1) GROUP BY Organisation",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Organisation",
+            "Total_Employees"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the total number of employees in each department, grouped by grade?",
+          "code": "SELECT Organisation, Grade, COUNT(*) as Total_Employees FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1) GROUP BY Organisation, Grade",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Organisation",
+            "Grade",
+            "Total_Employees"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 21,
+      "aliases": {
+        "Table_0": "2025-04-30-Organogram-(Junior)__22bdbad8-7bf6-4b0f-9e62-ef5caf882662",
+        "Table_1": "2025-07-31-Organogram-(Junior)__f3a20b4b-2630-4fe6-9df8-35b45fc96efc"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Grade, Payscale Minimum (£), Payscale Maximum (£), Generic Job Title, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 29.12,
+      "usage": {
+        "prompt_tokens": 6207,
+        "completion_tokens": 2246,
+        "total_tokens": 8453
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:07:35",
+      "queries": [
+        {
+          "question": "What is the total number of employees in each department?",
+          "code": "SELECT Organisation, COUNT(*) as num_employees FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1) GROUP BY Organisation",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Organisation",
+            "num_employees"
+          ],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 35,
+      "aliases": {
+        "Table_0": "583a4d63-6d67-4caa-9ddd-c4eb919f325e",
+        "Table_1": "b2b792fa-fee9-4c8a-ab69-45a64c88a414"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Reporting Senior Post, Grade, Payscale Minimum (£), Payscale Maximum (£), Generic Job Title, Number of Posts in FTE, Professional/Occupational Group"
+      ],
+      "generation_time_seconds": 23.63,
+      "usage": {
+        "prompt_tokens": 7065,
+        "completion_tokens": 1776,
+        "total_tokens": 8841
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:15:31",
+      "queries": [
+        {
+          "question": "What is the total number of staff roles across all departments?",
+          "code": "SELECT COUNT(*) FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1) AS combined_table",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 46,
+      "aliases": {
+        "Table_0": "Registered-Dairy-Establishments-as-at-1-December-2019__ad59f628-9ef3-4e26-9284-e5bf85eae6e4",
+        "Table_1": "d55f7fd9-5363-4c94-a017-b75f80480b78"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.PremiseAddress5 = Table_1.PremiseAddress5 AND Table_0.PremisePostCode = Table_1.PremisePostCode"
+      ],
+      "generation_time_seconds": 32.56,
+      "usage": {
+        "prompt_tokens": 5196,
+        "completion_tokens": 2519,
+        "total_tokens": 7715
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:22:02",
+      "queries": [
+        {
+          "question": "What is the total number of dairy establishments in Cumbria?",
+          "code": "SELECT COUNT(*) FROM Table_0 JOIN Table_1 ON Table_0.PremiseAddress5 = Table_1.PremiseAddress5 AND Table_0.PremisePostCode = Table_1.PremisePostCode WHERE Table_0.PremiseAddress4 LIKE '%CUMBRIA%'",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "COUNT(*)"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the correlation between the number of dairy establishments and post codes in Cumbria?",
+          "code": "SELECT Table_0.PremisePostCode, COUNT(*) AS count FROM Table_0 JOIN Table_1 ON Table_0.PremiseAddress5 = Table_1.PremiseAddress5 AND Table_0.PremisePostCode = Table_1.PremisePostCode WHERE Table_0.PremiseAddress4 LIKE '%CUMBRIA%' GROUP BY Table_0.PremisePostCode HAVING COUNT(*) > 10",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "PremisePostCode",
+            "COUNT(*) AS count"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 47,
+      "aliases": {
+        "Table_0": "Registered-Dairy-Establishments-as-at-1-December-2019__ad59f628-9ef3-4e26-9284-e5bf85eae6e4",
+        "Table_1": "f68ce11e-19d0-412d-937c-8a85a89549e8"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.PremiseAddress5 = Table_1.PremiseAddress5 AND Table_0.PremisePostCode = Table_1.PremisePostCode"
+      ],
+      "generation_time_seconds": 34.16,
+      "usage": {
+        "prompt_tokens": 5211,
+        "completion_tokens": 2617,
+        "total_tokens": 7828
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:22:37",
+      "queries": [
+        {
+          "question": "What is the total number of registered dairy establishments in each postcode?",
+          "code": "SELECT Table_0.PremisePostCode, COUNT(*) FROM Table_0 JOIN Table_1 ON Table_0.PremiseAddress5 = Table_1.PremiseAddress5 AND Table_0.PremisePostCode = Table_1.PremisePostCode GROUP BY Table_0.PremisePostCode;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "PremisePostCode",
+            "COUNT(*)"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the total number of registered dairy establishments in each postcode that have a trading name starting with 'A'?",
+          "code": "SELECT Table_0.PremisePostCode, COUNT(*) FROM Table_0 JOIN Table_1 ON Table_0.PremiseAddress5 = Table_1.PremiseAddress5 AND Table_0.PremisePostCode = Table_1.PremisePostCode WHERE Table_1.TradingName LIKE 'A%' GROUP BY Table_0.PremisePostCode;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "PremisePostCode",
+            "COUNT(*)"
+          ],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 48,
+      "aliases": {
+        "Table_0": "Registered-Dairy-Establishments-as-at-1-December-2019__ad59f628-9ef3-4e26-9284-e5bf85eae6e4",
+        "Table_1": "dbb9f4b0-f16d-450b-8a16-f44273d371f1"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.PremiseAddress5 = Table_1.PremiseAddress5 AND Table_0.PremisePostCode = Table_1.PremisePostCode"
+      ],
+      "generation_time_seconds": 33.6,
+      "usage": {
+        "prompt_tokens": 5211,
+        "completion_tokens": 2576,
+        "total_tokens": 7787
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:23:10",
+      "queries": [
+        {
+          "question": "What is the total number of dairy establishments in each postcode?",
+          "code": "SELECT Table_0.PremisePostCode, COUNT(*) FROM Table_0 JOIN Table_1 ON Table_0.PremiseAddress5 = Table_1.PremiseAddress5 AND Table_0.PremisePostCode = Table_1.PremisePostCode GROUP BY Table_0.PremisePostCode;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "PremisePostCode",
+            "COUNT(*)"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the total number of dairy establishments in each county that have a trading name starting with 'A'?",
+          "code": "SELECT Table_1.PremiseAddress4, COUNT(*) AS num_establishments FROM Table_0 JOIN Table_1 ON Table_0.PremiseAddress5 = Table_1.PremiseAddress5 AND Table_0.PremisePostCode = Table_1.PremisePostCode WHERE Table_1.TradingName LIKE 'A%' GROUP BY Table_1.PremiseAddress4;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "PremiseAddress4",
+            "num_establishments"
+          ],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 49,
+      "aliases": {
+        "Table_0": "Registered-Dairy-Establishments-as-at-1-December-2019__ad59f628-9ef3-4e26-9284-e5bf85eae6e4",
+        "Table_1": "d55f7fd9-5363-4c94-a017-b75f80480b78"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.PremiseAddress5 = Table_1.PremiseAddress5 AND Table_0.PremisePostCode = Table_1.PremisePostCode"
+      ],
+      "generation_time_seconds": 32.14,
+      "usage": {
+        "prompt_tokens": 5196,
+        "completion_tokens": 2488,
+        "total_tokens": 7684
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:23:42",
+      "queries": [
+        {
+          "question": "What is the total number of dairy establishments in Cumbria?",
+          "code": "SELECT COUNT(*) FROM Table_0 JOIN Table_1 ON Table_0.PremiseAddress5 = Table_1.PremiseAddress5 AND Table_0.PremisePostCode = Table_1.PremisePostCode WHERE Table_0.PremiseAddress4 LIKE '%CUMBRIA%'",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "COUNT(*)"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the correlation between the number of dairy establishments and post codes in Cumbria?",
+          "code": "SELECT Table_0.PremisePostCode, COUNT(*) AS num_establishments FROM Table_0 JOIN Table_1 ON Table_0.PremiseAddress5 = Table_1.PremiseAddress5 AND Table_0.PremisePostCode = Table_1.PremisePostCode WHERE Table_0.PremiseAddress4 LIKE '%CUMBRIA%' GROUP BY Table_0.PremisePostCode HAVING COUNT(*) > 10",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "PremisePostCode",
+            "COUNT(*) AS num_establishments"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 62,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2024-09-30-Organogram-(Senior)__a27ebc0c-3675-4ab6-8c26-b7bbdb702b0c"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Post Unique Reference, Name, Grade (or equivalent), Job Title, Job/Team Function, Parent Department, Organisation, Unit, Contact Phone, Contact E-mail, Reports to Senior Post, Salary Cost of Reports (£), FTE, Actual Pay Floor (£), Actual Pay Ceiling (£)"
+      ],
+      "generation_time_seconds": 15.49,
+      "usage": {
+        "prompt_tokens": 7434,
+        "completion_tokens": 2107,
+        "total_tokens": 9541
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:29:12",
+      "queries": [
+        {
+          "question": "What is the total number of employees in each department?",
+          "code": "SELECT Organisation, COUNT(*) as Total_Employees FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1) GROUP BY Organisation;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Organisation",
+            "Total_Employees"
+          ],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 63,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2023-03-31-Organogram-(Senior)__059e9f3c-84a7-44c1-95f5-47edcfb45af4"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Post Unique Reference, Name, Grade (or equivalent), Job Title, Job/Team Function, Parent Department, Organisation, Unit, Contact Phone, Contact E-mail, Reports to Senior Post, Salary Cost of Reports (£), FTE, Actual Pay Floor (£), Actual Pay Ceiling (£)"
+      ],
+      "generation_time_seconds": 15.26,
+      "usage": {
+        "prompt_tokens": 7338,
+        "completion_tokens": 2141,
+        "total_tokens": 9479
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:29:27",
+      "queries": [
+        {
+          "question": "What is the total number of employees in each department?",
+          "code": "SELECT Organisation, COUNT(*) as Total_Employees FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1) GROUP BY Organisation;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Organisation",
+            "Total_Employees"
+          ],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 64,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2024-09-30-Organogram-(Senior)__a27ebc0c-3675-4ab6-8c26-b7bbdb702b0c"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Post Unique Reference, Name, Grade (or equivalent), Job Title, Job/Team Function, Parent Department, Organisation, Unit, Contact Phone, Contact E-mail, Reports to Senior Post, Salary Cost of Reports (£), FTE, Actual Pay Floor (£), Actual Pay Ceiling (£)"
+      ],
+      "generation_time_seconds": 13.73,
+      "usage": {
+        "prompt_tokens": 7434,
+        "completion_tokens": 1909,
+        "total_tokens": 9343
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:29:41",
+      "queries": [
+        {
+          "question": "What is the total number of employees in each department?",
+          "code": "SELECT Organisation, COUNT(*) as Total_Employees FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1) GROUP BY Organisation;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Organisation",
+            "Total_Employees"
+          ],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 65,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2024-03-31-Organogram-(Senior)__04ce6650-da93-4ad9-9686-498e6dfecfe1"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Post Unique Reference, Name, Grade (or equivalent), Job Title, Job/Team Function, Parent Department, Organisation, Unit, Contact Phone, Contact E-mail, Reports to Senior Post, Salary Cost of Reports (£), FTE, Actual Pay Floor (£), Actual Pay Ceiling (£)"
+      ],
+      "generation_time_seconds": 13.71,
+      "usage": {
+        "prompt_tokens": 7302,
+        "completion_tokens": 1908,
+        "total_tokens": 9210
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:29:55",
+      "queries": [
+        {
+          "question": "What is the total number of employees in each department?",
+          "code": "SELECT Organisation, COUNT(*) as Total_Employees FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1) GROUP BY Organisation",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Organisation",
+            "Total_Employees"
+          ],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 70,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2024-03-31-Organogram-(Senior)__04ce6650-da93-4ad9-9686-498e6dfecfe1"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE"
+      ],
+      "generation_time_seconds": 33.92,
+      "usage": {
+        "prompt_tokens": 6498,
+        "completion_tokens": 2603,
+        "total_tokens": 9101
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:31:59",
+      "queries": [
+        {
+          "question": "Which employees in the 2023-12-31 Organogram have multiple roles in the 2024-03-31 Organogram?",
+          "code": "SELECT * FROM Table_0 WHERE Name IN (SELECT Name FROM Table_1 GROUP BY Name HAVING COUNT(Name) > 1);",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "*"
+          ],
+          "difficulty": 3
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 89,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-April-2025__2de5ca7c-6cad-4670-ab17-a83310f78291"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Department = Table_1.Department AND Table_0.Organisation = Table_1.Organisation"
+      ],
+      "generation_time_seconds": 31.15,
+      "usage": {
+        "prompt_tokens": 6336,
+        "completion_tokens": 2389,
+        "total_tokens": 8725
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:42:58",
+      "queries": [
+        {
+          "question": "Which suppliers have been used by Department for Infrastructure in both December and April 2025?",
+          "code": "SELECT DISTINCT T1.Supplier FROM Table_0 T1 INNER JOIN Table_1 T2 ON T1.Department = T2.Department AND T1.Organisation = T2.Organisation",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Supplier"
+          ],
+          "difficulty": 3
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 97,
+      "aliases": {
+        "Table_0": "Meat-Establishment-Audits-as-at-1-May-2023__826b6b31-cba2-4f8a-8857-81fce7cd8b15",
+        "Table_1": "Meat-Establishment-Audits-as-at-1-April-2023__9500e295-cd09-4603-9a4a-910053a994ba"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.TradingName = Table_1.TradingName"
+      ],
+      "generation_time_seconds": 21.29,
+      "usage": {
+        "prompt_tokens": 5988,
+        "completion_tokens": 1574,
+        "total_tokens": 7562
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:46:46",
+      "queries": [
+        {
+          "question": "What is the total number of meat establishments in England?",
+          "code": "SELECT COUNT(*) FROM Table_0 JOIN Table_1 ON Table_0.TradingName = Table_1.TradingName WHERE Table_0.Country = 'England'",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "COUNT(*)"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the number of meat establishments in England that have a RSL (Red Meat Standard) certification?",
+          "code": "SELECT COUNT(*) FROM Table_0 JOIN Table_1 ON Table_0.TradingName = Table_1.TradingName WHERE Table_0.Country = 'England' AND Table_0.RSL = 'Yes'",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "COUNT(*)"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 100,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2023-10-31-Organogram-(Junior)__af176c23-033c-48f5-a5d5-c8187a24be23"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Reporting Senior Post, Grade, Generic Job Title, Number of Posts in FTE, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 9.06,
+      "usage": {
+        "prompt_tokens": 2081,
+        "completion_tokens": 679,
+        "total_tokens": 2760
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:47:58",
+      "queries": [
+        {
+          "question": "What is the total number of employees across all departments?",
+          "code": "SELECT COUNT(*) FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1) AS combined",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Reporting Senior Post",
+            "Unit",
+            "Generic Job Title"
+          ],
+          "difficulty": 1
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 105,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2023-10-31-Organogram-(Junior)__af176c23-033c-48f5-a5d5-c8187a24be23"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Grade = Table_1.Grade AND Table_0.Generic Job Title = Table_1.Generic Job Title"
+      ],
+      "generation_time_seconds": 27.71,
+      "usage": {
+        "prompt_tokens": 6279,
+        "completion_tokens": 2069,
+        "total_tokens": 8348
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:50:39",
+      "queries": [
+        {
+          "question": "What is the total number of employees in each grade level?",
+          "code": "SELECT Table_0.Grade, COUNT(*) as Total_Employees FROM Table_0 JOIN Table_1 ON Table_0.Grade = Table_1.Grade GROUP BY Table_0.Grade",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "Grade",
+            "Total_Employees"
+          ],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 107,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__ab86601f-626e-4502-ba7d-fa119584d610"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON LEX_WEB, RCS_WEB, LEX, LEXICONDESC, RCS_SIGMA, BGSREF, LEX_RCS_SIGMA, RCS_SIGMA_DESC, RCS_SIGMA_EXP, LEX_RCS_SIGMA_INDEX, LEX_RCS_SIGMA_DESC"
+      ],
+      "generation_time_seconds": 15.63,
+      "usage": {
+        "prompt_tokens": 5214,
+        "completion_tokens": 1140,
+        "total_tokens": 6354
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:51:25",
+      "queries": [
+        {
+          "question": "What is the total number of unique rock types in both datasets?",
+          "code": "SELECT COUNT(DISTINCT LEX) FROM Table_0 UNION SELECT COUNT(DISTINCT LEX) FROM Table_1",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX"
+          ],
+          "difficulty": 1
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 108,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__ab86601f-626e-4502-ba7d-fa119584d610"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON LEX_WEB, RCS_WEB, LEX, LEXICONDESC, RCS_SIGMA, BGSREF, LEX_RCS_SIGMA, RCS_SIGMA_DESC, RCS_SIGMA_EXP, LEX_RCS_SIGMA_INDEX, LEX_RCS_SIGMA_DESC"
+      ],
+      "generation_time_seconds": 8.08,
+      "usage": {
+        "prompt_tokens": 2607,
+        "completion_tokens": 613,
+        "total_tokens": 3220
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:51:33",
+      "queries": [
+        {
+          "question": "What is the total number of unique rock types in both datasets?",
+          "code": "SELECT COUNT(DISTINCT LEX) FROM Table_0 UNION SELECT COUNT(DISTINCT LEX) FROM Table_1",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX"
+          ],
+          "difficulty": 1
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 109,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__7f6c5ce4-8bcd-4b37-bdcb-556e7c8770da"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON LEX_WEB, RCS_WEB, LEX, LEXICONDESC, RCS_SIGMA, BGSREF, LEX_RCS_SIGMA, RCS_SIGMA_DESC, RCS_SIGMA_EXP, LEX_RCS_SIGMA_INDEX, LEX_RCS_SIGMA_DESC"
+      ],
+      "generation_time_seconds": 24.56,
+      "usage": {
+        "prompt_tokens": 7986,
+        "completion_tokens": 1820,
+        "total_tokens": 9806
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:51:57",
+      "queries": [
+        {
+          "question": "What is the total number of unique rock samples across both datasets?",
+          "code": "SELECT COUNT(DISTINCT OBJECTID) FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1)",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "OBJECTID"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the distribution of rock samples by scale in both datasets?",
+          "code": "SELECT LEX_WEB, COUNT(*) AS count FROM (SELECT * FROM Table_0 UNION SELECT * FROM Table_1) GROUP BY LEX_WEB ORDER BY count DESC",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_WEB",
+            "count"
+          ],
+          "difficulty": 3
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 110,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__ab86601f-626e-4502-ba7d-fa119584d610"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA"
+      ],
+      "generation_time_seconds": 33.51,
+      "usage": {
+        "prompt_tokens": 6765,
+        "completion_tokens": 2515,
+        "total_tokens": 9280
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:52:31",
+      "queries": [
+        {
+          "question": "What is the total number of objects in each region?",
+          "code": "SELECT Table_0.LEX_RCS_SIGMA, COUNT(Table_1.OBJECTID) AS TotalObjects FROM Table_0 JOIN Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA GROUP BY Table_0.LEX_RCS_SIGMA;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_RCS_SIGMA",
+            "TotalObjects"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which regions have the highest number of objects with a specific LEXICONDESC?",
+          "code": "SELECT Table_0.LEX_RCS_SIGMA, COUNT(Table_1.OBJECTID) AS ObjectsWithDesc FROM Table_0 JOIN Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA WHERE Table_1.LEXICONDESC = 'CARLINGFORD LIMESTONE GROUP' GROUP BY Table_0.LEX_RCS_SIGMA;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_RCS_SIGMA",
+            "ObjectsWithDesc"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "What is the total number of objects with a specific LEXICONDESC?",
+          "code": "SELECT COUNT(Table_1.OBJECTID) AS TotalObjects FROM Table_0 JOIN Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA WHERE Table_1.LEXICONDESC = 'CARLINGFORD LIMESTONE GROUP';",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "TotalObjects"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "What is the average number of objects per region?",
+          "code": "SELECT Table_0.LEX_RCS_SIGMA, AVG(Table_1.OBJECTID) AS AverageObjects FROM Table_0 JOIN Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA GROUP BY Table_0.LEX_RCS_SIGMA;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_RCS_SIGMA",
+            "AverageObjects"
+          ],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 111,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__ab86601f-626e-4502-ba7d-fa119584d610"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA"
+      ],
+      "generation_time_seconds": 32.25,
+      "usage": {
+        "prompt_tokens": 6765,
+        "completion_tokens": 2435,
+        "total_tokens": 9200
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:53:03",
+      "queries": [
+        {
+          "question": "What is the average number of objects per region?",
+          "code": "SELECT AVG(Table_0.OBJECTID) AS AvgNumObjects FROM Table_0 JOIN Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "AvgNumObjects"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "Which regions have the highest number of objects with a specific LEX_RCS_SIGMA?",
+          "code": "SELECT Table_1.LEX_RCS_SIGMA, COUNT(Table_0.OBJECTID) AS NumObjects FROM Table_0 JOIN Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA WHERE Table_1.LEX_RCS_SIGMA = 'CDLM-LMST' GROUP BY Table_1.LEX_RCS_SIGMA;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_RCS_SIGMA",
+            "NumObjects"
+          ],
+          "difficulty": 4
+        },
+        {
+          "question": "What is the total number of unique LEX_RCS_SIGMA values in both datasets?",
+          "code": "SELECT COUNT(DISTINCT Table_0.LEX_RCS_SIGMA) FROM Table_0 JOIN Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_RCS_SIGMA"
+          ],
+          "difficulty": 2
+        },
+        {
+          "question": "What is the total number of unique LEX_RCS_SIGMA values in both datasets, grouped by RCS_SIGMA?",
+          "code": "SELECT COUNT(DISTINCT Table_0.LEX_RCS_SIGMA) FROM Table_0 JOIN Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.RCS_SIGMA = Table_1.RCS_SIGMA GROUP BY Table_0.RCS_SIGMA;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "LEX_RCS_SIGMA"
+          ],
+          "difficulty": 5
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 112,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__7f6c5ce4-8bcd-4b37-bdcb-556e7c8770da"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.Shape_Length = Table_1.OBJECTID"
+      ],
+      "generation_time_seconds": 29.93,
+      "usage": {
+        "prompt_tokens": 7119,
+        "completion_tokens": 2266,
+        "total_tokens": 9385
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:53:33",
+      "queries": [
+        {
+          "question": "What is the total number of unique RCS_WEB URLs across all regions?",
+          "code": "SELECT COUNT(DISTINCT Table_0.RCS_WEB) AS TotalRCSWEB FROM Table_0 JOIN Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.Shape_Length = Table_1.OBJECTID;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "TotalRCSWEB"
+          ],
+          "difficulty": 3
+        },
+        {
+          "question": "What is the total number of unique LEX_WEB URLs?",
+          "code": "SELECT COUNT(DISTINCT Table_0.LEX_WEB) AS TotalUniqueUrls FROM Table_0 JOIN Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA;",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "TotalUniqueUrls"
+          ],
+          "difficulty": 2
+        }
+      ],
+      "status": "success"
+    },
+    {
+      "match_index": 116,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__ab86601f-626e-4502-ba7d-fa119584d610",
+        "Table_2": "CSV__d7c46b36-4de8-4260-a1db-b84e2bce275b",
+        "Table_3": "CSV__1e09f805-5363-4d4b-9194-f9b08f1f70f7"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.TYPE = Table_3.TYPE",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.TYPE = Table_3.TYPE AND Table_2.SHAPE_Length = Table_3.SUBTYPE"
+      ],
+      "generation_time_seconds": 59.97,
+      "usage": {
+        "prompt_tokens": 8901,
+        "completion_tokens": 3737,
+        "total_tokens": 12638
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:56:32",
+      "queries": [
+        {
+          "question": "What is the relationship between BGSREF and LEX_RCS_SIGMA in both tables, specifically for rows where LEX_RCS_SIGMA appears in the correlation between TYPE and SHAPE_Length in both tables?",
+          "code": "SELECT * FROM ( SELECT * FROM Table_0 JOIN Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA ) AS joined_table WHERE joined_table.LEX_RCS_SIGMA IN ( SELECT LEX_RCS_SIGMA FROM Table_2 JOIN Table_3 ON Table_2.TYPE = Table_3.TYPE AND Table_2.SHAPE_Length = Table_3.SUBTYPE );",
+          "query_type": "sql",
+          "tables": [
+            "Table_0",
+            "Table_1"
+          ],
+          "columns": [
+            "BGSREF",
+            "LEX_RCS_SIGMA"
+          ],
+          "difficulty": 4
+        }
+      ],
+      "status": "success"
+    }
+  ],
+  "failed": [
+    {
+      "match_index": 1,
+      "aliases": {
+        "Table_0": "c2acb43f-750a-4147-9b61-c6b789f388d8",
+        "Table_1": "f4ef5ef6-1e97-4e0f-9e21-5599f0f4a102"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.TradingName = Table_1.TradingName AND Table_0.Address1 = Table_1.Address1 AND Table_0.PostCode = Table_1.PostCode"
+      ],
+      "generation_time_seconds": 23.9,
+      "usage": {
+        "prompt_tokens": 6588,
+        "completion_tokens": 1807,
+        "total_tokens": 8395
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 12:57:31",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 3,
+      "aliases": {
+        "Table_0": "c2acb43f-750a-4147-9b61-c6b789f388d8",
+        "Table_1": "53bdeec2-1758-4356-bf7e-e575f79cf07c",
+        "Table_2": "Registered-Raw-Drinking-Milk-Premises-in-England,-Wales-and-Northern-Ireland-as-at-1-June-2019__ba3107a6-ad77-4404-9cb3-e7d03ffd6c3f"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON TradingName, Address1, Address2, Address3, Address4, Address5, PostCode",
+        "UNION: Table_1 ∪ Table_2 ON TradingName, Address1, Address2, Address3, Address4, Address5, PostCode"
+      ],
+      "generation_time_seconds": 29.59,
+      "usage": {
+        "prompt_tokens": 8241,
+        "completion_tokens": 2214,
+        "total_tokens": 10455
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 12:58:37",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 4,
+      "aliases": {
+        "Table_0": "c2acb43f-750a-4147-9b61-c6b789f388d8",
+        "Table_1": "53bdeec2-1758-4356-bf7e-e575f79cf07c",
+        "Table_2": "Registered-Raw-Drinking-Milk-Premises-in-England,-Wales-and-Northern-Ireland-as-at-1-June-2019__ba3107a6-ad77-4404-9cb3-e7d03ffd6c3f"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.TradingName = Table_1.TradingName AND Table_0.Address1 = Table_1.Address1 AND Table_0.PostCode = Table_1.PostCode",
+        "JOIN: Table_1 ⋈ Table_2 ON Table_1.Address1 = Table_2.Address1 AND Table_1.Address2 = Table_2.Address1 AND Table_1.Address3 = Table_2.Address2 AND Table_1.Address4 = Table_2.Address3 AND Table_1.Address5 = Table_2.Address4"
+      ],
+      "generation_time_seconds": 45.75,
+      "usage": {
+        "prompt_tokens": 8409,
+        "completion_tokens": 3382,
+        "total_tokens": 11791
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 12:59:23",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 5,
+      "aliases": {
+        "Table_0": "Dental-Surgery-List-June-2019__4e0f7eef-ebf8-4c15-9f8c-5693226d7b1f",
+        "Table_1": "Dentist-Contractor-List-December-2023__310858da-55b2-44f6-bb21-2841dda9bf65"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON TELEPHONE_NO"
+      ],
+      "generation_time_seconds": 22.77,
+      "usage": {
+        "prompt_tokens": 6393,
+        "completion_tokens": 1722,
+        "total_tokens": 8115
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 12:59:46",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 6,
+      "aliases": {
+        "Table_0": "Dental-Surgery-List-June-2019__4e0f7eef-ebf8-4c15-9f8c-5693226d7b1f",
+        "Table_1": "Dentist-Contractor-List-December-2023__310858da-55b2-44f6-bb21-2841dda9bf65"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON TELEPHONE_NO"
+      ],
+      "generation_time_seconds": 23.3,
+      "usage": {
+        "prompt_tokens": 6393,
+        "completion_tokens": 1730,
+        "total_tokens": 8123
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:00:09",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 7,
+      "aliases": {
+        "Table_0": "Dental-Surgery-List-June-2019__4e0f7eef-ebf8-4c15-9f8c-5693226d7b1f",
+        "Table_1": "Dentist-Contractor-List-September-2023__fd3317a0-9c20-4d4b-8379-81993db3acd9"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON TELEPHONE_NO"
+      ],
+      "generation_time_seconds": 22.17,
+      "usage": {
+        "prompt_tokens": 6447,
+        "completion_tokens": 1692,
+        "total_tokens": 8139
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:00:31",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 8,
+      "aliases": {
+        "Table_0": "Dental-Surgery-List-June-2019__4e0f7eef-ebf8-4c15-9f8c-5693226d7b1f",
+        "Table_1": "Dentist-Contractor-List-December-2023__310858da-55b2-44f6-bb21-2841dda9bf65"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.LCG = Table_1.LCG AND Table_0.LGD = Table_1.LCG"
+      ],
+      "generation_time_seconds": 31.59,
+      "usage": {
+        "prompt_tokens": 6453,
+        "completion_tokens": 2474,
+        "total_tokens": 8927
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:01:03",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 9,
+      "aliases": {
+        "Table_0": "Dental-Surgery-List-June-2019__4e0f7eef-ebf8-4c15-9f8c-5693226d7b1f",
+        "Table_1": "Dentist-Contractor-List-December-2023__310858da-55b2-44f6-bb21-2841dda9bf65"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.LCG = Table_1.LCG AND Table_0.LGD = Table_1.LCG"
+      ],
+      "generation_time_seconds": 41.11,
+      "usage": {
+        "prompt_tokens": 6453,
+        "completion_tokens": 3241,
+        "total_tokens": 9694
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:01:44",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 11,
+      "aliases": {
+        "Table_0": "Dental-Surgery-List-June-2019__4e0f7eef-ebf8-4c15-9f8c-5693226d7b1f",
+        "Table_1": "Dental-Surgery-List-March-2024__2c1e7eb6-1635-4ca6-8da1-f2a9d33e9d5f",
+        "Table_2": "Dental-Surgery-List-June-2019__4e0f7eef-ebf8-4c15-9f8c-5693226d7b1f",
+        "Table_3": "Dental-Contractor-List-June-2024__3cf4f17a-107b-418b-85c4-ca0f14b59720",
+        "Table_4": "Dentist-Contractor-List-September-2025__b992aa63-a0be-4e32-97d0-52191ef1a53b",
+        "Table_5": "Dentist-Contractor-List-December-2025__9cdb414d-0c5a-4df2-8ea6-541b444e0ea3"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.POSTCODE = Table_1.POSTCODE",
+        "JOIN: Table_1 ⋈ Table_2 ON Table_1.TELEPHONE_NO = Table_2.TELEPHONE_NO",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.LCG = Table_3.LCG AND Table_2.LGD = Table_3.LCG",
+        "JOIN: Table_3 ⋈ Table_4 ON Table_3.ASSEMBLY_AREA = Table_4.Assembly Area AND Table_3.LCG = Table_4.LCG",
+        "JOIN: Table_4 ⋈ Table_5 ON Table_4.POSTCODE = Table_5.POSTCODE AND Table_4.Assembly Area = Table_5.Assembly Area"
+      ],
+      "generation_time_seconds": 34.82,
+      "usage": {
+        "prompt_tokens": 12288,
+        "completion_tokens": 2440,
+        "total_tokens": 14728
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:02:46",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 12,
+      "aliases": {
+        "Table_0": "Cambridgeshire-County-Council-Expenditure-September-2025__acd8ea16-5afd-4ecf-b348-18737f9961a1",
+        "Table_1": "Cambridgeshire-County-Council-Expenditure-September-2024__1262b0ea-1df2-4437-8b52-3f6a9aaac189"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Supplier Name, Supplier Type, Expense Area, Cost Centre Description, Expense Type"
+      ],
+      "generation_time_seconds": 27.98,
+      "usage": {
+        "prompt_tokens": 6231,
+        "completion_tokens": 2001,
+        "total_tokens": 8232
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:03:14",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 13,
+      "aliases": {
+        "Table_0": "Cambridgeshire-County-Council-Expenditure-September-2025__acd8ea16-5afd-4ecf-b348-18737f9961a1",
+        "Table_1": "Cambridgeshire-County-Council-Expenditure-April-2020__55c7b2e7-a17f-495f-b35d-52757e6cd75a"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Date Paid, Transaction Number, Amount"
+      ],
+      "generation_time_seconds": 21.68,
+      "usage": {
+        "prompt_tokens": 6177,
+        "completion_tokens": 1627,
+        "total_tokens": 7804
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:03:36",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 14,
+      "aliases": {
+        "Table_0": "Cambridgeshire-County-Council-Expenditure-September-2025__acd8ea16-5afd-4ecf-b348-18737f9961a1",
+        "Table_1": "Cambridgeshire-County-Council-Expenditure-March-2025__213282d7-3750-46f8-a0db-d867faa72a98"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Supplier Name, Supplier Type, Expense Area, Cost Centre Description, Expense Type"
+      ],
+      "generation_time_seconds": 25.53,
+      "usage": {
+        "prompt_tokens": 6225,
+        "completion_tokens": 1950,
+        "total_tokens": 8175
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:04:01",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 15,
+      "aliases": {
+        "Table_0": "Cambridgeshire-County-Council-Expenditure-September-2025__acd8ea16-5afd-4ecf-b348-18737f9961a1",
+        "Table_1": "Cambridgeshire-County-Council-Expenditure-September-2024__1262b0ea-1df2-4437-8b52-3f6a9aaac189"
+      },
+      "matches": [
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Expense Area = Table_1.Expense Area AND Table_0.Amount = Table_1.Transaction Number"
+      ],
+      "generation_time_seconds": 26.77,
+      "usage": {
+        "prompt_tokens": 6270,
+        "completion_tokens": 2066,
+        "total_tokens": 8336
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:04:28",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 16,
+      "aliases": {
+        "Table_0": "Cambridgeshire-County-Council-Expenditure-September-2025__acd8ea16-5afd-4ecf-b348-18737f9961a1",
+        "Table_1": "Cambridgeshire-County-Council-Expenditure-March-2025__213282d7-3750-46f8-a0db-d867faa72a98"
+      },
+      "matches": [
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Expense Area = Table_1.Expense Area AND Table_0.Amount = Table_1.Transaction Number"
+      ],
+      "generation_time_seconds": 29.56,
+      "usage": {
+        "prompt_tokens": 6264,
+        "completion_tokens": 2264,
+        "total_tokens": 8528
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:04:58",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 17,
+      "aliases": {
+        "Table_0": "2025-04-30-Organogram-(Junior)__22bdbad8-7bf6-4b0f-9e62-ef5caf882662",
+        "Table_1": "2022-10-31-Organogram-(Junior)__a079db24-108c-495c-95f7-b767f687429c"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Grade, Payscale Minimum (£), Payscale Maximum (£), Generic Job Title, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 37.84,
+      "usage": {
+        "prompt_tokens": 6165,
+        "completion_tokens": 2955,
+        "total_tokens": 9120
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:05:36",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 18,
+      "aliases": {
+        "Table_0": "2025-04-30-Organogram-(Junior)__22bdbad8-7bf6-4b0f-9e62-ef5caf882662",
+        "Table_1": "2022-04-29-Organogram-(Junior)__04f51f71-b0b8-4c1a-a398-f604594739fe"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Reporting Senior Post, Grade, Generic Job Title, Number of Posts in FTE, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 28.64,
+      "usage": {
+        "prompt_tokens": 6168,
+        "completion_tokens": 2203,
+        "total_tokens": 8371
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:06:04",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 20,
+      "aliases": {
+        "Table_0": "2025-04-30-Organogram-(Junior)__22bdbad8-7bf6-4b0f-9e62-ef5caf882662",
+        "Table_1": "2022-10-31-Organogram-(Junior)__a079db24-108c-495c-95f7-b767f687429c"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Grade, Payscale Minimum (£), Payscale Maximum (£), Generic Job Title, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 32.39,
+      "usage": {
+        "prompt_tokens": 6165,
+        "completion_tokens": 2495,
+        "total_tokens": 8660
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:07:06",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 22,
+      "aliases": {
+        "Table_0": "2025-04-30-Organogram-(Junior)__22bdbad8-7bf6-4b0f-9e62-ef5caf882662",
+        "Table_1": "2022-10-31-Organogram-(Junior)__a079db24-108c-495c-95f7-b767f687429c"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Reporting Senior Post = Table_1.Reporting Senior Post AND Table_0.Grade = Table_1.Grade"
+      ],
+      "generation_time_seconds": 39.6,
+      "usage": {
+        "prompt_tokens": 6222,
+        "completion_tokens": 3119,
+        "total_tokens": 9341
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:08:14",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 23,
+      "aliases": {
+        "Table_0": "2025-04-30-Organogram-(Junior)__22bdbad8-7bf6-4b0f-9e62-ef5caf882662",
+        "Table_1": "2022-04-29-Organogram-(Junior)__04f51f71-b0b8-4c1a-a398-f604594739fe"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Reporting Senior Post = Table_1.Reporting Senior Post AND Table_0.Grade = Table_1.Grade"
+      ],
+      "generation_time_seconds": 36.25,
+      "usage": {
+        "prompt_tokens": 6228,
+        "completion_tokens": 2837,
+        "total_tokens": 9065
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:08:51",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 24,
+      "aliases": {
+        "Table_0": "2025-04-30-Organogram-(Junior)__22bdbad8-7bf6-4b0f-9e62-ef5caf882662",
+        "Table_1": "2023-04-28-Organogram-(Junior)__5f9a8ed2-a661-491a-a2db-3a32c8b905d3"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Reporting Senior Post = Table_1.Reporting Senior Post AND Table_0.Grade = Table_1.Grade"
+      ],
+      "generation_time_seconds": 33.85,
+      "usage": {
+        "prompt_tokens": 6252,
+        "completion_tokens": 2689,
+        "total_tokens": 8941
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:09:24",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 25,
+      "aliases": {
+        "Table_0": "2025-04-30-Organogram-(Junior)__22bdbad8-7bf6-4b0f-9e62-ef5caf882662",
+        "Table_1": "2022-10-31-Organogram-(Junior)__a079db24-108c-495c-95f7-b767f687429c"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Reporting Senior Post = Table_1.Reporting Senior Post AND Table_0.Grade = Table_1.Grade"
+      ],
+      "generation_time_seconds": 33.01,
+      "usage": {
+        "prompt_tokens": 6222,
+        "completion_tokens": 2587,
+        "total_tokens": 8809
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:09:57",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 26,
+      "aliases": {
+        "Table_0": "2025-04-30-Organogram-(Junior)__22bdbad8-7bf6-4b0f-9e62-ef5caf882662",
+        "Table_1": "2025-07-31-Organogram-(Junior)__f3a20b4b-2630-4fe6-9df8-35b45fc96efc"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Reporting Senior Post = Table_1.Reporting Senior Post AND Table_0.Grade = Table_1.Grade"
+      ],
+      "generation_time_seconds": 28.3,
+      "usage": {
+        "prompt_tokens": 6270,
+        "completion_tokens": 2193,
+        "total_tokens": 8463
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:10:26",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 27,
+      "aliases": {
+        "Table_0": "2025-04-30-Organogram-(Junior)__22bdbad8-7bf6-4b0f-9e62-ef5caf882662",
+        "Table_1": "2025-07-31-Organogram-(Junior)__f3a20b4b-2630-4fe6-9df8-35b45fc96efc",
+        "Table_2": "2024-10-31-Organogram-(Junior)__e26b85ec-d925-466b-8e83-f8c2183cd69e"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Reporting Senior Post = Table_1.Reporting Senior Post AND Table_0.Grade = Table_1.Grade",
+        "JOIN: Table_1 ⋈ Table_2 ON Table_1.Reporting Senior Post = Table_2.Reporting Senior Post AND Table_1.Grade = Table_2.Grade"
+      ],
+      "generation_time_seconds": 45.57,
+      "usage": {
+        "prompt_tokens": 7854,
+        "completion_tokens": 3475,
+        "total_tokens": 11329
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:11:11",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 28,
+      "aliases": {
+        "Table_0": "2025-04-30-Organogram-(Junior)__22bdbad8-7bf6-4b0f-9e62-ef5caf882662",
+        "Table_1": "2025-07-31-Organogram-(Junior)__f3a20b4b-2630-4fe6-9df8-35b45fc96efc",
+        "Table_2": "CSV__27a668de-5913-4b5a-a6da-e605cc49afff"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Reporting Senior Post = Table_1.Reporting Senior Post AND Table_0.Grade = Table_1.Grade",
+        "JOIN-CORRELATION: Table_1 ⋈ Table_2 ON Table_1.Reporting Senior Post = Table_2.Number of Other workers  AND Table_1.Payscale Minimum (£) = Table_2.Number of farms"
+      ],
+      "generation_time_seconds": 23.22,
+      "usage": {
+        "prompt_tokens": 7986,
+        "completion_tokens": 1755,
+        "total_tokens": 9741
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:11:35",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 29,
+      "aliases": {
+        "Table_0": "2021-11-15-Organogram-(Junior)__d255cc4e-e819-46bc-af55-983dfb74b92c",
+        "Table_1": "2024-04-30-Organogram-(Junior)__5786a76a-170c-4709-813a-7cfedda34a4a"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Reporting Senior Post = Table_1.Reporting Senior Post"
+      ],
+      "generation_time_seconds": 37.26,
+      "usage": {
+        "prompt_tokens": 6312,
+        "completion_tokens": 2868,
+        "total_tokens": 9180
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:12:12",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 30,
+      "aliases": {
+        "Table_0": "2021-11-15-Organogram-(Junior)__d255cc4e-e819-46bc-af55-983dfb74b92c",
+        "Table_1": "2022-04-29-Organogram-(Junior)__c556d709-8a66-4c39-be4e-23e9baef9c90"
+      },
+      "matches": [
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Grade = Table_1.Grade AND Table_0.Payscale Minimum (£) = Table_1.Payscale Minimum (£)"
+      ],
+      "generation_time_seconds": 33.64,
+      "usage": {
+        "prompt_tokens": 6303,
+        "completion_tokens": 2598,
+        "total_tokens": 8901
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:12:45",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 31,
+      "aliases": {
+        "Table_0": "2021-11-15-Organogram-(Junior)__d255cc4e-e819-46bc-af55-983dfb74b92c",
+        "Table_1": "2025-04-30-Organogram-(Junior)__4f908e9f-fef1-49f9-ad48-caa10bde33a5"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Reporting Senior Post = Table_1.Reporting Senior Post"
+      ],
+      "generation_time_seconds": 34.78,
+      "usage": {
+        "prompt_tokens": 6309,
+        "completion_tokens": 2676,
+        "total_tokens": 8985
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:13:20",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 32,
+      "aliases": {
+        "Table_0": "2021-11-15-Organogram-(Junior)__d255cc4e-e819-46bc-af55-983dfb74b92c",
+        "Table_1": "2024-04-30-Organogram-(Junior)__5786a76a-170c-4709-813a-7cfedda34a4a"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Reporting Senior Post = Table_1.Reporting Senior Post"
+      ],
+      "generation_time_seconds": 32.83,
+      "usage": {
+        "prompt_tokens": 6312,
+        "completion_tokens": 2506,
+        "total_tokens": 8818
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:13:53",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 33,
+      "aliases": {
+        "Table_0": "2021-11-15-Organogram-(Junior)__d255cc4e-e819-46bc-af55-983dfb74b92c",
+        "Table_1": "2022-04-29-Organogram-(Junior)__65208884-95dd-4da9-a3f1-a81d52b7f785"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Grade = Table_1.Grade AND Table_0.Payscale Minimum (£) = Table_1.Payscale Minimum (£) AND Table_0.Payscale Maximum (£) = Table_1.Payscale Maximum (£)"
+      ],
+      "generation_time_seconds": 42.63,
+      "usage": {
+        "prompt_tokens": 6381,
+        "completion_tokens": 3264,
+        "total_tokens": 9645
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:14:36",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 34,
+      "aliases": {
+        "Table_0": "2021-11-15-Organogram-(Junior)__d255cc4e-e819-46bc-af55-983dfb74b92c",
+        "Table_1": "2022-04-29-Organogram-(Senior)__1bf61f91-49af-4003-9587-dbf2cbe9a21d",
+        "Table_2": "2022-10-31-Organogram-(Senior)__18e63ece-9999-486d-b93b-303e8e50bc97",
+        "Table_3": "2022-01-31-Organogram-(Senior)__56eefc2b-4782-4a04-916c-8c55d85a6731"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Reporting Senior Post = Table_1.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Reporting Senior Post = Table_1.Reports to Senior Post AND Table_0.Payscale Maximum (£) = Table_1.Actual Pay Ceiling (£)",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Contact E-mail = Table_3.Contact E-mail AND Table_2.Name = Table_3.Name"
+      ],
+      "generation_time_seconds": 31.28,
+      "usage": {
+        "prompt_tokens": 9729,
+        "completion_tokens": 2250,
+        "total_tokens": 11979
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:15:07",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 36,
+      "aliases": {
+        "Table_0": "583a4d63-6d67-4caa-9ddd-c4eb919f325e",
+        "Table_1": "84a1f5fd-94a3-46f0-bec3-be7b089b172c"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Reporting Senior Post = Table_1.Post Unique Reference",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Number of Posts in FTE = Table_1.Post Unique Reference"
+      ],
+      "generation_time_seconds": 28.86,
+      "usage": {
+        "prompt_tokens": 7230,
+        "completion_tokens": 2043,
+        "total_tokens": 9273
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:16:00",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 37,
+      "aliases": {
+        "Table_0": "583a4d63-6d67-4caa-9ddd-c4eb919f325e",
+        "Table_1": "2022-01-31-Organogram-(Junior)__9798e31f-962b-4f47-a998-df9f47035a57"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Parent Department = Table_1.Parent Department AND Table_0.Organisation = Table_1.Organisation"
+      ],
+      "generation_time_seconds": 31.14,
+      "usage": {
+        "prompt_tokens": 6690,
+        "completion_tokens": 2368,
+        "total_tokens": 9058
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:16:31",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 38,
+      "aliases": {
+        "Table_0": "583a4d63-6d67-4caa-9ddd-c4eb919f325e",
+        "Table_1": "7a2a07c4-d3b6-461d-8464-dc1582cfb0d9"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Parent Department = Table_1.Parent Department AND Table_0.Organisation = Table_1.Organisation"
+      ],
+      "generation_time_seconds": 27.03,
+      "usage": {
+        "prompt_tokens": 7086,
+        "completion_tokens": 2045,
+        "total_tokens": 9131
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:16:58",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 39,
+      "aliases": {
+        "Table_0": "583a4d63-6d67-4caa-9ddd-c4eb919f325e",
+        "Table_1": "84a1f5fd-94a3-46f0-bec3-be7b089b172c"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Reporting Senior Post = Table_1.Post Unique Reference",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Number of Posts in FTE = Table_1.Post Unique Reference"
+      ],
+      "generation_time_seconds": 27.13,
+      "usage": {
+        "prompt_tokens": 7230,
+        "completion_tokens": 2049,
+        "total_tokens": 9279
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:17:25",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 40,
+      "aliases": {
+        "Table_0": "583a4d63-6d67-4caa-9ddd-c4eb919f325e",
+        "Table_1": "b2b792fa-fee9-4c8a-ab69-45a64c88a414"
+      },
+      "matches": [
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Professional/Occupational Group = Table_1.Professional/Occupational Group AND Table_0.Payscale Maximum (£) = Table_1.Reporting Senior Post"
+      ],
+      "generation_time_seconds": 34.02,
+      "usage": {
+        "prompt_tokens": 7074,
+        "completion_tokens": 2566,
+        "total_tokens": 9640
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:17:59",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 41,
+      "aliases": {
+        "Table_0": "583a4d63-6d67-4caa-9ddd-c4eb919f325e",
+        "Table_1": "84a1f5fd-94a3-46f0-bec3-be7b089b172c",
+        "Table_2": "583a4d63-6d67-4caa-9ddd-c4eb919f325e"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Reporting Senior Post = Table_1.Post Unique Reference",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Number of Posts in FTE = Table_1.Post Unique Reference"
+      ],
+      "generation_time_seconds": 39.01,
+      "usage": {
+        "prompt_tokens": 9108,
+        "completion_tokens": 2877,
+        "total_tokens": 11985
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:18:38",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 42,
+      "aliases": {
+        "Table_0": "583a4d63-6d67-4caa-9ddd-c4eb919f325e",
+        "Table_1": "84a1f5fd-94a3-46f0-bec3-be7b089b172c",
+        "Table_2": "583a4d63-6d67-4caa-9ddd-c4eb919f325e",
+        "Table_3": "7a2a07c4-d3b6-461d-8464-dc1582cfb0d9"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Reporting Senior Post = Table_1.Post Unique Reference",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Number of Posts in FTE = Table_1.Post Unique Reference",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Parent Department = Table_3.Parent Department AND Table_2.Organisation = Table_3.Organisation"
+      ],
+      "generation_time_seconds": 68.51,
+      "usage": {
+        "prompt_tokens": 11136,
+        "completion_tokens": 4269,
+        "total_tokens": 15405
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:19:46",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 43,
+      "aliases": {
+        "Table_0": "583a4d63-6d67-4caa-9ddd-c4eb919f325e",
+        "Table_1": "84a1f5fd-94a3-46f0-bec3-be7b089b172c",
+        "Table_2": "583a4d63-6d67-4caa-9ddd-c4eb919f325e",
+        "Table_3": "237a9aad-eb3e-479c-a9d5-a842bef3ddfe"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Reporting Senior Post = Table_1.Post Unique Reference",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Unit = Table_1.Unit AND Table_0.Number of Posts in FTE = Table_1.Post Unique Reference",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Unit = Table_3.Unit AND Table_2.Reporting Senior Post = Table_3.Post Unique Reference",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.Unit = Table_3.Unit AND Table_2.Number of Posts in FTE = Table_3.Salary Cost of Reports (£)"
+      ],
+      "generation_time_seconds": 51.16,
+      "usage": {
+        "prompt_tokens": 11262,
+        "completion_tokens": 2196,
+        "total_tokens": 13458
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:20:38",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 44,
+      "aliases": {
+        "Table_0": "583a4d63-6d67-4caa-9ddd-c4eb919f325e",
+        "Table_1": "2021-01-27-Organogram-(Junior)__9e4cd9b9-2690-4fe2-96ca-01bcd2212148",
+        "Table_2": "cb46a57f-2bf4-429e-ae33-8498e28d3816",
+        "Table_3": "7a2a07c4-d3b6-461d-8464-dc1582cfb0d9"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Parent Department = Table_1.Parent Department AND Table_0.Organisation = Table_1.Organisation",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Reporting Senior Post = Table_3.Reporting Senior Post AND Table_2.Grade = Table_3.Grade",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.Grade = Table_3.Grade AND Table_2.Payscale Minimum (£) = Table_3.Payscale Maximum (£)"
+      ],
+      "generation_time_seconds": 26.18,
+      "usage": {
+        "prompt_tokens": 10725,
+        "completion_tokens": 1943,
+        "total_tokens": 12668
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:21:04",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 45,
+      "aliases": {
+        "Table_0": "Registered-Dairy-Establishments-as-at-1-December-2019__ad59f628-9ef3-4e26-9284-e5bf85eae6e4",
+        "Table_1": "Registered-Dairy-Establishments-as-at-1-May-2021__37490ba6-573b-4ac1-8a06-9f4e9a55d1db"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON TradingName, PremiseAddress4, PremiseAddress5, PremisePostCode"
+      ],
+      "generation_time_seconds": 26.18,
+      "usage": {
+        "prompt_tokens": 5241,
+        "completion_tokens": 2018,
+        "total_tokens": 7259
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:21:30",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 50,
+      "aliases": {
+        "Table_0": "CSV__06273846-9c49-4c32-80bc-9e01021aee70",
+        "Table_1": "CSV__548145ae-6c7b-4ed5-b026-5ee85c0484d1"
+      },
+      "matches": [
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Site_Code = Table_1.Site_Code AND Table_0.NO3_N_MGL = Table_1.NH4_N_MGL"
+      ],
+      "generation_time_seconds": 35.31,
+      "usage": {
+        "prompt_tokens": 6645,
+        "completion_tokens": 2542,
+        "total_tokens": 9187
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:24:18",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 51,
+      "aliases": {
+        "Table_0": "CSV__06273846-9c49-4c32-80bc-9e01021aee70",
+        "Table_1": "b2ee6eb0-6e14-4285-9728-cdf3a9aaf23d",
+        "Table_2": "723a7ab5-9902-40d2-b03c-fb0c0bab43a7"
+      },
+      "matches": [
+        "JOIN: Table_1 ⋈ Table_2 ON Table_1.Vat No = Table_2.Vat No AND Table_1.Supplier = Table_2.Supplier",
+        "JOIN-CORRELATION: Table_1 ⋈ Table_2 ON Table_1.Supplier = Table_2.Supplier AND Table_1.Amount = Table_2.Amount"
+      ],
+      "generation_time_seconds": 42.67,
+      "usage": {
+        "prompt_tokens": 8754,
+        "completion_tokens": 2299,
+        "total_tokens": 11053
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:25:00",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 52,
+      "aliases": {
+        "Table_0": "CSV__06273846-9c49-4c32-80bc-9e01021aee70",
+        "Table_1": "b2ee6eb0-6e14-4285-9728-cdf3a9aaf23d",
+        "Table_2": "723a7ab5-9902-40d2-b03c-fb0c0bab43a7",
+        "Table_3": "b2ee6eb0-6e14-4285-9728-cdf3a9aaf23d",
+        "Table_4": "2648687e-4de6-4817-baf5-a2cce97d56e6"
+      },
+      "matches": [
+        "JOIN: Table_1 ⋈ Table_2 ON Table_1.Vat No = Table_2.Vat No AND Table_1.Supplier = Table_2.Supplier",
+        "JOIN-CORRELATION: Table_1 ⋈ Table_2 ON Table_1.Supplier = Table_2.Supplier AND Table_1.Amount = Table_2.Amount",
+        "JOIN: Table_3 ⋈ Table_4 ON Table_3.Transaction Number = Table_4.Invoice Num AND Table_3.Supplier = Table_4.Expense Type",
+        "JOIN-CORRELATION: Table_3 ⋈ Table_4 ON Table_3.Supplier = Table_4.Vendor Name AND Table_3.Amount = Table_4.Amount"
+      ],
+      "generation_time_seconds": 49.02,
+      "usage": {
+        "prompt_tokens": 12288,
+        "completion_tokens": 3409,
+        "total_tokens": 15697
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:25:49",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 53,
+      "aliases": {
+        "Table_0": "a59133bf-c115-4be2-8fb6-f4dc15ddd783",
+        "Table_1": "0307b4d2-ac9b-4ab6-83ec-b35fbdd4e456"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Expense Type, Expense Area, Supplier, Transaction Number, Amount"
+      ],
+      "generation_time_seconds": 13.33,
+      "usage": {
+        "prompt_tokens": 6636,
+        "completion_tokens": 1766,
+        "total_tokens": 8402
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:26:03",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 54,
+      "aliases": {
+        "Table_0": "a59133bf-c115-4be2-8fb6-f4dc15ddd783",
+        "Table_1": "6ef4863b-ddd5-45ff-bb11-f4a82f49b9a7"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Supplier = Table_1.Supplier AND Table_0.Vat No = Table_1.Vat No"
+      ],
+      "generation_time_seconds": 16.44,
+      "usage": {
+        "prompt_tokens": 6651,
+        "completion_tokens": 2272,
+        "total_tokens": 8923
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:26:19",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 55,
+      "aliases": {
+        "Table_0": "a59133bf-c115-4be2-8fb6-f4dc15ddd783",
+        "Table_1": "561e69f8-c45a-4abe-8ddc-36127cd5c2a4"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Supplier = Table_1._duplicated_4 AND Table_0.Vat No = Table_1._duplicated_7"
+      ],
+      "generation_time_seconds": 17.2,
+      "usage": {
+        "prompt_tokens": 6801,
+        "completion_tokens": 2377,
+        "total_tokens": 9178
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:26:36",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 56,
+      "aliases": {
+        "Table_0": "a59133bf-c115-4be2-8fb6-f4dc15ddd783",
+        "Table_1": "0307b4d2-ac9b-4ab6-83ec-b35fbdd4e456"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Supplier = Table_1.Supplier AND Table_0.Vat No = Table_1.Vat Reg Num",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Supplier = Table_1.Supplier AND Table_0.Amount = Table_1.Amount Paid SUM"
+      ],
+      "generation_time_seconds": 16.32,
+      "usage": {
+        "prompt_tokens": 6798,
+        "completion_tokens": 2261,
+        "total_tokens": 9059
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:26:53",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 57,
+      "aliases": {
+        "Table_0": "a59133bf-c115-4be2-8fb6-f4dc15ddd783",
+        "Table_1": "0307b4d2-ac9b-4ab6-83ec-b35fbdd4e456",
+        "Table_2": "March-2023-all-spend__b4bbb693-d351-4c2d-a92f-fa5b3f8f150b"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Supplier = Table_1.Supplier AND Table_0.Vat No = Table_1.Vat Reg Num",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Supplier = Table_1.Supplier AND Table_0.Amount = Table_1.Amount Paid SUM"
+      ],
+      "generation_time_seconds": 27.6,
+      "usage": {
+        "prompt_tokens": 8352,
+        "completion_tokens": 3841,
+        "total_tokens": 12193
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:27:20",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 58,
+      "aliases": {
+        "Table_0": "a59133bf-c115-4be2-8fb6-f4dc15ddd783",
+        "Table_1": "0307b4d2-ac9b-4ab6-83ec-b35fbdd4e456",
+        "Table_2": "Download__90f54a10-356c-453f-a7dc-9bd80ae6b564"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Supplier = Table_1.Supplier AND Table_0.Vat No = Table_1.Vat Reg Num",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Supplier = Table_1.Supplier AND Table_0.Amount = Table_1.Amount Paid SUM"
+      ],
+      "generation_time_seconds": 20.27,
+      "usage": {
+        "prompt_tokens": 8325,
+        "completion_tokens": 2753,
+        "total_tokens": 11078
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:27:41",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 59,
+      "aliases": {
+        "Table_0": "a59133bf-c115-4be2-8fb6-f4dc15ddd783",
+        "Table_1": "c6c8b2db-8231-4e0b-aff9-062e9cc7938f",
+        "Table_2": "a1c206c7-af0d-4c25-934c-c8c5882ba3e7"
+      },
+      "matches": [
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Vat No = Table_1.Vat No AND Table_0.Amount = Table_1.Transaction Number",
+        "JOIN: Table_1 ⋈ Table_2 ON Table_1.Entity = Table_2.Entity AND Table_1.Department Family = Table_2.Department Family"
+      ],
+      "generation_time_seconds": 23.38,
+      "usage": {
+        "prompt_tokens": 8673,
+        "completion_tokens": 3205,
+        "total_tokens": 11878
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:28:04",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 60,
+      "aliases": {
+        "Table_0": "a59133bf-c115-4be2-8fb6-f4dc15ddd783",
+        "Table_1": "0307b4d2-ac9b-4ab6-83ec-b35fbdd4e456",
+        "Table_2": "b2ee6eb0-6e14-4285-9728-cdf3a9aaf23d",
+        "Table_3": "2648687e-4de6-4817-baf5-a2cce97d56e6"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Supplier = Table_1.Supplier AND Table_0.Vat No = Table_1.Vat Reg Num",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Supplier = Table_1.Supplier AND Table_0.Amount = Table_1.Amount Paid SUM",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Transaction Number = Table_3.Invoice Num AND Table_2.Supplier = Table_3.Expense Type",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.Supplier = Table_3.Vendor Name AND Table_2.Amount = Table_3.Amount"
+      ],
+      "generation_time_seconds": 29.86,
+      "usage": {
+        "prompt_tokens": 10569,
+        "completion_tokens": 4029,
+        "total_tokens": 14598
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:28:34",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 61,
+      "aliases": {
+        "Table_0": "a59133bf-c115-4be2-8fb6-f4dc15ddd783",
+        "Table_1": "c6c8b2db-8231-4e0b-aff9-062e9cc7938f",
+        "Table_2": "a1c206c7-af0d-4c25-934c-c8c5882ba3e7",
+        "Table_3": "b2ee6eb0-6e14-4285-9728-cdf3a9aaf23d",
+        "Table_4": "2648687e-4de6-4817-baf5-a2cce97d56e6"
+      },
+      "matches": [
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Vat No = Table_1.Vat No AND Table_0.Amount = Table_1.Transaction Number",
+        "JOIN: Table_1 ⋈ Table_2 ON Table_1.Entity = Table_2.Entity AND Table_1.Department Family = Table_2.Department Family",
+        "JOIN: Table_3 ⋈ Table_4 ON Table_3.Transaction Number = Table_4.Invoice Num AND Table_3.Supplier = Table_4.Expense Type",
+        "JOIN-CORRELATION: Table_3 ⋈ Table_4 ON Table_3.Supplier = Table_4.Vendor Name AND Table_3.Amount = Table_4.Amount"
+      ],
+      "generation_time_seconds": 22.66,
+      "usage": {
+        "prompt_tokens": 12288,
+        "completion_tokens": 2882,
+        "total_tokens": 15170
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:28:57",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 66,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2024-09-30-Organogram-(Senior)__a27ebc0c-3675-4ab6-8c26-b7bbdb702b0c"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Name = Table_1.Name AND Table_0.Reports to Senior Post = Table_1.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE"
+      ],
+      "generation_time_seconds": 20.55,
+      "usage": {
+        "prompt_tokens": 6453,
+        "completion_tokens": 2991,
+        "total_tokens": 9444
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:30:15",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 67,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2022-12-31-Organogram-(Senior)__df76fc8e-21a7-4e75-889f-1b76df482dd8"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE"
+      ],
+      "generation_time_seconds": 16.43,
+      "usage": {
+        "prompt_tokens": 6516,
+        "completion_tokens": 2350,
+        "total_tokens": 8866
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:30:32",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 68,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2023-03-31-Organogram-(Senior)__059e9f3c-84a7-44c1-95f5-47edcfb45af4"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE"
+      ],
+      "generation_time_seconds": 21.27,
+      "usage": {
+        "prompt_tokens": 6474,
+        "completion_tokens": 2548,
+        "total_tokens": 9022
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:30:53",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 69,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2024-09-30-Organogram-(Senior)__a27ebc0c-3675-4ab6-8c26-b7bbdb702b0c"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Name = Table_1.Name AND Table_0.Reports to Senior Post = Table_1.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE"
+      ],
+      "generation_time_seconds": 31.96,
+      "usage": {
+        "prompt_tokens": 6453,
+        "completion_tokens": 2481,
+        "total_tokens": 8934
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:31:25",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 71,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2024-09-30-Organogram-(Senior)__a27ebc0c-3675-4ab6-8c26-b7bbdb702b0c",
+        "Table_2": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Name = Table_1.Name AND Table_0.Reports to Senior Post = Table_1.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE"
+      ],
+      "generation_time_seconds": 31.97,
+      "usage": {
+        "prompt_tokens": 7998,
+        "completion_tokens": 2450,
+        "total_tokens": 10448
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:32:31",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 72,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2023-03-31-Organogram-(Senior)__059e9f3c-84a7-44c1-95f5-47edcfb45af4",
+        "Table_2": "2023-09-30-Organogram-(Senior)__cd2c821c-5048-43fd-9f2d-0207fefcc079"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE"
+      ],
+      "generation_time_seconds": 31.16,
+      "usage": {
+        "prompt_tokens": 8016,
+        "completion_tokens": 2296,
+        "total_tokens": 10312
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:33:02",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 73,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2024-03-31-Organogram-(Senior)__04ce6650-da93-4ad9-9686-498e6dfecfe1",
+        "Table_2": "2023-09-30-Organogram-(Senior)__cd2c821c-5048-43fd-9f2d-0207fefcc079"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE"
+      ],
+      "generation_time_seconds": 30.46,
+      "usage": {
+        "prompt_tokens": 8040,
+        "completion_tokens": 2284,
+        "total_tokens": 10324
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:33:32",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 74,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2024-03-31-Organogram-(Senior)__04ce6650-da93-4ad9-9686-498e6dfecfe1",
+        "Table_2": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE"
+      ],
+      "generation_time_seconds": 31.69,
+      "usage": {
+        "prompt_tokens": 8043,
+        "completion_tokens": 2361,
+        "total_tokens": 10404
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:34:04",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 75,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2021-06-30-Organogram-(Senior)__0f8302f4-1627-4c6c-929a-57c5a40451c8",
+        "Table_2": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Reports to Senior Post = Table_1.Post Unique Reference AND Table_0.Salary Cost of Reports (£) = Table_1.Salary Cost of Reports (£)"
+      ],
+      "generation_time_seconds": 29.86,
+      "usage": {
+        "prompt_tokens": 8151,
+        "completion_tokens": 2251,
+        "total_tokens": 10402
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:34:34",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 76,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2024-03-31-Organogram-(Senior)__04ce6650-da93-4ad9-9686-498e6dfecfe1",
+        "Table_2": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_3": "2023-07-31-Organogram-(Junior)__5df63e58-750d-46c8-8c32-44526a7850e2"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Parent Department = Table_3.Parent Department AND Table_2.Organisation = Table_3.Organisation"
+      ],
+      "generation_time_seconds": 49.65,
+      "usage": {
+        "prompt_tokens": 9651,
+        "completion_tokens": 2205,
+        "total_tokens": 11856
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:35:24",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 77,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2024-03-31-Organogram-(Senior)__04ce6650-da93-4ad9-9686-498e6dfecfe1",
+        "Table_2": "2022-12-31-Organogram-(Senior)__df76fc8e-21a7-4e75-889f-1b76df482dd8",
+        "Table_3": "2024-03-31-Organogram-(Senior)__04ce6650-da93-4ad9-9686-498e6dfecfe1"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Name = Table_3.Name AND Table_2.Reports to Senior Post = Table_3.Reports to Senior Post"
+      ],
+      "generation_time_seconds": 37.92,
+      "usage": {
+        "prompt_tokens": 9660,
+        "completion_tokens": 2023,
+        "total_tokens": 11683
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:36:02",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 78,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2024-03-31-Organogram-(Senior)__04ce6650-da93-4ad9-9686-498e6dfecfe1",
+        "Table_2": "2023-09-30-Organogram-(Senior)__cd2c821c-5048-43fd-9f2d-0207fefcc079",
+        "Table_3": "2024-09-30-Organogram-(Senior)__a27ebc0c-3675-4ab6-8c26-b7bbdb702b0c",
+        "Table_4": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Post Unique Reference = Table_3.Post Unique Reference AND Table_2.Reports to Senior Post = Table_3.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.Post Unique Reference = Table_3.Post Unique Reference AND Table_2.Salary Cost of Reports (£) = Table_3.Salary Cost of Reports (£)"
+      ],
+      "generation_time_seconds": 42.39,
+      "usage": {
+        "prompt_tokens": 11328,
+        "completion_tokens": 3059,
+        "total_tokens": 14387
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:36:44",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 79,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2021-06-30-Organogram-(Senior)__0f8302f4-1627-4c6c-929a-57c5a40451c8",
+        "Table_2": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_3": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_4": "2024-09-30-Organogram-(Senior)__a27ebc0c-3675-4ab6-8c26-b7bbdb702b0c"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Reports to Senior Post = Table_1.Post Unique Reference AND Table_0.Salary Cost of Reports (£) = Table_1.Salary Cost of Reports (£)",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Name = Table_3.Name AND Table_2.Reports to Senior Post = Table_3.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.Reports to Senior Post = Table_3.Reports to Senior Post AND Table_2.Salary Cost of Reports (£) = Table_3.Salary Cost of Reports (£)",
+        "JOIN: Table_3 ⋈ Table_4 ON Table_3.Post Unique Reference = Table_4.Post Unique Reference AND Table_3.Reports to Senior Post = Table_4.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_3 ⋈ Table_4 ON Table_3.Unit = Table_4.Unit AND Table_3.FTE = Table_4.Salary Cost of Reports (£)"
+      ],
+      "generation_time_seconds": 44.52,
+      "usage": {
+        "prompt_tokens": 11664,
+        "completion_tokens": 1726,
+        "total_tokens": 13390
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:37:29",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 80,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2022-03-31-Organogram-(Senior)__fa171bcc-210b-47e3-9aae-3d47070fbb3a",
+        "Table_2": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_3": "2025-06-30-Organogram-(Senior)__32418c7b-4bdf-4ef2-84b0-a21b3dd06613",
+        "Table_4": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Post Unique Reference = Table_3.Post Unique Reference AND Table_2.Reports to Senior Post = Table_3.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.Post Unique Reference = Table_3.Post Unique Reference AND Table_2.Salary Cost of Reports (£) = Table_3.Salary Cost of Reports (£)"
+      ],
+      "generation_time_seconds": 48.33,
+      "usage": {
+        "prompt_tokens": 11331,
+        "completion_tokens": 2751,
+        "total_tokens": 14082
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:38:17",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 81,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2023-03-31-Organogram-(Senior)__059e9f3c-84a7-44c1-95f5-47edcfb45af4",
+        "Table_2": "2023-09-30-Organogram-(Senior)__cd2c821c-5048-43fd-9f2d-0207fefcc079",
+        "Table_3": "2024-09-30-Organogram-(Junior)__5245c47b-e3ec-41b4-8b2b-1808428b06de",
+        "Table_4": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_5": "2024-12-31-Organogram-(Senior)__2abb1979-0aed-4291-bb8c-b87da1564b1b"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Parent Department = Table_3.Parent Department AND Table_2.Organisation = Table_3.Organisation",
+        "JOIN: Table_4 ⋈ Table_5 ON Table_4.Post Unique Reference = Table_5.Post Unique Reference AND Table_4.Reports to Senior Post = Table_5.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_4 ⋈ Table_5 ON Table_4.Unit = Table_5.Unit AND Table_4.FTE = Table_5.Salary Cost of Reports (£)"
+      ],
+      "generation_time_seconds": 32.17,
+      "usage": {
+        "prompt_tokens": 12288,
+        "completion_tokens": 2260,
+        "total_tokens": 14548
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:38:49",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 82,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_2": "2024-09-30-Organogram-(Senior)__a27ebc0c-3675-4ab6-8c26-b7bbdb702b0c",
+        "Table_3": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_4": "2025-09-30-Organogram-(Junior)__5f016d60-f4ff-4d0d-b130-a8ee13552107",
+        "Table_5": "2023-09-30-Organogram-(Senior)__cd2c821c-5048-43fd-9f2d-0207fefcc079"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Name = Table_1.Name AND Table_0.Reports to Senior Post = Table_1.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Reports to Senior Post = Table_1.Reports to Senior Post AND Table_0.Salary Cost of Reports (£) = Table_1.Salary Cost of Reports (£)",
+        "JOIN: Table_1 ⋈ Table_2 ON Table_1.Post Unique Reference = Table_2.Post Unique Reference AND Table_1.Reports to Senior Post = Table_2.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_1 ⋈ Table_2 ON Table_1.Unit = Table_2.Unit AND Table_1.FTE = Table_2.Salary Cost of Reports (£)",
+        "JOIN: Table_3 ⋈ Table_4 ON Table_3.Parent Department = Table_4.Parent Department AND Table_3.Organisation = Table_4.Organisation"
+      ],
+      "generation_time_seconds": 53.93,
+      "usage": {
+        "prompt_tokens": 12288,
+        "completion_tokens": 3200,
+        "total_tokens": 15488
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:39:43",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 83,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2023-07-31-Organogram-(Senior)__9129f324-eea1-4732-92b8-2fc3141ea88e",
+        "Table_2": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_3": "2022-09-30-Organogram-(Senior)__5bd7d5a1-ff41-43b0-9647-b54c25d05468",
+        "Table_4": "2022-12-31-Organogram-(Senior)__df76fc8e-21a7-4e75-889f-1b76df482dd8",
+        "Table_5": "2021-06-30-Organogram-(Senior)__0f8302f4-1627-4c6c-929a-57c5a40451c8"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.FTE = Table_1.FTE",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Post Unique Reference = Table_3.Post Unique Reference AND Table_2.Name = Table_3.Name",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.Post Unique Reference = Table_3.Post Unique Reference AND Table_2.FTE = Table_3.FTE",
+        "JOIN: Table_4 ⋈ Table_5 ON Table_4.Post Unique Reference = Table_5.Post Unique Reference AND Table_4.Reports to Senior Post = Table_5.Reports to Senior Post"
+      ],
+      "generation_time_seconds": 35.9,
+      "usage": {
+        "prompt_tokens": 12288,
+        "completion_tokens": 2560,
+        "total_tokens": 14848
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:40:19",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 84,
+      "aliases": {
+        "Table_0": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2",
+        "Table_1": "2021-12-31-Organogram-(Senior)__a2c5b69e-1033-4630-a209-f461d346424c",
+        "Table_2": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_3": "2024-09-30-Organogram-(Senior)__a27ebc0c-3675-4ab6-8c26-b7bbdb702b0c",
+        "Table_4": "2025-03-31-Organogram-(Senior)__4ec7b984-aaa6-4a7b-8425-adfe87013152",
+        "Table_5": "2023-12-31-Organogram-(Senior)__1a51e5b0-d0f7-4a6b-8c7e-2d58cfb158d2"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Post Unique Reference = Table_1.Post Unique Reference AND Table_0.Name = Table_1.Name",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Reports to Senior Post = Table_1.Post Unique Reference AND Table_0.Salary Cost of Reports (£) = Table_1.Salary Cost of Reports (£)",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.Post Unique Reference = Table_3.Post Unique Reference AND Table_2.Reports to Senior Post = Table_3.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.Unit = Table_3.Unit AND Table_2.FTE = Table_3.Salary Cost of Reports (£)",
+        "JOIN: Table_4 ⋈ Table_5 ON Table_4.Post Unique Reference = Table_5.Post Unique Reference AND Table_4.Reports to Senior Post = Table_5.Reports to Senior Post",
+        "JOIN-CORRELATION: Table_4 ⋈ Table_5 ON Table_4.Post Unique Reference = Table_5.Post Unique Reference AND Table_4.Salary Cost of Reports (£) = Table_5.Salary Cost of Reports (£)"
+      ],
+      "generation_time_seconds": 22.06,
+      "usage": {
+        "prompt_tokens": 12288,
+        "completion_tokens": 1524,
+        "total_tokens": 13812
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:40:41",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 85,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-April-2025__2de5ca7c-6cad-4670-ab17-a83310f78291"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Department, Organisation, Supplier, Postcode"
+      ],
+      "generation_time_seconds": 27.2,
+      "usage": {
+        "prompt_tokens": 6291,
+        "completion_tokens": 2071,
+        "total_tokens": 8362
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:41:08",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 86,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-June-2025__8386b8e4-8bf7-4037-be62-4c43958d3217"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Department, Organisation, Supplier, Postcode"
+      ],
+      "generation_time_seconds": 27.31,
+      "usage": {
+        "prompt_tokens": 6357,
+        "completion_tokens": 2102,
+        "total_tokens": 8459
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:41:35",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 87,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-April-2025__2de5ca7c-6cad-4670-ab17-a83310f78291"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Department, Organisation, Supplier, Postcode"
+      ],
+      "generation_time_seconds": 24.67,
+      "usage": {
+        "prompt_tokens": 6291,
+        "completion_tokens": 1894,
+        "total_tokens": 8185
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:42:00",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 88,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-October-2025__b48c6a8b-8a7a-4a55-ab0f-a5393b7ab213"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Department, Organisation, Supplier, Postcode"
+      ],
+      "generation_time_seconds": 26.83,
+      "usage": {
+        "prompt_tokens": 6249,
+        "completion_tokens": 2060,
+        "total_tokens": 8309
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:42:27",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 90,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "CSV__4122cc6d-fbd0-4d4d-85e9-cfca057e40e9"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Invoice number = Table_1.OBJECTID"
+      ],
+      "generation_time_seconds": 29.21,
+      "usage": {
+        "prompt_tokens": 6606,
+        "completion_tokens": 2106,
+        "total_tokens": 8712
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:43:27",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 91,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-June-2025__8386b8e4-8bf7-4037-be62-4c43958d3217"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Department = Table_1.Department AND Table_0.Organisation = Table_1.Organisation"
+      ],
+      "generation_time_seconds": 28.34,
+      "usage": {
+        "prompt_tokens": 6402,
+        "completion_tokens": 2178,
+        "total_tokens": 8580
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:43:56",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 92,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-April-2025__2de5ca7c-6cad-4670-ab17-a83310f78291"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Department = Table_1.Department AND Table_0.Organisation = Table_1.Organisation"
+      ],
+      "generation_time_seconds": 29.5,
+      "usage": {
+        "prompt_tokens": 6336,
+        "completion_tokens": 2247,
+        "total_tokens": 8583
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:44:25",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 93,
+      "aliases": {
+        "Table_0": "DfI-Departmental-spend-over-£25000-for-December-2025__fd4725a8-c9f8-4096-9f52-4ecf0441cfd1",
+        "Table_1": "DfI-Departmental-spend-over-£25000-for-October-2025__b48c6a8b-8a7a-4a55-ab0f-a5393b7ab213"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Department = Table_1.Department AND Table_0.Organisation = Table_1.Organisation"
+      ],
+      "generation_time_seconds": 28.61,
+      "usage": {
+        "prompt_tokens": 6294,
+        "completion_tokens": 2206,
+        "total_tokens": 8500
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:44:54",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 94,
+      "aliases": {
+        "Table_0": "Meat-Establishment-Audits-as-at-1-May-2023__826b6b31-cba2-4f8a-8857-81fce7cd8b15",
+        "Table_1": "Meat-Establishment-Audits-as-at-1-May-2024__bdd5fbc6-c7a7-42ac-8922-a2b9708a0bcf"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Activity, RSL, PSL, GHE, RCP, PCP, MIN, PRO, MSM, CLS"
+      ],
+      "generation_time_seconds": 35.13,
+      "usage": {
+        "prompt_tokens": 5814,
+        "completion_tokens": 2567,
+        "total_tokens": 8381
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:45:29",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 95,
+      "aliases": {
+        "Table_0": "Meat-Establishment-Audits-as-at-1-May-2023__826b6b31-cba2-4f8a-8857-81fce7cd8b15",
+        "Table_1": "Meat-Establishment-Audits-as-at-1-July-2022__ee6e7827-6da3-48ec-8bab-39067aa5a387"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON AppNo, TradingName, Activity"
+      ],
+      "generation_time_seconds": 27.04,
+      "usage": {
+        "prompt_tokens": 5952,
+        "completion_tokens": 2041,
+        "total_tokens": 7993
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:45:56",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 96,
+      "aliases": {
+        "Table_0": "Meat-Establishment-Audits-as-at-1-May-2023__826b6b31-cba2-4f8a-8857-81fce7cd8b15",
+        "Table_1": "CSV__050feef7-9f12-4180-8f7f-0362a71e5a60"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.AppNo = Table_1.OBJECTID"
+      ],
+      "generation_time_seconds": 28.74,
+      "usage": {
+        "prompt_tokens": 6303,
+        "completion_tokens": 2035,
+        "total_tokens": 8338
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:46:25",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 98,
+      "aliases": {
+        "Table_0": "Meat-Establishment-Audits-as-at-1-May-2023__826b6b31-cba2-4f8a-8857-81fce7cd8b15",
+        "Table_1": "CSV__050feef7-9f12-4180-8f7f-0362a71e5a60"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.AppNo = Table_1.OBJECTID"
+      ],
+      "generation_time_seconds": 30.47,
+      "usage": {
+        "prompt_tokens": 6303,
+        "completion_tokens": 2180,
+        "total_tokens": 8483
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:47:17",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 99,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2025-01-31-Organogram-(Junior)__c26102a9-4659-4afb-adfd-8fe13a635ed2"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Reporting Senior Post, Grade, Generic Job Title, Number of Posts in FTE, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 32.53,
+      "usage": {
+        "prompt_tokens": 6246,
+        "completion_tokens": 2445,
+        "total_tokens": 8691
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:47:49",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 101,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2025-01-31-Organogram-(Junior)__c26102a9-4659-4afb-adfd-8fe13a635ed2"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Reporting Senior Post, Grade, Generic Job Title, Number of Posts in FTE, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 35.88,
+      "usage": {
+        "prompt_tokens": 6246,
+        "completion_tokens": 2771,
+        "total_tokens": 9017
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:48:34",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 102,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2023-05-09-Organogram-(Junior)__bebc0222-1b00-4226-9729-520d4492e73c"
+      },
+      "matches": [
+        "UNION: Table_0 ∪ Table_1 ON Parent Department, Organisation, Unit, Reporting Senior Post, Grade, Generic Job Title, Number of Posts in FTE, Professional/Occupational Group, Office Region"
+      ],
+      "generation_time_seconds": 28.97,
+      "usage": {
+        "prompt_tokens": 6243,
+        "completion_tokens": 2214,
+        "total_tokens": 8457
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:49:03",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 103,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2025-01-31-Organogram-(Junior)__c26102a9-4659-4afb-adfd-8fe13a635ed2"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Grade = Table_1.Grade AND Table_0.Generic Job Title = Table_1.Generic Job Title"
+      ],
+      "generation_time_seconds": 27.14,
+      "usage": {
+        "prompt_tokens": 6282,
+        "completion_tokens": 2066,
+        "total_tokens": 8348
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:49:30",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 104,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2024-01-31-Organogram-(Junior)__cd06e159-56f6-4b6e-bf80-6051036a8ae9"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Grade = Table_1.Grade AND Table_0.Generic Job Title = Table_1.Generic Job Title",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.Grade = Table_1.Grade AND Table_0.Payscale Minimum (£) = Table_1.Payscale Maximum (£)"
+      ],
+      "generation_time_seconds": 41.21,
+      "usage": {
+        "prompt_tokens": 6423,
+        "completion_tokens": 3159,
+        "total_tokens": 9582
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:50:11",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 106,
+      "aliases": {
+        "Table_0": "2025-10-31-Organogram-(Junior)__4d36821a-0674-4133-8100-67e38d5a7889",
+        "Table_1": "2025-01-31-Organogram-(Junior)__c26102a9-4659-4afb-adfd-8fe13a635ed2"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.Grade = Table_1.Grade AND Table_0.Generic Job Title = Table_1.Generic Job Title"
+      ],
+      "generation_time_seconds": 29.88,
+      "usage": {
+        "prompt_tokens": 6282,
+        "completion_tokens": 2269,
+        "total_tokens": 8551
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:51:09",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 113,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__7f6c5ce4-8bcd-4b37-bdcb-556e7c8770da",
+        "Table_2": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.Shape_Length = Table_1.OBJECTID"
+      ],
+      "generation_time_seconds": 46.24,
+      "usage": {
+        "prompt_tokens": 8946,
+        "completion_tokens": 3372,
+        "total_tokens": 12318
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:54:19",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 114,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__7f6c5ce4-8bcd-4b37-bdcb-556e7c8770da",
+        "Table_2": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.Shape_Length = Table_1.OBJECTID"
+      ],
+      "generation_time_seconds": 37.01,
+      "usage": {
+        "prompt_tokens": 8946,
+        "completion_tokens": 2765,
+        "total_tokens": 11711
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:54:56",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 115,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__7f6c5ce4-8bcd-4b37-bdcb-556e7c8770da",
+        "Table_2": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_3": "CSV__ab86601f-626e-4502-ba7d-fa119584d610"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.Shape_Length = Table_1.OBJECTID",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.BGSREF = Table_3.BGSREF AND Table_2.LEX_RCS_SIGMA = Table_3.LEX_RCS_SIGMA"
+      ],
+      "generation_time_seconds": 36.04,
+      "usage": {
+        "prompt_tokens": 10704,
+        "completion_tokens": 2624,
+        "total_tokens": 13328
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:55:32",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 117,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__7f6c5ce4-8bcd-4b37-bdcb-556e7c8770da",
+        "Table_2": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_3": "CSV__7f6c5ce4-8bcd-4b37-bdcb-556e7c8770da",
+        "Table_4": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA",
+        "JOIN-CORRELATION: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.Shape_Length = Table_1.OBJECTID",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.BGSREF = Table_3.BGSREF AND Table_2.LEX_RCS_SIGMA = Table_3.LEX_RCS_SIGMA",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.BGSREF = Table_3.BGSREF AND Table_2.Shape_Length = Table_3.OBJECTID"
+      ],
+      "generation_time_seconds": 31.9,
+      "usage": {
+        "prompt_tokens": 12288,
+        "completion_tokens": 2254,
+        "total_tokens": 14542
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:57:04",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    },
+    {
+      "match_index": 118,
+      "aliases": {
+        "Table_0": "CSV__1a66e8bb-1ed5-498e-b6ab-ae8a862b1266",
+        "Table_1": "CSV__ab86601f-626e-4502-ba7d-fa119584d610",
+        "Table_2": "CSV__d7c46b36-4de8-4260-a1db-b84e2bce275b",
+        "Table_3": "CSV__1e09f805-5363-4d4b-9194-f9b08f1f70f7",
+        "Table_4": "CSV__d7c46b36-4de8-4260-a1db-b84e2bce275b"
+      },
+      "matches": [
+        "JOIN: Table_0 ⋈ Table_1 ON Table_0.BGSREF = Table_1.BGSREF AND Table_0.LEX_RCS_SIGMA = Table_1.LEX_RCS_SIGMA",
+        "JOIN: Table_2 ⋈ Table_3 ON Table_2.TYPE = Table_3.TYPE",
+        "JOIN-CORRELATION: Table_2 ⋈ Table_3 ON Table_2.TYPE = Table_3.TYPE AND Table_2.SHAPE_Length = Table_3.SUBTYPE",
+        "JOIN: Table_3 ⋈ Table_4 ON Table_3.TYPE = Table_4.TYPE",
+        "JOIN-CORRELATION: Table_3 ⋈ Table_4 ON Table_3.TYPE = Table_4.TYPE AND Table_3.Shape__Length = Table_4.OBJECTID"
+      ],
+      "generation_time_seconds": 47.02,
+      "usage": {
+        "prompt_tokens": 10056,
+        "completion_tokens": 3442,
+        "total_tokens": 13498
+      },
+      "metadata": "present",
+      "timestamp": "2026-02-17 13:57:51",
+      "status": "failed",
+      "error": "No queries generated after max retries"
+    }
+  ],
+  "total_usage": {
+    "prompt_tokens": 885989,
+    "completion_tokens": 284514,
+    "total_tokens": 1170503
+  }
+}

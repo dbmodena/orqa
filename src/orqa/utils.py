@@ -3,10 +3,11 @@ import copy
 import json
 import re
 from pathlib import Path
-
+import tempfile
 import polars as pl
+import pandas as pd
 from bs4 import BeautifulSoup
-
+import os
 
 def pl_read_dataset(dataset_path: Path, opts: dict = {}) -> pl.DataFrame:
     match dataset_path.suffix:
@@ -198,3 +199,45 @@ def load_dataset_info(
     }
 
     return info, column_typings
+
+
+def pd_read_dataset(dataset_path: Path, opts: dict = {}) -> pd.DataFrame:
+    match dataset_path.suffix:
+        case ".csv":
+            return pd.read_csv(dataset_path, **opts.get("csv", {}))
+        case ".parquet":
+            return pd.read_parquet(dataset_path, **opts.get("parquet", {}))
+        case _:
+            raise ValueError(
+                f"Unknown dataset format for file {dataset_path.absolute()}"
+            )
+
+def load_dataset_info_portion(dataset_path: Path,involved_cols:[str], 
+    polars_opts: dict = {},
+    limit_to_n_columns: int = 20,
+    sample_size: int = 5,
+    seed: int = 0,) -> tuple[dict,dict]:
+    
+    df = pd_read_dataset(dataset_path)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
+        if len(df.columns) > limit_to_n_columns:
+            other_cols = [c for c in df.columns if c not in involved_cols]
+            df = df[list(involved_cols) + other_cols[: limit_to_n_columns - len(involved_cols)]]
+        df.to_csv(tmp.name, index=False)
+        tmp_path = tmp.name
+
+    try:
+            dataset_info, _ = load_dataset_info(Path(tmp_path),polars_opts,limit_to_n_columns,sample_size,seed)
+    finally:
+            os.unlink(tmp_path)
+
+    return df,dataset_info
+
+def save_json(data, path: Path, indent: int = 2) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=indent, ensure_ascii=False)
+
+def load_json(path: Path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)

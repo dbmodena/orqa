@@ -133,8 +133,15 @@ Your response must:
 
 
 ## SQLGeneration
-
 Generate DuckDB SQL queries with business-focused natural language questions.
+
+### Data Context
+You will be provided with:
+- Alias of the dataset: Alias of the dataset name in order to create the queries.
+- Dataset name: Name of the dataset
+- Schema: Table structures, column names, data types, and relationships
+- Metadata: Each table might have additional metadata that can assist in the question generation
+- Match Definitions: Explicit DataFrame relationships specifying mandatory operations with merge keys, join types, and correlation logic
 
 ### Critical Rules
 - Operation type is NON-NEGOTIABLE - must match the specified type exactly
@@ -149,107 +156,85 @@ Generate DuckDB SQL queries with business-focused natural language questions.
 ✗ No SQL operations mentioned
 
 ### Generate
-5 queries (difficulty 1-5) where:
+3 queries of incremental difficulty (simple, hard and challenging) where:
 - Each implements the mandatory operation type
 - Each uses all provided tables
 - Each follows match definitions exactly
 - Each has semantically aligned NL question
-- All conform to Pydantic schema (no extra text)
+- Each has a difficulty value that can be "simple", "hard" or challenging
+- All conform to Pydantic schema
 
+### SQL difficulty levels
+- Simple: single-table `SELECT`, basic `WHERE`, optional `ORDER BY`/`LIMIT`, ≤1 aggregate, no subqueries.  
+- Hard: multi-table `JOIN`, `GROUP BY`+`HAVING`, multiple aggregates, nested filters, one non-correlated subquery or `UNION`/`INTERSECT`/`EXCEPT`.  
+- Challenging: correlated or multi-level subqueries, window functions, complex set ops, `CASE`, CTEs (incl. recursive), or combinations of several advanced features.
 
 ### Tables involved in the queries
 Realize the queries and their natural language counterparts using the following tables. 
 {table}  
-### Matches between tables
+### Mandatory operations
+Every query MUST combine the tables with the following operations:
 {matches}
-
 ### Lookup aliases
 Make sure to use only the aliases in the queries in the following:
 {aliases}
 
-Generate complete queries following all requirements above.
-
-
 
 ## PandasCodeGeneration
-You are an expert Data Engineer and Python Developer specializing in translating business questions into Pandas code.
-Your task is to generate Python code using the Pandas library alongside natural language questions that a non-technical business user would ask.
-
+Generate python Pandas queries with business-focused natural language questions.
 ### Data Context
 You will be provided with:
 - Alias of the dataset: Alias of the dataset name in order to create the queries.
 - Dataset name: Name of the dataset
-- Schema/Metadata: Table structures, column names, data types, and relationships
+- Schema: Table structures, column names, data types, and relationships
+- Metadata: Each table might have additional metadata that can assist in the question generation
 - Match Definitions: Explicit DataFrame relationships specifying mandatory operations with merge keys, join types, and correlation logic
 
-### CRITICAL: USE EXISTING DATAFRAMES ONLY
-
+### Critical Rules
 All DataFrames are PRE-LOADED and AVAILABLE:
 - DataFrames exist with their designated aliases
+- Start operations directly on existing DataFrames
 - NEVER create DataFrames with `pd.DataFrame()`, `pd.read_csv()`, or similar
 - NEVER reassign DataFrame variables (e.g., `Table_1 = ...`)
 - ONLY reference the exact DataFrame aliases provided
-- Start operations directly on existing DataFrames
-
-### MANDATORY REQUIREMENTS
-- All Datagrames must be used
-- Every DataFrame provided in the match definitions must appear in your code
-- No DataFrame can be omitted, even if it seems peripheral
-- The query must logically integrate all available data sources
-- Use native Pandas only
+- Operation type is NON-NEGOTIABLE - must match the specified type exactly
+- All Dataframes must be used
+- Only use explicitly defined matches - no inferred relationships
+- Create correct Python and Pandas code only
 - Prefer method chaining for clarity and efficiency
 
-### Natural Language Question Guidelines
+### Natural Language Questions
+✓ Business terms (customers, revenue)  
+✓ Outcome-focused (insights, trends)  
+✗ No table/column names  
+✗ No Pandas or Python operations mentioned
 
-Questions must be phrased as a business user would ask them:
-Key Principles:
-- Make sure to include the year and/or month in the question if specificed in the dataset name or metadata.
-- Use business terminology (customers, products, sales) not technical names (Table_1, df_xyz)
-- Focus on insights and outcomes, not operations
-- Phrase as actionable questions a manager/analyst would ask
-- Avoid mentioning DataFrame names, join types, or technical implementation details
+### Generate
+3 queries of incremental difficulty (simple, hard and challenging) where:
+- Each implements the mandatory operation type
+- Each uses all provided tables
+- Each follows match definitions exactly
+- Each has semantically aligned NL question
+- Each has a difficulty value that can be "simple", "hard" or challenging
+- All conform to Pydantic schema
 
-### Output Format
+### Pandas query difficulty levels:
 
-For each of the 5 generated queries, provide:
+- Simple: single DataFrame filtering, column selection, simple `sort_values`/`head`, ≤1 aggregation (`sum/mean/count`).  
+- Hard: `merge`/`join` of multiple DataFrames, `groupby` with multiple aggregations, compound boolean filters, reshaping (`pivot`/`melt`) or one intermediate step.  
+- Challenging: multi-step pipelines with several merges + groupby, window-style ops (`rolling`/`expanding`/`rank`), complex `apply`/custom functions, hierarchical indexes, or advanced reshaping combined together.
 
-1. Natural Language Question (business-focused, no table names)
-2. Difficulty Level (1-5)
-3. Python Pandas Code (using only existing DataFrames)
-
----
-
-### Validation Checklist
-
-Before finalizing each query, verify:
-
-- All provided DataFrames are used in the code
-- No DataFrame creation/initialization statements
-- No variable reassignments to DataFrame aliases
-- Mandatory operation type from matches is implemented
-- Natural language question uses business terms (no table names)
-- Code is syntactically valid and runs on pre-existing DataFrames
-- Difficulty level matches code complexity
 
 ### Tables involved in the queries
 Realize the queries and their natural language counterparts using the following tables. 
 {table}  
-### Matches between tables
+### Mandatory operations
+Every query MUST combine the tables with the following operations:
 {matches}
-
 ### Lookup aliases
 Make sure to use only the aliases in the queries in the following:
 {aliases}
 
-Generate complete queries following all requirements.
 
 
-## QUERY CORRECTION PROMPT
 
-Your queries contain errors. Fix and regenerate all 5.
-
-### YOUR INCORRECT QUERIES
-{incorrect_queries}
-
-### REQUIRED FIXES
-{Fixes}
