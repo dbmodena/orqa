@@ -160,7 +160,9 @@ class CandidatesDiscoveryPrompt(Prompt):
 
 class PandasStatementGenerationPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("pandas_statement_generation.md")
-
+    def __init__(self):
+        super().__init__()
+        self._datasets_descriptions = ""  
     def update(
         self,
         dataset_name: str,
@@ -181,12 +183,15 @@ class PandasStatementGenerationPrompt(Prompt):
             column_details,
             sample_data,
         )
-
-        return self._update(table=query_dataset_description,matches=matches,aliases=aliases)
+        self._datasets_descriptions=self._datasets_descriptions.join(f"\n{query_dataset_description}")
+        return self._update(table=self._datasets_descriptions,matches=matches,aliases=aliases)
 
 
 class SQLStatementGenerationPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("sql_statement_generation.md")
+    def __init__(self):
+        super().__init__()
+        self._datasets_descriptions = ""  
 
     def update(
         self,
@@ -208,5 +213,5 @@ class SQLStatementGenerationPrompt(Prompt):
             column_details,
             sample_data,
         )
-
-        return self._update(table=query_dataset_description,matches=matches,aliases=aliases)
+        self._datasets_descriptions += f"\n{query_dataset_description}"
+        return self._update(table=self._datasets_descriptions,matches=matches,aliases=aliases)

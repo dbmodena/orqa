@@ -19,9 +19,30 @@ ROUND = 3
 
 
 def overlap_ratio_only_predicate(edge_data: dict, overlap_threshold: float) -> bool:
-    return edge_data["overlap_ratio"] >= overlap_threshold
+    try:
+        return edge_data['metrics']["overlap_ratio"] >= overlap_threshold
+    except Exception:
+        return False
 
+def macro_avg_predicate(edge_data: dict, overlap_threshold: float, macro_threshold: float) -> bool:
+    try:
+        return (
+            edge_data['metrics']["overlap_ratio"] >= overlap_threshold
+            and edge_data['metrics']["sm_macro_avg"] >= macro_threshold
+            #and edge_data["sm_macro_avg"] >= edge_data["sm_micro_avg"]
+        )
+    except Exception:
+            return False
 
+def micro_avg_predicate(edge_data: dict, overlap_threshold: float, micro_threshold: float) -> bool:
+    try:
+        return (
+            edge_data['metrics']["overlap_ratio"] >= overlap_threshold
+            and edge_data['metrics']["sm_micro_avg"] >= micro_threshold
+            #and edge_data["sm_micro_avg"] >= edge_data["sm_macro_avg"]
+        )
+    except Exception:
+            return False
 def compute_overlap_metrics(
     left_table: list[list[Any]],
     right_table: list[list[Any]],
@@ -269,6 +290,7 @@ class DatasetMatchesGraph:
             for u, v, data in self._G.edges(src, data=True):
                 # with data=True, g.edges return a tuple with
                 # three values, and the third is the data-dict of the node
+                print(data)
                 if data.get("label") in edge_labels and predicate(data):
                     next_node = v if u == src else u
 
@@ -302,9 +324,9 @@ class DatasetMatchesGraph:
         :param num_hops: Number of hops to perform before stopping the search.
         :raises ValueError: If the input node is not found in the graph.
         """
+        
         if not predicate:
             return self._G
-
         if node not in self._G:
             raise ValueError(f"Node '{node}' not found in graph")
 
@@ -331,50 +353,78 @@ class DatasetMatchesGraph:
 
         return sub_g
 
+    
+    
+
+    
     def generate_random_walks(
         self,
         dataset_id: str,
         n_paths_to_generate: int,
         max_path_length: int,
         overlap_ratio_threshold: Optional[float],
+        macro_avg_threshold: Optional[float],
+        micro_avg_threshold: Optional[float],
         seed: int,
     ) -> list:
-        _overlap_ratio_only_predicate = partial(
-            overlap_ratio_only_predicate,
-            overlap_threshold=overlap_ratio_threshold,
-        )
-
         random_walks = []
+        label_configs = [
+            {
+                "edge_labels": ["U"],
+                "weight": "macro_avg" if macro_avg_threshold is not None else None,
+                "predicate": partial(macro_avg_predicate,overlap_threshold=overlap_ratio_threshold, macro_threshold=macro_avg_threshold) if macro_avg_threshold is not None else None,
+            },
+            {
+                "edge_labels": ["J", "JC"],
+                "weight": "micro_avg" if micro_avg_threshold is not None else None,
+                "predicate": partial(micro_avg_predicate,overlap_threshold=overlap_ratio_threshold, micro_threshold=micro_avg_threshold) if micro_avg_threshold is not None else None,
+            },
+        ]
 
-        weight = "overlap_ratio" if overlap_ratio_threshold else None
-        predicate = _overlap_ratio_only_predicate if overlap_ratio_threshold else None
+        for config in label_configs:
+            edge_labels = config["edge_labels"]
+            weight = config["weight"]
+            predicate = config["predicate"]
 
-        # FIX: Here we do not check whether a Join column is considered
-        # also in any other Join/Join-Correlation candidate match during
-        # search.
-        for edge_labels in [["U"], ["J", "JC"]]:
-            sub_graph = self.fetch_matches(
-                dataset_id,
-                predicate,
-                edge_labels,  # ty: ignore
-                max_path_length,
-            )
+            edges_to_keep = [
+                (u, v, k, data)
+                for u, v, k, data in self._G.edges(data=True, keys=True)
+                if data.get("task") in edge_labels
+                and (predicate is None or predicate(data))
+            ]
+
+            sub_graph = self._G.edge_subgraph([(u, v, k) for u, v, k, _ in edges_to_keep]).copy()
+            undirected = nx.to_undirected(sub_graph)
+            if dataset_id not in undirected or undirected.degree(dataset_id) == 0:
+                continue
+
+            seen_walks = set()  # to track unique acyclic walks
 
             for random_walk in nx.generate_random_paths(
-                nx.to_undirected(sub_graph),
+                undirected,
                 n_paths_to_generate,
                 max_path_length,
                 weight=weight,
                 seed=seed,
                 source=dataset_id,
             ):
-                random_walks.append(
-                    {
-                        # "Q": dataset_id,
-                        "operation_type": edge_labels,
-                        "datasets": random_walk,  # this should be a list
-                    }
-                )
+                seen_nodes = set()
+                acyclic_walk = []
+                for node in random_walk:
+                    if node in seen_nodes:
+                        break
+                    seen_nodes.add(node)
+                    acyclic_walk.append(node)
+
+                walk_tuple = tuple(acyclic_walk)  # convert list to tuple for hashing
+                if walk_tuple not in seen_walks:
+                    seen_walks.add(walk_tuple)
+                    random_walks.append(
+                        {
+                            "operation_type": edge_labels,
+                            "datasets": acyclic_walk,
+                        }
+                    )
 
         return random_walks
 

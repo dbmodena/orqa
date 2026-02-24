@@ -1,11 +1,10 @@
 import json
 from pathlib import Path
 import pandas as pd
-from dotenv import load_dotenv
 from .agent.agent import StatementGenerationAgent
 from .utils import load_datasets_metadata, load_dataset_info,save_json,load_json
-
-load_dotenv()
+from conf import OrQAConfig
+from dataclasses import dataclass, field
 
 
 def load_tasks(tasks_file: Path) -> dict:
@@ -22,63 +21,43 @@ def load_tasks(tasks_file: Path) -> dict:
 # ── Match builders ────────────────────────────────────────────────────────────
 
 def _make_union_match(task_spec, df_q, df_r, alias_q, alias_r):
-    columns = task_spec.get("q_columns", [])
-    involved = {alias_q: set(), alias_r: set()}
-
-    if columns:
-        missing_q = [c for c in columns if c not in df_q.columns]
-        missing_r = [c for c in columns if c not in df_r.columns]
-        if missing_q or missing_r:
-            print(f"UNION skipped: columns not found")
-            if missing_q: print(f"  Missing in {alias_q}: {missing_q}")
-            if missing_r: print(f"  Missing in {alias_r}: {missing_r}")
-            return None
-        involved[alias_q].update(columns)
-        involved[alias_r].update(columns)
-        col_str = ", ".join(columns)
-    else:
-        common = set(df_q.columns) & set(df_r.columns)
-        if not common:
-            print(f"UNION skipped: no common columns between {alias_q} and {alias_r}")
-            return None
-        involved[alias_q].update(common)
-        involved[alias_r].update(common)
-        col_str = "All columns"
-
+    q_columns = task_spec.get("q_columns", [])
+    r_columns = task_spec.get("r_columns", [])
+    involved = {alias_q: set(q_columns), alias_r: set(r_columns)}
+    col_str = f"{q_columns} / {r_columns}" if q_columns or r_columns else "All columns"
     return {
         "description": f"UNION: {alias_q} ∪ {alias_r} ON {col_str}",
+        "pandas_expr": f"pd.concat([{alias_q}[{q_columns}], {alias_r}[{r_columns}]], ignore_index=True)",
         "columns": {k: list(v) for k, v in involved.items()},
     }
 
 
 def _make_join_match(task_spec, df_r, alias_q, alias_r):
-    q_keys = task_spec["q_join_keys"] if "q_join_keys" in task_spec else [task_spec["q_join_key"]]
-    r_keys = (
-        [df_r.columns[pos] for pos in task_spec["r_join_keys_pos"]]
-        if "r_join_keys_pos" in task_spec
-        else [df_r.columns[task_spec["r_join_key_pos"]]]
-    )
+    q_keys = task_spec.get("q_columns", [])
+    r_keys = task_spec.get("r_columns", [])
     involved = {alias_q: set(q_keys), alias_r: set(r_keys)}
     conditions = " AND ".join(f"{alias_q}.{q_keys[i]} = {alias_r}.{r_keys[i]}" for i in range(len(q_keys)))
     return {
         "description": f"JOIN: {alias_q} ⋈ {alias_r} ON {conditions}",
+        "pandas_expr": f"pd.merge({alias_q}, {alias_r}, left_on={q_keys}, right_on={r_keys})",
         "columns": {k: list(v) for k, v in involved.items()},
     }
 
 
 def _make_join_correlation_match(task_spec, df_q, df_r, alias_q, alias_r):
-    def resolve(key, df):
-        v = task_spec[key]
-        return df.columns[v] if isinstance(v, int) else v
-
-    q_key, r_key = resolve("q_key", df_q), resolve("r_key", df_r)
-    q_target, r_target = resolve("q_target", df_q), resolve("r_target", df_r)
+    q_key = task_spec["q_key"]
+    r_key = task_spec["r_key"]
+    q_target = task_spec["q_target"]
+    r_target = task_spec["r_target"]
     involved = {alias_q: {q_key, q_target}, alias_r: {r_key, r_target}}
     return {
         "description": (
             f"JOIN-CORRELATION: {alias_q} ⋈ {alias_r} "
             f"ON {alias_q}.{q_key} = {alias_r}.{r_key} "
             f"AND {alias_q}.{q_target} = {alias_r}.{r_target}"
+        ),
+        "pandas_expr": (
+            f"pd.merge({alias_q}, {alias_r}, left_on=['{q_key}', '{q_target}'], right_on=['{r_key}', '{r_target}'])"
         ),
         "columns": {k: list(v) for k, v in involved.items()},
     }
@@ -99,33 +78,40 @@ _MATCH_BUILDERS = {"U": _make_union_match, "J": _make_join_match, "JC": _make_jo
 # ── Match processing ──────────────────────────────────────────────────────────
 
 def process_path(path: dict, tasks: dict, csv_folder: Path) -> dict | None:
-    """Process a single candidate path into a match record, or None if incomplete."""
     datasets = path["datasets"]
     operations = path["operation_type"]
     aliases = {f"Table_{i}": datasets[i] for i in range(len(datasets))}
     all_columns = {f"Table_{i}": set() for i in range(len(datasets))}
     path_matches = []
-
+    path_pandas = []
     for i in range(len(datasets) - 1):
+        pair_matches = []       
+        pair_pandas = []                               # ← track per-pair
         for op in operations:
             key = (datasets[i], datasets[i + 1], op)
+            if key not in tasks:
+                key = (datasets[i + 1], datasets[i], op)  # ← try reversed
             if key not in tasks:
                 continue
             df_q = pd.read_csv(csv_folder / f"{datasets[i]}.csv", low_memory=False)
             df_r = pd.read_csv(csv_folder / f"{datasets[i + 1]}.csv", low_memory=False)
             result = make_match(tasks[key], df_q, df_r, f"Table_{i}", f"Table_{i + 1}")
             if result:
-                path_matches.append(result["description"])
+                pair_matches.append(result["description"])
+                pair_pandas.append(result["pandas_expr"])      # ← add this list too
                 for alias, cols in result["columns"].items():
                     all_columns[alias].update(cols)
 
-    if not path_matches or len(path_matches) < len(aliases) - 1:
-        print("Filtered: match not exhaustive.")
-        return None
+        if not pair_matches:                                   # ← every pair must match
+            print(f"Filtered: no match found for Table_{i} ↔ Table_{i + 1}.")
+            return None
+        path_matches.extend(pair_matches)
+        path_pandas.extend(pair_pandas)
 
     return {
         "aliases": aliases,
-        "matches": path_matches,
+        "SQL_matches": path_matches,
+        "PANDAS_matches": path_pandas,
         "columns_by_table": {k: list(v) for k, v in all_columns.items()},
     }
 
@@ -152,6 +138,7 @@ def process_all_candidates(candidates_file: Path, tasks_file: Path,
     return results
 
 
+
 # ── Statement generation ──────────────────────────────────────────────────────
 
 def _build_match_inputs(
@@ -172,25 +159,24 @@ def _build_match_inputs(
 
 
 def create_statements(
-    config_path: Path, csv_folder: Path, output_dir: Path,
+    config_path: Path, csv_folder: Path, candidates_path:Path, output_path: Path,
     kind: str = "PANDAS", max_cols: int = 15,
-    datasets_metadata: dict = None, extension: str = "csv",
+    datasets_metadata: Path = None, extension: str = "csv",
 ) -> dict:
     datasets_metadata = datasets_metadata or {}
-    csv_folder, output_dir = Path(csv_folder), Path(output_dir)
 
     agent = StatementGenerationAgent(config_path, kind)
-    all_matches = load_json(output_dir / "matches.json")
-    output_file = output_dir / f"validated_queries({kind}).json"
+    print(candidates_path)
+    all_matches = load_json(candidates_path)
+    output_file = output_path
     results = load_json(output_file) if output_file.exists() else {}
 
     for match in all_matches:
         dataset_paths, aliases, metadatas, involved_cols = _build_match_inputs(
             match, csv_folder, datasets_metadata, extension
         )
-        print( match["matches"])
         content = agent.generate_statements(
-            dataset_paths, aliases, kind, match["matches"], involved_cols, metadatas,
+            dataset_paths, aliases, kind, match[f"{kind}_matches"], involved_cols, metadatas,
             max_cols, sample_size=5,
         )
         results = content["result"]
@@ -199,32 +185,24 @@ def create_statements(
     print(f"\nResults saved to {output_file}")
     return results
 
-def generate_statements(
-    config_path: Path, candidates_file: Path, tasks_file: Path,
-    csv_folder: Path, metadata_file: Path, output_dir: Path,
-    kind: str = "SQL", max_cols: int = 10, skip_matching: bool = False,
-) -> dict:
-    """Run the full pipeline: match building + statement generation."""
-    if not skip_matching:
-        process_all_candidates(candidates_file, tasks_file, csv_folder, output_dir / "matches.json")
-    return create_statements(
-        config_path, csv_folder, output_dir, kind=kind,
-        max_cols=max_cols, datasets_metadata=load_datasets_metadata(metadata_file),
-    )
-
 # ── Entry point ───────────────────────────────────────────────────────────────
+from orqa.candidates_generation import generate_random_walks
 
-if __name__ == "__main__":
-    CSV_FOLDER = Path(r"D:\uk\datasets\csv")
-    OUTPUT_DIR = Path(r"C:\Users\39377\Documents\GitHub\orqa\src\orqa\queries")
-    METADATA_FILE = Path(r"D:\uk\metadata\metadata.json")
-    CANDIDATES_FILE = Path(r"D:\uk\candidates_discovery\final_generation_candidates.json")
-    TASKS_FILE = Path(r"D:\uk\candidates_discovery\tasks_results.json")
-    CONFIG_PATH = Path(r"C:\Users\39377\Documents\GitHub\orqa\conf\llm\litellm.yaml")
-    datasets_metadata = load_datasets_metadata(METADATA_FILE)
-
-    # Step 1 — build matches (comment out if already done)
-    # process_all_candidates(CANDIDATES_FILE, TASKS_FILE, CSV_FOLDER, OUTPUT_DIR / "matches.json")
-
-    # Step 2 — generate statements
-    create_statements(CONFIG_PATH,CSV_FOLDER, OUTPUT_DIR, kind="SQL", max_cols=10, datasets_metadata=datasets_metadata)
+def generate_statements(cfg:OrQAConfig):
+    metadata = load_datasets_metadata(
+        cfg.metadata_path.joinpath("metadata.json"),
+        None,  # [s[3 if len(s) == 4 else 2] for s in seed_datasets],
+        source=cfg.source,
+    )
+    
+    #cfg.statement_generation.threshold
+    #cfg.statement_generation.join_score
+    
+    #cfg.statement_generation.union_score
+    ### first we generate the random walks
+    generate_random_walks(cfg)
+    #print(cfg.candidates_discovery.candidates_path)
+    #cfg.candidates_discovery.proposed_tasks_path
+    process_all_candidates(cfg.candidates_discovery.candidates_path, cfg.candidates_discovery.tasks_results_path, cfg.datasets_path, cfg.statement_generation.query_candidates_path)
+    create_statements(cfg.llm_config_path.joinpath("litellm.yaml"),cfg.datasets_path, cfg.statement_generation.query_candidates_path,cfg.statement_generation.queries_path, cfg.statement_generation.kind,cfg.statement_generation.max_cols, datasets_metadata=metadata)
+    

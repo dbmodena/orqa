@@ -212,26 +212,36 @@ def pd_read_dataset(dataset_path: Path, opts: dict = {}) -> pd.DataFrame:
                 f"Unknown dataset format for file {dataset_path.absolute()}"
             )
 
-def load_dataset_info_portion(dataset_path: Path,involved_cols:[str], 
-    polars_opts: dict = {},
+def load_dataset_info_portion(
+    dataset_path: Path,
+    involved_cols: list[str],
     limit_to_n_columns: int = 20,
     sample_size: int = 5,
-    seed: int = 0,) -> tuple[dict,dict]:
-    
+) -> tuple[dict, dict]:
+
     df = pd_read_dataset(dataset_path)
+
+    # Normalize column names to handle case/whitespace mismatches
+    col_map = {c.strip().lower(): c for c in df.columns}
+    resolved_cols = [
+        col_map[c.strip().lower()]
+        for c in involved_cols
+        if c.strip().lower() in col_map
+    ]
+
     with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
         if len(df.columns) > limit_to_n_columns:
-            other_cols = [c for c in df.columns if c not in involved_cols]
-            df = df[list(involved_cols) + other_cols[: limit_to_n_columns - len(involved_cols)]]
+            other_cols = [c for c in df.columns if c not in resolved_cols]
+            df = df[resolved_cols + other_cols[: limit_to_n_columns - len(resolved_cols)]]
         df.to_csv(tmp.name, index=False)
         tmp_path = tmp.name
 
     try:
-            dataset_info, _ = load_dataset_info(Path(tmp_path),polars_opts,limit_to_n_columns,sample_size,seed)
+        dataset_info, _ = load_dataset_info(Path(tmp_path), {}, limit_to_n_columns, sample_size, 0)
     finally:
-            os.unlink(tmp_path)
-
-    return df,dataset_info
+        os.unlink(tmp_path)
+    dataset_info["dataset_name"]=dataset_path.stem
+    return df, dataset_info
 
 def save_json(data, path: Path, indent: int = 2) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -132,7 +132,7 @@ class DatasetDescription(Prompt):
 
 class CandidatesDiscoveryPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("propose_discovery_tasks.md")
-
+    
     def update(
         self,
         dataset_name: str,
@@ -151,5 +151,4 @@ class CandidatesDiscoveryPrompt(Prompt):
             column_details,
             sample_data,
         )
-
         return self._update(query_dataset_description=query_dataset_description)

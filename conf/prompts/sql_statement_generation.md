@@ -1,5 +1,8 @@
 ## SQLGeneration
-Generate DuckDB SQL queries with business-focused natural language questions.
+Generate DuckDB SQL queries with business-focused natural language questions over the following tables:
+### Lookup aliases
+{aliases}
+Make sure to use only the aliases in the queries in the following.
 
 ### Data Context
 You will be provided with:
@@ -41,6 +44,3 @@ Realize the queries and their natural language counterparts using the following 
 ### Mandatory operations
 Every query MUST combine the tables with the following operations:
 {matches}
-### Lookup aliases
-Make sure to use only the aliases in the queries in the following:
-{aliases}

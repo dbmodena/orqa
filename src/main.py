@@ -3,11 +3,14 @@ import sys
 from pathlib import Path
 
 from conf import load_config
-from orqa.candidates_generation import candidates_discovery
+#from orqa.candidates_generation import candidates_discovery
+from orqa.statement_generation import generate_statements
 from orqa.cleaning import ckan_cleaning, socrata_cleaning
-from orqa.crawling import crawl_canada, crawl_modena, crawl_nyc, crawl_uk
+#from orqa.crawling import crawl_canada, crawl_modena, crawl_nyc, crawl_uk
 from orqa.indexing import create_blend_index
-
+from dotenv import load_dotenv
+load_dotenv()
+os.environ["DATADIR"] = "D:\\"
 
 def canada():
     canada_yaml_path = Path(
@@ -34,7 +37,7 @@ def uk():
     # crawl_uk(cfg)
     # cleaning(cfg)
     # create_blend_index(cfg)
-    candidates_discovery(cfg)
+    #candidates_discovery(cfg)
 
 
 def modena():
@@ -49,7 +52,7 @@ def modena():
 
     # crawl_modena(cfg)
     # create_blend_index(cfg)
-    candidates_discovery(cfg)
+    #candidates_discovery(cfg)
 
 
 def nyc():
@@ -61,11 +64,12 @@ def nyc():
     data_path.mkdir(parents=True, exist_ok=True)
 
     cfg = load_config(nyc_yaml_path, data_path)
-
+    
     # crawl_nyc(cfg)
     # socrata_cleaning(cfg)
     # create_blend_index(cfg)
-    candidates_discovery(cfg)
+    # candidates_discovery(cfg)
+    generate_statements(cfg)
 
 
 def main():

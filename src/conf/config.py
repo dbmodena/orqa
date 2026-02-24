@@ -151,9 +151,32 @@ class CandidatesDiscovery:
     max_path_length: int
 
     overlap_ratio_threshold: float
+    
+    sm_macro_avg_threshold: float
+    
+    sm_micro_avg_threshold: float
 
     verbose: bool = field(default=False)
 
+@dataclass
+class StatementGeneration:
+    """
+    Configuration for the Statement Generation pipeline.
+
+    An agent takes a set of datasets involved in a candidate task
+    (join, union, or correlation) and generates executable statements
+    (Pandas or SQL) to perform the operation, based on dataset metadata
+    and a sample of rows.
+    """
+
+    # The kind of statements to generate: "PANDAS" or "SQL"
+    kind: str
+    # Maximum number of columns passed to the agent per dataset
+    max_cols: int
+    # Path where the matches files reside
+    query_candidates_path: Path
+    # Path where the generated queries will reside
+    queries_path: Path
 
 @dataclass
 class OrQAConfig:
@@ -162,6 +185,7 @@ class OrQAConfig:
     crawling: Crawling
     indexing: Indexing
     candidates_discovery: CandidatesDiscovery
+    statement_generation: StatementGeneration
 
     # BLEND options for Indexing and Candidate Discovery
     blend_opts: BLENDOpts
@@ -227,28 +251,7 @@ class OrQAConfig:
 
         self.statistics_path = self.data_path / "statistics"
 
-@dataclass
-class StatementGenerationConfig:
-    """
-    Configuration for the Statement Generation pipeline.
 
-    An agent takes a set of datasets involved in a candidate task
-    (join, union, or correlation) and generates executable statements
-    (Pandas or SQL) to perform the operation, based on dataset metadata
-    and a sample of rows.
-    """
-
-    # The kind of statements to generate: "PANDAS" or "SQL"
-    kind: str
-
-    # Maximum number of columns passed to the agent per dataset
-    max_cols: int
-
-    # Number of randomly sampled rows passed to the LLM as a dataset snapshot
-    sample_size: int
-
-    # If True, skip match building and use an existing matches.json
-    skip_matching: bool 
 
 
 
@@ -279,8 +282,19 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     # we will use a unique seed for random operations
     seed = int(parsed["seed"])
 
+    # gets the type of queries we want to generate
+    kind = parsed["tasks"]["query_generation"]["kind"]
+
+    # fetches the max columns to analyze during the statement generation
+    max_cols = parsed["tasks"]["query_generation"]["max_cols"]
+
     # setup the Crawling step
     crawling_task = parsed["tasks"]["crawling"]
+
+    # candidates discovery thresholds
+    overlap_ratio_threshold = parsed["tasks"]["candidates_discovery"]["overlap_ratio_threshold"]
+    sm_macro_avg_threshold = parsed["tasks"]["candidates_discovery"]["sm_macro_avg_threshold"]
+    sm_micro_avg_threshold = parsed["tasks"]["candidates_discovery"]["sm_micro_avg_threshold"]
 
     # For the Crawling stage, set to default values to deal with CKAN/Socrata differences
     # CKAN-only parameters
@@ -326,6 +340,11 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     final_candidates_path = cand_disc_directory.joinpath(
         "final_generation_candidates.json"
     )
+    # queries candidates path
+    query_candidates_path=cand_disc_directory.joinpath("query_candidates.json")
+    # generated queries path
+    queries_path=cand_disc_directory.joinpath("generated_queries.json")
+
     candidates_discovery = CandidatesDiscovery(
         seeds_datasets_path,
         proposed_tasks_path,
@@ -335,6 +354,13 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         **candidates_discovery_task,
     )
 
+    statement_generation = StatementGeneration(
+        kind=kind,
+        max_cols=max_cols,
+        query_candidates_path=query_candidates_path,
+        queries_path=queries_path,
+    )
+
     orqa_cfg = OrQAConfig(
         source=source,
         seed=seed,
@@ -342,6 +368,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         crawling=crawling,
         indexing=indexing,
         candidates_discovery=candidates_discovery,
+        statement_generation=statement_generation,
         data_path=data_path,
         datasets_format=crawling.download_format,
     )

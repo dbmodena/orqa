@@ -7,6 +7,11 @@
 source: socrata
 seed: 0
 
+
+
+
+
+
 pandas:
   read:
     csv:
@@ -83,5 +88,9 @@ tasks:
     qcr_hash_size: 128
     n_paths_for_dataset: 5
     max_path_length: 5
-    overlap_ratio_threshold: 0.5
-
+    overlap_ratio_threshold: 50
+    sm_macro_avg_threshold: 0.5
+    sm_micro_avg_threshold: 0.5
+  query_generation:
+    kind: "SQL"
+    max_cols: 10

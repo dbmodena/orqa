@@ -94,7 +94,6 @@ class StatementGenerationAgent:
         metadatas: list[dict],
         max_cols: int = 20,
         sample_size: int = 5,
-        seed: int = 0
     ) -> dict | None:
         try:
             prompt_str=""
@@ -103,10 +102,8 @@ class StatementGenerationAgent:
                 df,dataset_info = utils.load_dataset_info_portion(
                     dataset_path,
                     involved_cols,
-                    {},
                     max_cols,
                     sample_size,
-                    seed
                 )
                 tables.append(df)
                 prompt_str = self.prompt.update(
@@ -119,13 +116,13 @@ class StatementGenerationAgent:
                     aliases,
                     match
                 )
-            result, tokens = self._client.complete(prompt_str, tables, aliases, typology=kind)
+            
 
 
             print("=" * 60)
             print("GENERATED STATEMENTS")
             print("=" * 60)
-            print(prompt_str)
+            result, tokens = self._client.complete(prompt_str, tables, aliases, typology=kind)
             print("=" * 60)
             print(result)
             print("=" * 60)

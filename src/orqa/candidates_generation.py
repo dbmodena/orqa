@@ -16,7 +16,7 @@ import faulthandler
 import json
 import os
 import random
-import resource
+#import resource
 import time
 from pathlib import Path
 
@@ -497,7 +497,9 @@ def generate_random_walks(cfg: OrQAConfig):
                         dataset_id,
                         cfg.candidates_discovery.n_paths_for_dataset,
                         path_length,
-                        None,
+                        cfg.candidates_discovery.overlap_ratio_threshold,
+                        cfg.candidates_discovery.sm_macro_avg_threshold,
+                        cfg.candidates_discovery.sm_micro_avg_threshold,
                         cfg.seed,
                     ),
                 }
