@@ -228,8 +228,20 @@ class LLMClientStructured(LLMClient):
         return formatted_error
 
     def reform_prompt_constraint(self, prompt: str):
-        format_str = self.response_model.schema_json(indent=2)
-        constraint = f"### Output format instructions\nReturn the final answer **strictly in JSON** and **exactly matching** the Pydantic following schema provided:\n\n{format_str}\n\nAll required fields must be present, field names and data types must match exactly, and all validation constraints (including value ranges, uniqueness, and completeness rules) must be satisfied. Do not add extra fields, omit required fields, or include explanatory text outside the JSON."
+        format_dict = self.response_model.model_json_schema()
+        format_str = json.dumps(format_dict, indent=2)
+
+        constraint = (
+            "### Output format instructions\n"
+            "Return the final answer **strictly in JSON** and **exactly matching** "
+            "the Pydantic following schema provided:\n\n"
+            f"{format_str}\n\n"
+            "All required fields must be present, field names and data types must match exactly, "
+            "and all validation constraints (including value ranges, uniqueness, and completeness rules) "
+            "must be satisfied. Do not add extra fields, omit required fields, "
+            "or include explanatory text outside the JSON."
+        )
+
         return f"{prompt}\n{constraint}"
 
     def complete(

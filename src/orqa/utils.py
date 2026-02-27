@@ -9,6 +9,9 @@ import pandas as pd
 from bs4 import BeautifulSoup
 import os
 
+
+
+
 def pl_read_dataset(dataset_path: Path, opts: dict = {}) -> pl.DataFrame:
     match dataset_path.suffix:
         case ".csv":
@@ -174,7 +177,7 @@ def load_dataset_info(
     column_typings = {}
     coldetails = ""
     for col in df.columns:
-        coldetails += f"\n- {col} (df[col].dtype): {df[col].null_count()} nulls, {df[col].n_unique()} unique values."
+        coldetails += f"\n- {col} {df[col].dtype}: {df[col].null_count()} nulls, {df[col].n_unique()} unique values."
         column_typings[col] = df[col].dtype.is_numeric()
 
     sample = df.sample(min(sample_size, df.height), seed=seed)
@@ -212,11 +215,12 @@ def pd_read_dataset(dataset_path: Path, opts: dict = {}) -> pd.DataFrame:
                 f"Unknown dataset format for file {dataset_path.absolute()}"
             )
 
-def load_dataset_info_portion(
+def prepare_dataset(
     dataset_path: Path,
     involved_cols: list[str],
     limit_to_n_columns: int = 20,
     sample_size: int = 5,
+    bad_tokens: list = []
 ) -> tuple[dict, dict]:
 
     df = pd_read_dataset(dataset_path)
@@ -229,6 +233,13 @@ def load_dataset_info_portion(
         if c.strip().lower() in col_map
     ]
 
+    # Remove rows containing any bad token across all columns
+    if bad_tokens:
+        mask = ~df.apply(
+            lambda col: col.astype(str).isin([str(t) for t in bad_tokens])
+        ).any(axis=1)
+        df = df[mask]
+
     with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
         if len(df.columns) > limit_to_n_columns:
             other_cols = [c for c in df.columns if c not in resolved_cols]
@@ -240,7 +251,7 @@ def load_dataset_info_portion(
         dataset_info, _ = load_dataset_info(Path(tmp_path), {}, limit_to_n_columns, sample_size, 0)
     finally:
         os.unlink(tmp_path)
-    dataset_info["dataset_name"]=dataset_path.stem
+    dataset_info["dataset_name"] = dataset_path.stem
     return df, dataset_info
 
 def save_json(data, path: Path, indent: int = 2) -> None:
@@ -251,3 +262,7 @@ def save_json(data, path: Path, indent: int = 2) -> None:
 def load_json(path: Path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
+
+
+
+

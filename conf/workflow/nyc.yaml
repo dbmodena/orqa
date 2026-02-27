@@ -94,3 +94,4 @@ tasks:
   query_generation:
     kind: "SQL"
     max_cols: 10
+    bad_tokens: ['s','None','R']

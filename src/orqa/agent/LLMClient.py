@@ -140,13 +140,13 @@ class LLMClient:
                 content = response["choices"][0]["message"]["content"]
                 last_content = content
                 print(f"✓ Success on attempt {attempt + 1}\n")
-                return result, usage_total
+                return last_content, usage_total
             except Exception as e:
                 last_error = e
                 print(f"✗ Error on attempt {attempt + 1}: {e}")
                 # Wait before retry
                 if attempt < self.max_retries - 1:
-                    message.append({"role": "user", "content": e})
+                    messages.append({"role": "user", "content": e})
                     print(f"Retrying in {self.retry_delay} seconds...\n")
                     time.sleep(self.retry_delay)
         # All retries exhausted

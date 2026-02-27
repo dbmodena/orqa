@@ -1,9 +1,9 @@
 # LLM Configuration File
 # Primary model (will be tried first)
-model: "ollama_chat/llama3.1:8b"
+model: "oci/meta.llama-3.3-70b-instruct"
 # Fallback models (tried in order if primary fails)
 fallback_models:
-   - "oci/openai.gpt-oss-120b"
+   - "ollama_chat/llama3.1:8b"
    - "groq/llama-3.3-70b-versatile"
 #   - "groq/llama-3.1-8b-instant"
 #  - "together_ai/togethercomputer/Llama-2-7B-32K-Instruct"
@@ -53,7 +53,9 @@ table_analyzer:
   module: "structured_outputs"
   class: "Result"
 
-
+fallback_querying:
+  module: "structured_outputs"
+  class: "Query"
 
 # Local Ollama setup
 # model: ollama_chat/llama3.3:latest

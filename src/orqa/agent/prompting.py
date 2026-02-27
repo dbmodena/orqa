@@ -215,3 +215,17 @@ class SQLStatementGenerationPrompt(Prompt):
         )
         self._datasets_descriptions += f"\n{query_dataset_description}"
         return self._update(table=self._datasets_descriptions,matches=matches,aliases=aliases)
+    
+
+
+class ResponseGenerationPrompt(Prompt):
+    _prompt_path = PROMPT_PATH.joinpath("response_generation.md")
+    def __init__(self):
+        super().__init__()
+
+    def update(
+        self,
+        question,
+        data
+    ) -> str:
+        return self._update(data=data,question=question)

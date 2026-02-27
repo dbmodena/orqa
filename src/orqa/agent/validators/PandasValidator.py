@@ -6,6 +6,12 @@ from typing import List, Dict, Tuple, Any
 from .QueryValidator import QueryValidator
 import re
 
+UNAUTHORIZED_COMMANDS = [
+    'read_csv', 'read_excel', 'read_json', 'read_parquet',
+    'read_sql', 'read_table', 'read_html', 'read_pickle',
+    'to_csv', 'to_excel', 'to_json', 'to_parquet', 'to_pickle',
+    'open(', 'os.', 'sys.', 'exec(', 'eval('
+]
 
 class PandasValidator(QueryValidator):
     """Validator for pandas/polars queries."""
@@ -84,13 +90,14 @@ class PandasValidator(QueryValidator):
     def _get_language_name(self) -> str:
         return "Python"
     
-    def clean_pandas(self,query: str) -> str:
+    def clean_pandas(self, query: str) -> str:
         """Clean pandas query code."""
         lines = query.split(';')
         cleaned = [line.strip() for line in lines if 'import' not in line.lower()]
         # Remove comments from each line
         cleaned = [re.sub(r'#.*$', '', line).strip() for line in cleaned]
-        
+        # Remove unauthorized commands
+        cleaned = [line for line in cleaned if not any(cmd in line for cmd in UNAUTHORIZED_COMMANDS)]
         # Filter out empty lines
         cleaned = [line for line in cleaned if line]
         return '; '.join(cleaned).strip()

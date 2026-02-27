@@ -84,27 +84,38 @@ def process_path(path: dict, tasks: dict, csv_folder: Path) -> dict | None:
     all_columns = {f"Table_{i}": set() for i in range(len(datasets))}
     path_matches = []
     path_pandas = []
+
     for i in range(len(datasets) - 1):
-        pair_matches = []       
-        pair_pandas = []                               # ← track per-pair
+        pair_matches = []
+        pair_pandas = []
+
+        df_i = pd.read_csv(csv_folder / f"{datasets[i]}.csv", low_memory=False)
+        df_i1 = pd.read_csv(csv_folder / f"{datasets[i + 1]}.csv", low_memory=False)
+
         for op in operations:
             key = (datasets[i], datasets[i + 1], op)
+            reversed_key = False
             if key not in tasks:
-                key = (datasets[i + 1], datasets[i], op)  # ← try reversed
+                key = (datasets[i + 1], datasets[i], op)
+                reversed_key = True
             if key not in tasks:
                 continue
-            df_q = pd.read_csv(csv_folder / f"{datasets[i]}.csv", low_memory=False)
-            df_r = pd.read_csv(csv_folder / f"{datasets[i + 1]}.csv", low_memory=False)
-            result = make_match(tasks[key], df_q, df_r, f"Table_{i}", f"Table_{i + 1}")
+
+            if reversed_key:
+                result = make_match(tasks[key], df_i1, df_i, f"Table_{i + 1}", f"Table_{i}")
+            else:
+                result = make_match(tasks[key], df_i, df_i1, f"Table_{i}", f"Table_{i + 1}")
+
             if result:
                 pair_matches.append(result["description"])
-                pair_pandas.append(result["pandas_expr"])      # ← add this list too
+                pair_pandas.append(result["pandas_expr"])
                 for alias, cols in result["columns"].items():
                     all_columns[alias].update(cols)
 
-        if not pair_matches:                                   # ← every pair must match
+        if not pair_matches:
             print(f"Filtered: no match found for Table_{i} ↔ Table_{i + 1}.")
             return None
+
         path_matches.extend(pair_matches)
         path_pandas.extend(pair_pandas)
 
@@ -148,30 +159,39 @@ def _build_match_inputs(
     Candidate for utils.py if reused elsewhere.
     """
     dataset_paths, metadatas = [], []
-    aliases = ""
-    involved_cols: set = set()
+    aliases = {}
+    involved_cols={}
     for alias, dataset in match["aliases"].items():
         dataset_paths.append(csv_folder / f"{dataset}.{extension}")
-        aliases +=f"\n'{alias}':{dataset}" 
+        aliases[f"{alias}"]=dataset 
         metadatas.append(datasets_metadata.get(dataset))
-        involved_cols.update(match["columns_by_table"].get(alias, []))
+        involved_cols[alias]=match["columns_by_table"].get(alias, [])
     return dataset_paths, aliases, metadatas, involved_cols
 
 
+import sys
+
 def create_statements(
-    config_path: Path, csv_folder: Path, candidates_path:Path, output_path: Path,
+    config_path: Path, csv_folder: Path, candidates_path: Path, output_path: Path,
     kind: str = "PANDAS", max_cols: int = 15,
-    datasets_metadata: Path = None, extension: str = "csv",
+    datasets_metadata: Path = None, extension: str = "csv",bad_tokens:list=[]
 ) -> dict:
     datasets_metadata = datasets_metadata or {}
 
-    agent = StatementGenerationAgent(config_path, kind)
-    print(candidates_path)
+    
     all_matches = load_json(candidates_path)
     output_file = output_path
     results = load_json(output_file) if output_file.exists() else {}
 
-    for match in all_matches:
+    successes = 0
+    failures = 0
+    total = len(all_matches)
+
+    for idx, match in enumerate(all_matches):
+        agent = StatementGenerationAgent(config_path, kind,bad_tokens)
+        sys.stdout.write(
+            f"\r[{idx + 1}/{total}]  ✅ Successes: {successes}   ❌ Failures: {failures}   "
+        )
         dataset_paths, aliases, metadatas, involved_cols = _build_match_inputs(
             match, csv_folder, datasets_metadata, extension
         )
@@ -179,8 +199,19 @@ def create_statements(
             dataset_paths, aliases, kind, match[f"{kind}_matches"], involved_cols, metadatas,
             max_cols, sample_size=5,
         )
-        results = content["result"]
+        
+        result = content["result"]
+        tokens = content["token_usage"]
+        status = "success" if result['queries']!=[] else "failure"
+
+        if result['queries']!=[]:
+            successes += 1
+        else:
+            failures += 1
+
+        results[str(idx)] = {"status": status, "data": result, "tokens": tokens, "tables":aliases}
         save_json(results, output_file)
+        sys.stdout.flush()
 
     print(f"\nResults saved to {output_file}")
     return results
@@ -200,9 +231,9 @@ def generate_statements(cfg:OrQAConfig):
     
     #cfg.statement_generation.union_score
     ### first we generate the random walks
-    generate_random_walks(cfg)
+    #generate_random_walks(cfg)
     #print(cfg.candidates_discovery.candidates_path)
     #cfg.candidates_discovery.proposed_tasks_path
-    process_all_candidates(cfg.candidates_discovery.candidates_path, cfg.candidates_discovery.tasks_results_path, cfg.datasets_path, cfg.statement_generation.query_candidates_path)
-    create_statements(cfg.llm_config_path.joinpath("litellm.yaml"),cfg.datasets_path, cfg.statement_generation.query_candidates_path,cfg.statement_generation.queries_path, cfg.statement_generation.kind,cfg.statement_generation.max_cols, datasets_metadata=metadata)
+    #process_all_candidates(cfg.candidates_discovery.candidates_path, cfg.candidates_discovery.tasks_results_path, cfg.datasets_path, cfg.statement_generation.query_candidates_path)
+    create_statements(cfg.llm_config_path.joinpath("litellm.yaml"),cfg.datasets_path, cfg.statement_generation.query_candidates_path,cfg.statement_generation.queries_path, cfg.statement_generation.kind,cfg.statement_generation.max_cols, datasets_metadata=metadata,bad_tokens=cfg.statement_generation.bad_tokens)
     

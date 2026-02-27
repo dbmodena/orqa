@@ -33,6 +33,25 @@ from .validators.SQLValidator import SQLValidator
 from .validators.PandasValidator import PandasValidator
 import re
 
+SQL_KEYWORDS = {
+    "SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING",
+    "JOIN", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "OUTER JOIN", "FULL JOIN", "CROSS JOIN",
+    "UNION", "UNION ALL", "INTERSECT", "EXCEPT",
+    "SUM", "AVG", "MIN", "MAX", "COUNT", "RANK", "ROW_NUMBER", "DENSE_RANK",
+    "CAST", "COALESCE", "NULLIF", "CASE", "WHEN", "THEN", "ELSE",
+    "DISTINCT", "LIMIT", "OFFSET", "WITH", "AS", "ON", "AND", "OR", "NOT", "IN", "EXISTS",
+}
+
+PANDAS_KEYWORDS = {
+    "merge", "join", "concat", "groupby", "agg", "aggregate",
+    "sum", "mean", "avg", "min", "max", "count", "nunique", "rank",
+    "sort_values", "sort_index", "drop_duplicates", "fillna", "dropna",
+    "apply", "map", "filter", "query", "where", "assign", "pivot", "melt",
+    "stack", "unstack", "explode", "resample", "rolling", "expanding",
+}
+
+
+
 class LLMClientStatementGenerator(LLMClientStructured):
     """
     LiteLLM client with YAML configuration and structured output support.
@@ -47,12 +66,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
         """
         # 1. Load configuration
         super().__init__(config_path,"querying")
-
-
-    def add_difficulty(self,prompt, difficulty):
-                actual_dif = difficulty if difficulty in [1, 3, 5] else (3 if difficulty == 2 else 5)
-                return f"{prompt}\n{_load_prompt('statement_generator/prompt.md', f'Difficulty Level:{actual_dif}')}"
-
+        self.fallback_response_model = self._load_pydantic_response_model("fallback_querying")
 
 
     def complete(
@@ -72,6 +86,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
             "total_tokens": 0,
         }
         initial_message = self.reform_prompt_constraint(prompt)
+        #print(initial_message)
         messages = [{"role": "system", "content": "You are an expert Data Engineer"},{"role": "user", "content": initial_message}]
         completion_args = {
             "model": self.config["model"],
@@ -82,7 +97,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
         last_content = ""
         last_error = None
 
-        good_queries: dict[str, self.response_model] = {}
+        good_queries: dict[str, dict] = {}
         for attempt in range(self.max_retries):
             try:
                 #print(f"Attempt {attempt + 1}/{self.max_retries}...")
@@ -97,8 +112,6 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 last_content = content
                 cleaned_content = self._clean_json_response(content)
                 try:
-                    # First try to parse as JSON
-
                     json_data = self.fix_json_with_triple_quotes(cleaned_content)
                     json_data = self._normalize_response(json_data)
                     # Then validate with Pydantic
@@ -106,13 +119,15 @@ class LLMClientStatementGenerator(LLMClientStructured):
                     result = self.response_model.model_validate(json_data)
                     result = result.model_dump()
                     outcome, errors, accepted_queries = self.validate_queries(dataframes, result,table_names,typology)
-                    good_queries.update(accepted_queries)
+                    for key, accepted_query in accepted_queries.items():
+                            accepted_query["keywords"] = self.count_keywords(accepted_query["code"], typology)
+                            good_queries[accepted_query["id"]] = accepted_query
                     if not outcome:
                        messages = [{"role": "system", "content": "You are an expert Data Engineer."},{"role": "user", "content": prompt}]
+                       #print(errors)
                        messages.extend(errors)
                        pydantic = self.reform_prompt_constraint("")
                        messages.append({"role": "user", "content":pydantic})
-                       #print(errors)
                        continue
 
                     #print(f"✓ Success on attempt {attempt + 1}\n")
@@ -121,32 +136,24 @@ class LLMClientStatementGenerator(LLMClientStructured):
                     # JSON parsing failed
                     last_error = e
                     error_msg = self._format_json_error(cleaned_content, e)
-                    #print(f"⚠️ JSON parsing error on attempt {attempt + 1}")
-                    #print(content)
                     if attempt < self.max_retries - 1:
                         messages = [{"role": "system", "content": "You are an expert Data Engineer, below are listed the instructions for generating and correcting queries."},{"role": "user", "content": initial_message}]
-                        # Add assistant's failed response
                         messages.append({"role": "system", "content": last_content})
-                        # Add error feedback as user message
                         pydantic = self.reform_prompt_constraint("")
                         messages.append({"role": "user", "content": f"You generated a bad formatted output, that gave the following error message:\n{error_msg}\n{pydantic}"})
                         time.sleep(self.retry_delay)
-                        #print(last_error)
+                        print(last_error)
                         continue
                 except ValidationError as e:
-                    # Pydantic validation failed
                     last_error = e
                     error_msg = self._format_validation_error(e)
-                    #print(f"⚠️ Validation error on attempt {attempt + 1}")
                     if attempt < self.max_retries - 1:
                         messages = [{"role": "system", "content": "You are an expert Data Engineer."},{"role": "user", "content": prompt}]
-                        # Add assistant's failed response
                         pydantic = self.reform_prompt_constraint("")
                         messages.append({"role": "system", "content":last_content})
                         messages.append({"role": "user","content": f"Genereated queries are not valid, the error message geneated:\n{error_msg}\n{pydantic}"})
-                        # Add error feedback as user message
                         #print("💬 Sending validation errors to LLM...\n")
-                        #print(last_error)
+                        print(last_error)
                         time.sleep(self.retry_delay)
                         continue
 
@@ -162,19 +169,29 @@ class LLMClientStatementGenerator(LLMClientStructured):
                         # Add error feedback as user message
                         messages.append({"role": "user", "content": f"Genereated queries that are not valid, error message geneated\n{e}\nMake a unique JSON compliant to the Pydantic format:\n{json.dumps(self.response_model.model_json_schema(), indent=2)}"})
                         #print("💬 Sending validation errors to LLM...\n")
-                        #print(last_error)
+                        print(last_error)
                         time.sleep(self.retry_delay)
-
-        # All retries exhausted
-        #print(f"\n Number of max  {self.max_retries} attempts reached")
-        #print(f"Last error: {last_error}")
-        #if last_content:
-        #    print(f"\nLast response preview:\n{last_content[:300]}...\n")
-        #if len(good_queries.values())>0:
-            #print("Managed to create the following queries")
-            #print(good_queries.values())
-        #print(last_error)
         return {"queries": list(good_queries.values())}, usage_total
+
+
+    def count_keywords(self,query: str, kind: str = "SQL") -> dict[str, int]:
+        """
+        Count keyword occurrences in a SQL or Pandas query string.
+        kind: "sql" or "pandas"
+        """
+        keywords = SQL_KEYWORDS if kind == "SQL" else PANDAS_KEYWORDS
+        query_upper = query.upper() if kind == "SQL" else query
+        counts = {}
+
+        for kw in sorted(keywords):
+            kw_pattern = kw.upper() if kind == "SQL" else kw
+            # Use word boundaries to avoid partial matches (e.g. IN inside INNER)
+            pattern = rf'\b{re.escape(kw_pattern)}\b'
+            matches = re.findall(pattern, query_upper, flags=re.IGNORECASE)
+            if matches:
+                counts[kw] = len(matches)
+
+        return counts
 
     def validate_queries(self, dataframes, result, table_names,type):
         if type=="SQL":
@@ -185,13 +202,13 @@ class LLMClientStatementGenerator(LLMClientStructured):
 
     def validate_dataframe_queries(self, dataframes, result, table_names):
         """Validate pandas/polars queries."""
-        validator = PandasValidator(dataframes, table_names)
+        validator = PandasValidator(dataframes, list(table_names.keys()),table_names)
         return validator.validate_queries(result)
 
 
     def validate_sql_queries(self, dataframes, result, table_names):
         """Validate SQL queries."""
-        validator = SQLValidator(dataframes, table_names)
+        validator = SQLValidator(dataframes, list(table_names.keys()),table_names)
         return validator.validate_queries(result)
 
     def fix_json_with_triple_quotes(self,content: str) -> dict:

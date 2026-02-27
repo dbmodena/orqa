@@ -1,15 +1,18 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple, Any
-import re
+import json 
 
 class QueryValidator(ABC):
     """Base class for query validation."""
     
-    def __init__(self, dataframes: List, table_names: List[str]):
+    def __init__(self, dataframes: List, table_names: List[str], lookup_dict: dict):
         self.dataframes = dataframes
         self.table_names = table_names
         self.validation_errors = []
         self.good_queries = {}
+        self.lookup_dict=lookup_dict
+
+
     
     def validate_queries(self, result: Dict) -> Tuple[bool, Dict, Dict]:
         """
@@ -21,21 +24,27 @@ class QueryValidator(ABC):
         all_valid = True
         
         for idx, q in enumerate(result["queries"]):
-            query_code = self._preprocess_query(q["code"].strip())
+            actual_query = q
+            query_code = self.replace_aliases(q["code"],self.lookup_dict)
+            query_code = self._preprocess_query(query_code.strip())
+            actual_query["code"]=query_code
             try:
                 self._execute_query(query_code)
-                tables_used = self._check_table_usage(q)
+                tables_used = self._check_table_usage(query_code)
                 if not tables_used:
                     raise ValueError(self._build_unused_tables_feedback())
-                tables_used = self._check_table_names_in_question(q)
+                tables_used = self._check_table_names_in_question(actual_query["question"])
                 if tables_used:
                      raise ValueError(self._build_question_tables_feedback())
-                self.good_queries[idx] = q
+                self.good_queries[idx] = actual_query
                 
+
             except Exception as e:
                 all_valid = False
+                print(f"Query code: {actual_query["code"]}")
+                print(f"Error {type(e).__name__}: {str(e)}")
                 self.validation_errors.append({
-                    "query": q,
+                    "query": actual_query,
                     "error": f"{type(e).__name__}: {str(e)}"
                 })
         
@@ -44,9 +53,17 @@ class QueryValidator(ABC):
         
         return False, self._build_feedback(), self.good_queries
     
-    def _check_table_names_in_question(self,query):
+
+    def replace_aliases(self, code: str, aliases: dict) -> str:
+        for table_name, alias in aliases.items():
+            # Replace both quoted and unquoted versions of the alias
+            code = code.replace(f'"{alias}"', table_name)  # handles "4dx7-axux"
+            code = code.replace(alias, table_name)          # handles 4dx7-axux (fallback)
+        return code
+
+    def _check_table_names_in_question(self,question):
         tables_used = set()
-        question = query["question"].lower()
+        question = question.lower()
         for table_name in self.table_names:
                 if table_name.lower() in question:
                     tables_used.add(table_name)
@@ -54,9 +71,9 @@ class QueryValidator(ABC):
         return len(self.unused_tables) != len(self.table_names)
 
 
-    def _check_table_usage(self, query) -> bool:
+    def _check_table_usage(self, query_text) -> bool:
         tables_used = set()
-        query_text = query["code"]
+        #query_text = query["code"]
         for table_name in self.table_names:
             if table_name in query_text:
                 tables_used.add(table_name)
@@ -83,11 +100,17 @@ class QueryValidator(ABC):
     
     def _build_unused_tables_feedback(self) -> Dict:
         """Build feedback message for unused tables."""
+        missing_details = "\n".join(
+            f"  {t}: {self.lookup_dict.get(t, 'unknown')}"
+            for t in sorted(self.unused_tables)
+        )
         feedback_lines = [
-            "Not all tables are being used in the query.",
-            f"Missing tables: {', '.join(sorted(self.unused_tables))}\n",
-            f"Available tables: {', '.join(self.table_names)}\n"
+            "The query must reference ALL provided tables. Every table exists for a reason and contains information required to answer the question.",
+            f"The following tables are missing from the query:\n{missing_details}",
+            f"All tables that must appear in the query: {', '.join(self.table_names)}.",
+            "Rewrite the query ensuring each table is joined and contributes to the result."
         ]
+
         
         return"\n".join(feedback_lines)
 
@@ -115,7 +138,10 @@ class QueryValidator(ABC):
                 f"Error:\n{err['error']}\n"
             )
         
-        message_llm =  {"role": "user", "content": "\n".join(feedback_lines)}
+        message_llm = {
+            "role": "system",
+            "content": json.dumps(queries, indent=2)
+        }
         message_feedback = {"role": "user", "content": "\n".join(feedback_lines)}
 
 

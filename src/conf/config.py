@@ -178,6 +178,9 @@ class StatementGeneration:
     # Path where the generated queries will reside
     queries_path: Path
 
+    # list of bad values in order to prefilter on query generation
+    bad_tokens: list
+
 @dataclass
 class OrQAConfig:
     source: Literal["ckan", "socrata"]
@@ -285,6 +288,9 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     # gets the type of queries we want to generate
     kind = parsed["tasks"]["query_generation"]["kind"]
 
+    # gets the list of bad tokens
+    bad_tokens = parsed["tasks"]["query_generation"]["bad_tokens"]
+
     # fetches the max columns to analyze during the statement generation
     max_cols = parsed["tasks"]["query_generation"]["max_cols"]
 
@@ -292,9 +298,9 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     crawling_task = parsed["tasks"]["crawling"]
 
     # candidates discovery thresholds
-    overlap_ratio_threshold = parsed["tasks"]["candidates_discovery"]["overlap_ratio_threshold"]
-    sm_macro_avg_threshold = parsed["tasks"]["candidates_discovery"]["sm_macro_avg_threshold"]
-    sm_micro_avg_threshold = parsed["tasks"]["candidates_discovery"]["sm_micro_avg_threshold"]
+    #overlap_ratio_threshold = parsed["tasks"]["candidates_discovery"]["overlap_ratio_threshold"]
+    #sm_macro_avg_threshold = parsed["tasks"]["candidates_discovery"]["sm_macro_avg_threshold"]
+    #sm_micro_avg_threshold = parsed["tasks"]["candidates_discovery"]["sm_micro_avg_threshold"]
 
     # For the Crawling stage, set to default values to deal with CKAN/Socrata differences
     # CKAN-only parameters
@@ -359,6 +365,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         max_cols=max_cols,
         query_candidates_path=query_candidates_path,
         queries_path=queries_path,
+        bad_tokens=bad_tokens
     )
 
     orqa_cfg = OrQAConfig(

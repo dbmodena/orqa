@@ -136,6 +136,9 @@ class Query(BaseModel):
     A structured query (SQL or Pandas) paired with a natural language question
     that expresses the intent of the query.
     """
+    id: int = Field(..., description=(
+        "Incremental identifier of the query."
+    ))
     question: str = Field(
         ...,
         description=(
@@ -158,18 +161,18 @@ class Query(BaseModel):
         description="Type of query: 'sql' for SQL queries or 'pandas' for Pandas operations."
     )
 
-    tables: List[str] = Field(
-        ...,
-        description=(
-            "List of table names (for SQL) or DataFrame names (for Pandas) "
-            "used in the code."
-        )
-    )
+    #tables: List[str] = Field(
+    #    ...,
+    #    description=(
+    #        "List of table names (for SQL) or DataFrame names (for Pandas) "
+    #        "used in the code."
+    #    )
+    #)
 
-    columns: List[str] = Field(
-        ...,
-        description="List of column names referenced in the code."
-    )
+    #columns: List[str] = Field(
+    #    ...,
+    #    description="List of column names referenced in the code."
+    #)
 
 
     difficulty: str = Field(
