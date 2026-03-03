@@ -124,7 +124,7 @@ class LLMClient:
         completion_args = {
             "model": "primary",
             "messages": messages,
-            "temperature": self.temp,
+            "temperature": self.temperature,
             **kwargs,
         }
         last_content = None

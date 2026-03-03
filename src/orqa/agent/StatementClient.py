@@ -72,7 +72,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
     def complete(
         self,
         prompt: str,
-        dataframes,table_names, typology="SQL"
+        dataframes,table_names, typology="SQL",involved_cols=None
     ) -> Any:
         """
         Make a completion request with optional structured output.
@@ -85,7 +85,11 @@ class LLMClientStatementGenerator(LLMClientStructured):
             "completion_tokens": 0,
             "total_tokens": 0,
         }
-        initial_message = self.reform_prompt_constraint(prompt)
+        initial_message = prompt
+        #if typology == "PANDAS":
+        #    initial_message = self.add_suffix_constraint(initial_message, dataframes,table_names,involved_cols)
+        initial_message = self.reform_prompt_constraint(initial_message)
+        #print(involved_cols)
         #print(initial_message)
         messages = [{"role": "system", "content": "You are an expert Data Engineer"},{"role": "user", "content": initial_message}]
         completion_args = {
@@ -268,13 +272,30 @@ class LLMClientStatementGenerator(LLMClientStructured):
         # Fallback: wrappa in struttura corretta
         return {"queries": [json_data]}
 
+    def add_suffix_constraint(self, prompt, dataframes, table_names, involved_cols):
+        from itertools import combinations
 
-   
+        # Find common columns between each pair of tables
+        common_cols_info = []
+        for (name_a, df_a), (name_b, df_b) in combinations(zip(table_names, dataframes), 2):
+            common = set(df_a.columns) & set(df_b.columns)
+            common_cols_info.append(
+                f"  {name_a} ∩ {name_b}: {sorted(common) if common else '(no common columns)'}"
+            )
 
+        constraint = (
+            "### Suffix Constraint Information\n"
+            "Columns suffixed after merge (ONLY these get a suffix):\n"
+            + "\n".join(common_cols_info) + "\n\n"
+            + (
+                f"Join key columns (NEVER suffixed — kept as-is after merge):\n"
+                f"  {involved_cols}\n\n"
+                if involved_cols else ""
+            )
+            + "All other columns keep their original name — do not add any suffix to them.\n"
+        )
 
-
-
-
+        return f"{prompt}\n{constraint}"
 
 
 

@@ -163,6 +163,7 @@ class PandasStatementGenerationPrompt(Prompt):
     def __init__(self):
         super().__init__()
         self._datasets_descriptions = ""  
+
     def update(
         self,
         dataset_name: str,
@@ -183,7 +184,7 @@ class PandasStatementGenerationPrompt(Prompt):
             column_details,
             sample_data,
         )
-        self._datasets_descriptions=self._datasets_descriptions.join(f"\n{query_dataset_description}")
+        self._datasets_descriptions += f"\n{query_dataset_description}"
         return self._update(table=self._datasets_descriptions,matches=matches,aliases=aliases)
 
 

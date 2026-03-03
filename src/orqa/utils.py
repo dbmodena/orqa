@@ -254,6 +254,15 @@ def prepare_dataset(
     dataset_info["dataset_name"] = dataset_path.stem
     return df, dataset_info
 
+def remove_bad_tokens(df,bad_tokens):
+    if bad_tokens:
+        mask = ~df.apply(
+            lambda col: col.astype(str).isin([str(t) for t in bad_tokens])
+        ).any(axis=1)
+        df = df[mask]
+    return df 
+
+
 def save_json(data, path: Path, indent: int = 2) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:

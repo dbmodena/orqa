@@ -102,6 +102,8 @@ class StatementGenerationAgent:
             prompt_str=""
             tables = []
             #table_names = [f"Table_{i}" for i in range(len(dataset_paths))]
+            #print(len(dataset_paths))
+            #print(match)
             for idx, dataset_path in enumerate(dataset_paths):
                 df,dataset_info = utils.prepare_dataset(
                     dataset_path,
@@ -122,7 +124,8 @@ class StatementGenerationAgent:
                     json.dumps(aliases, indent=2),
                     match
                 )
-            result, tokens = self._client.complete(prompt_str, tables, aliases, typology=kind)
+            result, tokens = self._client.complete(prompt_str, tables, aliases, typology=kind,involved_cols=involved_cols)
+            #print(prompt_str)
             return {
                     "result": result,
                     "token_usage": tokens,
@@ -137,10 +140,11 @@ class StatementGenerationAgent:
 
 
 class GenerateResponseAgent:
-    def __init__(self, config_path: Path,kind:str):
+    def __init__(self, config_path: Path,kind:str,max_tokens:int=2000):
         self.config_path = config_path
         self.prompt = ResponseGenerationPrompt()
         self._client = LLMClient(self.config_path)
+        self.max_tokens = max_tokens
 
     def generate_statements(
         self,
@@ -153,7 +157,7 @@ class GenerateResponseAgent:
                     question,
                     data
                 )
-            result, tokens = self._client.complete(prompt_str)
+            result, tokens = self._client.complete(prompt_str,max_tokens=self.max_tokens)
             return {
                     "result": result,
                     "token_usage": tokens,

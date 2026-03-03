@@ -5,6 +5,7 @@ from pathlib import Path
 from conf import load_config
 #from orqa.candidates_generation import candidates_discovery
 from orqa.statement_generation import generate_statements
+from orqa.statement_judge import generate_response
 from orqa.cleaning import ckan_cleaning, socrata_cleaning
 #from orqa.crawling import crawl_canada, crawl_modena, crawl_nyc, crawl_uk
 from orqa.indexing import create_blend_index
@@ -69,7 +70,8 @@ def nyc():
     # socrata_cleaning(cfg)
     # create_blend_index(cfg)
     # candidates_discovery(cfg)
-    generate_statements(cfg)
+    # generate_statements(cfg)
+    generate_response(cfg)
 
 
 def main():

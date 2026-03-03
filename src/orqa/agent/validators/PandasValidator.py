@@ -53,20 +53,13 @@ class PandasValidator(QueryValidator):
             compiled_code = compile(query, '<string>', 'exec')
             exec(compiled_code, local_namespace)
         except KeyError as e:
-            # Crea una mappa di colonne per tabella
-            columns_by_table = {}
-            for df, name in zip(self.dataframes, self.table_names):
-                columns_by_table[name] = df.columns.tolist()
-            
-            # Formatta il messaggio con le colonne per tabella
-            columns_info = []
-            for table_name, columns in columns_by_table.items():
-                columns_info.append(f"  {table_name}: {columns}")
-            
             raise KeyError(
-                f"Column {str(e)} not found in any table.\n\n"
-                f"Available columns by table:\n" + "\n".join(columns_info) + "\n\n"
-                f"Tip: Check column names spelling and case sensitivity."
+                f"Column {str(e)} not found at runtime.\n\n"
+                f"Possible causes:\n"
+                f"  1. Column does not exist in any of the original tables — check spelling and case\n"
+                f"  2. Column was incorrectly suffixed — a suffix is ONLY valid if the column name exists in BOTH tables\n"
+                f"  3. Column was incorrectly left unsuffixed — if a column name exists in BOTH tables it MUST be suffixed\n\n"
+                f"Strictly follow the suffix constraints provided — do not infer, assume, or apply suffixes beyond what is defined there.\n"
             )
         except SyntaxError as e:
             raise SyntaxError(
@@ -90,8 +83,9 @@ class PandasValidator(QueryValidator):
     def _get_language_name(self) -> str:
         return "Python"
     
-    def clean_pandas(self, query: str) -> str:
+    def clean_pandas(self, query_code: str) -> str:
         """Clean pandas query code."""
+        query = query_code.replace("`", "'").replace('"', "'")
         lines = query.split(';')
         cleaned = [line.strip() for line in lines if 'import' not in line.lower()]
         # Remove comments from each line

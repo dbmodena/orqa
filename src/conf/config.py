@@ -181,6 +181,9 @@ class StatementGeneration:
     # list of bad values in order to prefilter on query generation
     bad_tokens: list
 
+    # max number of tokens per natural languange response
+    max_response_tokens: int
+
 @dataclass
 class OrQAConfig:
     source: Literal["ckan", "socrata"]
@@ -291,6 +294,9 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     # gets the list of bad tokens
     bad_tokens = parsed["tasks"]["query_generation"]["bad_tokens"]
 
+    # max number of natural language response tokens
+    max_response_tokens = parsed["tasks"]["query_generation"]["max_response_tokens"]
+
     # fetches the max columns to analyze during the statement generation
     max_cols = parsed["tasks"]["query_generation"]["max_cols"]
 
@@ -365,7 +371,8 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         max_cols=max_cols,
         query_candidates_path=query_candidates_path,
         queries_path=queries_path,
-        bad_tokens=bad_tokens
+        bad_tokens=bad_tokens,
+        max_response_tokens=max_response_tokens
     )
 
     orqa_cfg = OrQAConfig(

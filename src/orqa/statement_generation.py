@@ -27,7 +27,7 @@ def _make_union_match(task_spec, df_q, df_r, alias_q, alias_r):
     col_str = f"{q_columns} / {r_columns}" if q_columns or r_columns else "All columns"
     return {
         "description": f"UNION: {alias_q} ∪ {alias_r} ON {col_str}",
-        "pandas_expr": f"pd.concat([{alias_q}[{q_columns}], {alias_r}[{r_columns}]], ignore_index=True)",
+        "pandas_expr": f"concat([{alias_q}[{q_columns}], {alias_r}[{r_columns}]], ignore_index=True)",
         "columns": {k: list(v) for k, v in involved.items()},
     }
 
@@ -39,7 +39,7 @@ def _make_join_match(task_spec, df_r, alias_q, alias_r):
     conditions = " AND ".join(f"{alias_q}.{q_keys[i]} = {alias_r}.{r_keys[i]}" for i in range(len(q_keys)))
     return {
         "description": f"JOIN: {alias_q} ⋈ {alias_r} ON {conditions}",
-        "pandas_expr": f"pd.merge({alias_q}, {alias_r}, left_on={q_keys}, right_on={r_keys})",
+        "pandas_expr": f"merge(left={alias_q}, right={alias_r}, left_on={q_keys}, right_on={r_keys}, suffixes=('_{alias_q}', '_{alias_r}'))",
         "columns": {k: list(v) for k, v in involved.items()},
     }
 
@@ -57,7 +57,7 @@ def _make_join_correlation_match(task_spec, df_q, df_r, alias_q, alias_r):
             f"AND {alias_q}.{q_target} = {alias_r}.{r_target}"
         ),
         "pandas_expr": (
-            f"pd.merge({alias_q}, {alias_r}, left_on=['{q_key}', '{q_target}'], right_on=['{r_key}', '{r_target}'])"
+            f"pd.merge({alias_q}, {alias_r}, left_on=['{q_key}', '{q_target}'], right_on=['{r_key}', '{r_target}'],suffixes=('_{alias_q}', '_{alias_r}'))"
         ),
         "columns": {k: list(v) for k, v in involved.items()},
     }
@@ -174,21 +174,24 @@ import sys
 def create_statements(
     config_path: Path, csv_folder: Path, candidates_path: Path, output_path: Path,
     kind: str = "PANDAS", max_cols: int = 15,
-    datasets_metadata: Path = None, extension: str = "csv",bad_tokens:list=[]
+    datasets_metadata: Path = None, extension: str = "csv", bad_tokens: list = []
 ) -> dict:
     datasets_metadata = datasets_metadata or {}
 
-    
     all_matches = load_json(candidates_path)
     output_file = output_path
     results = load_json(output_file) if output_file.exists() else {}
+
+    # Ensure the kind layer exists, preserving other kinds if present
+    if kind not in results:
+        results[kind] = {}
 
     successes = 0
     failures = 0
     total = len(all_matches)
 
     for idx, match in enumerate(all_matches):
-        agent = StatementGenerationAgent(config_path, kind,bad_tokens)
+        agent = StatementGenerationAgent(config_path, kind, bad_tokens)
         sys.stdout.write(
             f"\r[{idx + 1}/{total}]  ✅ Successes: {successes}   ❌ Failures: {failures}   "
         )
@@ -199,17 +202,18 @@ def create_statements(
             dataset_paths, aliases, kind, match[f"{kind}_matches"], involved_cols, metadatas,
             max_cols, sample_size=5,
         )
-        
+
         result = content["result"]
         tokens = content["token_usage"]
-        status = "success" if result['queries']!=[] else "failure"
+        status = "success" if result['queries'] != [] else "failure"
 
-        if result['queries']!=[]:
+        if result['queries'] != []:
             successes += 1
         else:
             failures += 1
 
-        results[str(idx)] = {"status": status, "data": result, "tokens": tokens, "tables":aliases}
+        # Save under the kind layer
+        results[kind][str(idx)] = {"status": status, "data": result, "tokens": tokens, "tables": aliases}
         save_json(results, output_file)
         sys.stdout.flush()
 
