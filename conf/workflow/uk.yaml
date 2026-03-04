@@ -59,4 +59,8 @@ tasks:
     n_paths_for_dataset: 5
     max_path_length: 5
     overlap_ratio_threshold: 0.5
-
+  query_generation:
+    kind: "PANDAS"
+    max_cols: 10
+    bad_tokens: ['s','None','R']
+    max_response_tokens: 500

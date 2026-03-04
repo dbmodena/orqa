@@ -124,12 +124,13 @@ class StatementGenerationAgent:
                     json.dumps(aliases, indent=2),
                     match
                 )
-            result, tokens = self._client.complete(prompt_str, tables, aliases, typology=kind,involved_cols=involved_cols)
+            result, tokens,errors = self._client.complete(prompt_str, tables, aliases, typology=kind,involved_cols=involved_cols)
             #print(prompt_str)
             return {
                     "result": result,
                     "token_usage": tokens,
-                    "keyword_counts":{}
+                    "errors":errors,
+
                 }
         except FileNotFoundError as e:
             print(f"Error: '{e}'")

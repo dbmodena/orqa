@@ -102,6 +102,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
         last_error = None
 
         good_queries: dict[str, dict] = {}
+        all_errors = []
         for attempt in range(self.max_retries):
             try:
                 #print(f"Attempt {attempt + 1}/{self.max_retries}...")
@@ -122,7 +123,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                     #print(json_data)
                     result = self.response_model.model_validate(json_data)
                     result = result.model_dump()
-                    outcome, errors, accepted_queries = self.validate_queries(dataframes, result,table_names,typology)
+                    outcome, errors, accepted_queries,error_messages = self.validate_queries(dataframes, result,table_names,typology)
                     for key, accepted_query in accepted_queries.items():
                             accepted_query["keywords"] = self.count_keywords(accepted_query["code"], typology)
                             good_queries[accepted_query["id"]] = accepted_query
@@ -130,15 +131,17 @@ class LLMClientStatementGenerator(LLMClientStructured):
                        messages = [{"role": "system", "content": "You are an expert Data Engineer."},{"role": "user", "content": prompt}]
                        #print(errors)
                        messages.extend(errors)
+                       all_errors.extend(error_messages)
                        pydantic = self.reform_prompt_constraint("")
                        messages.append({"role": "user", "content":pydantic})
                        continue
 
                     #print(f"✓ Success on attempt {attempt + 1}\n")
-                    return {"queries": list(good_queries.values())}, usage_total
+                    return {"queries": list(good_queries.values())}, usage_total,all_errors
                 except json.JSONDecodeError as e:
                     # JSON parsing failed
                     last_error = e
+                    all_errors.append(e)
                     error_msg = self._format_json_error(cleaned_content, e)
                     if attempt < self.max_retries - 1:
                         messages = [{"role": "system", "content": "You are an expert Data Engineer, below are listed the instructions for generating and correcting queries."},{"role": "user", "content": initial_message}]
@@ -150,6 +153,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                         continue
                 except ValidationError as e:
                     last_error = e
+                    all_errors.append(e)
                     error_msg = self._format_validation_error(e)
                     if attempt < self.max_retries - 1:
                         messages = [{"role": "system", "content": "You are an expert Data Engineer."},{"role": "user", "content": prompt}]
@@ -175,7 +179,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                         #print("💬 Sending validation errors to LLM...\n")
                         print(last_error)
                         time.sleep(self.retry_delay)
-        return {"queries": list(good_queries.values())}, usage_total
+        return {"queries": list(good_queries.values())}, usage_total,all_errors
 
 
     def count_keywords(self,query: str, kind: str = "SQL") -> dict[str, int]:

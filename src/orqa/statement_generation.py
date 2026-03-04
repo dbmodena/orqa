@@ -191,6 +191,10 @@ def create_statements(
     total = len(all_matches)
 
     for idx, match in enumerate(all_matches):
+        pandas_failed = [2]
+        sql_failed = []
+        if (kind == "PANDAS" and idx not in pandas_failed) or (kind == "SQL" and idx not in sql_failed):
+            continue
         agent = StatementGenerationAgent(config_path, kind, bad_tokens)
         sys.stdout.write(
             f"\r[{idx + 1}/{total}]  ✅ Successes: {successes}   ❌ Failures: {failures}   "
@@ -205,6 +209,7 @@ def create_statements(
 
         result = content["result"]
         tokens = content["token_usage"]
+        errors = content["errors"]
         status = "success" if result['queries'] != [] else "failure"
 
         if result['queries'] != []:
@@ -213,7 +218,7 @@ def create_statements(
             failures += 1
 
         # Save under the kind layer
-        results[kind][str(idx)] = {"status": status, "data": result, "tokens": tokens, "tables": aliases}
+        results[kind][str(idx)] = {"status": status, "data": result, "tokens": tokens, "tables": aliases,"errors":errors}
         save_json(results, output_file)
         sys.stdout.flush()
 

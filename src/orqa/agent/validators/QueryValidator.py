@@ -11,6 +11,7 @@ class QueryValidator(ABC):
         self.validation_errors = []
         self.good_queries = {}
         self.lookup_dict=lookup_dict
+        self.errors = []
 
 
     
@@ -47,11 +48,12 @@ class QueryValidator(ABC):
                     "query": actual_query,
                     "error": f"{type(e).__name__}: {str(e)}"
                 })
+                self.errors.append(f"Error {type(e).__name__}: {str(e)}")
         
         if all_valid:
             return True, {}, self.good_queries
         
-        return False, self._build_feedback(), self.good_queries
+        return False, self._build_feedback(), self.good_queries,self.errors
     
 
     def replace_aliases(self, code: str, aliases: dict) -> str:
