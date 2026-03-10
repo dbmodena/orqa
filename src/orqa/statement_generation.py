@@ -183,18 +183,14 @@ def create_statements(
     results = load_json(output_file) if output_file.exists() else {}
 
     # Ensure the kind layer exists, preserving other kinds if present
-    if kind not in results:
-        results[kind] = {}
+    #if kind not in results:
+    #    results[kind] = {}
 
     successes = 0
     failures = 0
     total = len(all_matches)
 
     for idx, match in enumerate(all_matches):
-        pandas_failed = [2]
-        sql_failed = []
-        if (kind == "PANDAS" and idx not in pandas_failed) or (kind == "SQL" and idx not in sql_failed):
-            continue
         agent = StatementGenerationAgent(config_path, kind, bad_tokens)
         sys.stdout.write(
             f"\r[{idx + 1}/{total}]  ✅ Successes: {successes}   ❌ Failures: {failures}   "
@@ -211,14 +207,25 @@ def create_statements(
         tokens = content["token_usage"]
         errors = content["errors"]
         status = "success" if result['queries'] != [] else "failure"
-
+        model = content["model"].split("/")[-1]
+        avg_cols = content["avg_cols"]
+        generation_time = content["time_elapsed"]
         if result['queries'] != []:
             successes += 1
         else:
             failures += 1
 
         # Save under the kind layer
-        results[kind][str(idx)] = {"status": status, "data": result, "tokens": tokens, "tables": aliases,"errors":errors}
+        #results[model][kind][str(idx)] = {"status": status, "data": result, "tokens": tokens, "tables": aliases,"errors":errors, "generation_time":generation_time, "avg_cols":avg_cols}
+        results.setdefault(model, {}).setdefault(kind, {})[str(idx)] = {
+            "status": status,
+            "data": result,
+            "tokens": tokens,
+            "tables": aliases,
+            "errors": errors,
+            "generation_time": generation_time,
+            "avg_cols": avg_cols
+        }
         save_json(results, output_file)
         sys.stdout.flush()
 
@@ -234,15 +241,9 @@ def generate_statements(cfg:OrQAConfig):
         None,  # [s[3 if len(s) == 4 else 2] for s in seed_datasets],
         source=cfg.source,
     )
-    
-    #cfg.statement_generation.threshold
-    #cfg.statement_generation.join_score
-    
-    #cfg.statement_generation.union_score
     ### first we generate the random walks
-    #generate_random_walks(cfg)
-    #print(cfg.candidates_discovery.candidates_path)
+    generate_random_walks(cfg)
     #cfg.candidates_discovery.proposed_tasks_path
-    #process_all_candidates(cfg.candidates_discovery.candidates_path, cfg.candidates_discovery.tasks_results_path, cfg.datasets_path, cfg.statement_generation.query_candidates_path)
+    process_all_candidates(cfg.candidates_discovery.candidates_path, cfg.candidates_discovery.tasks_results_path, cfg.datasets_path, cfg.statement_generation.query_candidates_path)
     create_statements(cfg.llm_config_path.joinpath("litellm.yaml"),cfg.datasets_path, cfg.statement_generation.query_candidates_path,cfg.statement_generation.queries_path, cfg.statement_generation.kind,cfg.statement_generation.max_cols, datasets_metadata=metadata,bad_tokens=cfg.statement_generation.bad_tokens)
     

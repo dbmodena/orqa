@@ -26,7 +26,18 @@ class QueryValidator(ABC):
         
         for idx, q in enumerate(result["queries"]):
             actual_query = q
-            query_code = self.replace_aliases(q["code"],self.lookup_dict)
+            # FIX: q["code"] may be None if the LLM omits the field or returns null.
+            # Treat it as an empty string so the rest of the pipeline gets a str.
+            raw_code = q.get("code") or ""
+            if not raw_code.strip():
+                all_valid = False
+                self.validation_errors.append({
+                    "query": actual_query,
+                    "error": "ValueError: query 'code' field is missing or empty"
+                })
+                self.errors.append("Error ValueError: query 'code' field is missing or empty")
+                continue
+            query_code = self.replace_aliases(raw_code, self.lookup_dict)
             query_code = self._preprocess_query(query_code.strip())
             actual_query["code"]=query_code
             try:
@@ -42,8 +53,8 @@ class QueryValidator(ABC):
 
             except Exception as e:
                 all_valid = False
-                print(f"Query code: {actual_query["code"]}")
-                print(f"Error {type(e).__name__}: {str(e)}")
+                #print(f"Query code: {actual_query["code"]}")
+                #print(f"Error {type(e).__name__}: {str(e)}")
                 self.validation_errors.append({
                     "query": actual_query,
                     "error": f"{type(e).__name__}: {str(e)}"
@@ -51,12 +62,15 @@ class QueryValidator(ABC):
                 self.errors.append(f"Error {type(e).__name__}: {str(e)}")
         
         if all_valid:
-            return True, {}, self.good_queries
+            return True, {}, self.good_queries,self.errors
         
         return False, self._build_feedback(), self.good_queries,self.errors
     
 
     def replace_aliases(self, code: str, aliases: dict) -> str:
+        # FIX: guard against None input (LLM may emit null for the code field)
+        if code is None:
+            return ""
         for table_name, alias in aliases.items():
             # Replace both quoted and unquoted versions of the alias
             code = code.replace(f'"{alias}"', table_name)  # handles "4dx7-axux"

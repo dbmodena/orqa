@@ -31,8 +31,8 @@ class QueryResponsePipeline:
     def __init__(self, cfg: OrQAConfig):
         self.cfg = cfg
         self.executor = QueryExecutor(cfg.datasets_path,cfg.statement_generation.bad_tokens)
-        self.kind = cfg.statement_generation.kind
-        self.agent = GenerateResponseAgent(cfg.llm_config_path.joinpath("litellm.yaml"), kind=self.kind,max_tokens=cfg.statement_generation.max_response_tokens)
+        #self.kind = cfg.statement_generation.kind
+        self.agent = GenerateResponseAgent(cfg.llm_config_path.joinpath("litellm.yaml"),max_tokens=cfg.statement_generation.max_response_tokens)
 
     def run(
         self,
@@ -41,20 +41,20 @@ class QueryResponsePipeline:
     ) -> list[dict]:
         queries_data = load_json(self.cfg.statement_generation.queries_path)
         responses: list[dict] = []
-
-        for kind_key, kind_entries in queries_data.items():
-            if self.kind is not None and kind_key != self.kind:
-                continue
-            for key, entry in kind_entries.items():
-                if entry_keys is not None and key not in entry_keys:
-                    continue
-                if entry.get("status") != "success":
-                    continue
-                for query in entry.get("data", {}).get("queries", []):
-                    record = self._process_query(entry, query, key, max_result_rows)
-                    if record is not None:
-                        query["response"] = record.get("response") 
-                        responses.append(record)
+        for model_key, model_entries in queries_data.items():
+            for kind_key, kind_entries in model_entries.items():
+                #if self.kind is not None: #and kind_key != self.kind:
+                #    continue
+                for key, entry in kind_entries.items():
+                    if entry_keys is not None and key not in entry_keys:
+                        continue
+                    if entry.get("status") != "success":
+                        continue
+                    for query in entry.get("data", {}).get("queries", []):
+                        record = self._process_query(entry, query, key, max_result_rows)
+                        if record is not None:
+                            query["response"] = record.get("response") 
+                            responses.append(record)
 
         save_json(queries_data, self.cfg.statement_generation.queries_path) 
         return responses
@@ -71,7 +71,7 @@ class QueryResponsePipeline:
         query_id: int = query.get("id", -1)
         query_type: str = query.get("query_type", "sql")
         difficulty: str = query.get("difficulty", "")
-
+        produce_result="NO"
         # 1. Execute the query
         try:
             result_df = self.executor.execute(entry, query)
@@ -86,6 +86,7 @@ class QueryResponsePipeline:
                 "execution_result": None,
                 "execution_error": str(exc),
                 "response": None,
+                "produce_result":produce_result,
                 "token_usage": None,
             }
 
@@ -104,6 +105,7 @@ class QueryResponsePipeline:
             agent_output = self.agent.generate_statements(question=question, data=data_str)
             response_text = agent_output.get("result") if agent_output else None
             token_usage = agent_output.get("token_usage") if agent_output else None
+            produce_result="YES"
             #print(f"Question:{question}")
             #print(f"Response :{response_text}")
             #print(f"Data\n:{data_str}")
@@ -120,6 +122,7 @@ class QueryResponsePipeline:
             "difficulty": difficulty,
             "execution_result": result_df,
             "response": response_text,
+            "produce_result":produce_result,
             "token_usage": token_usage,
         }
 

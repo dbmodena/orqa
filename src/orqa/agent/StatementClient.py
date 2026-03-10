@@ -58,54 +58,196 @@ class LLMClientStatementGenerator(LLMClientStructured):
     """
 
     def __init__(self, config_path: Path):
-        """
-        Initialize LLM client with configuration from YAML file.
-
-        Args:
-            config_path: Path to YAML configuration file
-        """
-        # 1. Load configuration
-        super().__init__(config_path,"querying")
+        super().__init__(config_path, "querying")
         self.fallback_response_model = self._load_pydantic_response_model("fallback_querying")
 
+    def _repair_json(self, content: str) -> dict:
+        
+        if not isinstance(content, str):
+            raise json.JSONDecodeError("content is not a string", str(content), 0)
+
+        # Stage 1 – fast path
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            pass
+
+        # Stage 2 – fix triple-quoted strings
+        patched = self._fix_triple_quotes(content)
+        try:
+            return json.loads(patched)
+        except json.JSONDecodeError:
+            pass
+
+        # Stage 3 – escape literal control characters inside JSON strings
+        escaped = self._escape_literal_controls(patched)
+        try:
+            return json.loads(escaped)
+        except json.JSONDecodeError:
+            pass
+
+        # Stage 4 – structural fixes (trailing commas, unclosed delimiters)
+        structural = self._fix_structural_issues(escaped)
+        try:
+            return json.loads(structural)
+        except json.JSONDecodeError:
+            pass
+
+        # Final raise so the caller receives a meaningful JSONDecodeError
+        return json.loads(structural)
+
+    def _fix_structural_issues(self, content: str) -> str:
+        """
+        Fix common structural JSON problems produced by LLMs:
+        - Trailing commas before } or ]
+        - Unterminated string at end of document
+        - Unclosed braces / brackets (truncated LLM output)
+        """
+        # 1. Remove trailing commas before a closing delimiter
+        fixed = re.sub(r',\s*(?=[}\]])', '', content)
+
+        # 2. Close any unterminated string at the very end of the document.
+        #    Heuristic: odd number of unescaped double-quotes → append one.
+        unescaped_quotes = re.findall(r'(?<!\\)"', fixed)
+        if len(unescaped_quotes) % 2 != 0:
+            fixed = fixed.rstrip() + '"'
+
+        # 3. Count open braces/brackets and close any that were never closed
+        #    (handles truncated LLM output).
+        closer_map = {'{': '}', '[': ']'}
+        stack: list[str] = []
+        in_str = False
+        i = 0
+        while i < len(fixed):
+            ch = fixed[i]
+            if in_str:
+                if ch == '\\':
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch in ('{', '['):
+                    stack.append(closer_map[ch])
+                elif ch in ('}', ']'):
+                    if stack and stack[-1] == ch:
+                        stack.pop()
+            i += 1
+
+        fixed = fixed.rstrip()
+        for closer in reversed(stack):
+            fixed += closer
+
+        return fixed
+
+    def _fix_triple_quotes(self, content: str) -> str:
+        """Replace \"\"\"...\"\"\" with a properly escaped single-quoted JSON string."""
+        pattern = r'"""[\s\S]*?"""'
+        matches = list(re.finditer(pattern, content))
+        offset = 0
+        result = content
+        for match in matches:
+            original = match.group(0)
+            inner = original[3:-3].strip()
+            escaped = (
+                inner
+                .replace('\\', '\\\\')   # must be first
+                .replace('"', '\\"')
+                .replace('\n', '\\n')
+                .replace('\r', '')
+                .replace('\t', ' ')
+            )
+            replacement = f'"{escaped}"'
+            start = match.start() + offset
+            end = match.end() + offset
+            result = result[:start] + replacement + result[end:]
+            offset += len(replacement) - len(original)
+        return result
+
+    def _escape_literal_controls(self, content: str) -> str:
+        """
+        Scan JSON text and escape any literal control characters that appear
+        inside string values (i.e. between unescaped double-quotes).
+        This fixes the common LLM output pattern of:
+            {"code": "df.merge(...)\n.head(5)"}
+        where \n is a real newline, not the two-character escape sequence.
+        """
+        result = []
+        in_string = False
+        i = 0
+        while i < len(content):
+            ch = content[i]
+            if in_string:
+                if ch == '\\':
+                    # Consume the escape sequence as-is (already valid JSON)
+                    result.append(ch)
+                    i += 1
+                    if i < len(content):
+                        result.append(content[i])
+                        i += 1
+                    continue
+                elif ch == '"':
+                    in_string = False
+                    result.append(ch)
+                elif ch == '\n':
+                    result.append('\\n')
+                elif ch == '\r':
+                    result.append('\\r')
+                elif ch == '\t':
+                    result.append('\\t')
+                else:
+                    result.append(ch)
+            else:
+                if ch == '"':
+                    in_string = True
+                    result.append(ch)
+                else:
+                    result.append(ch)
+            i += 1
+        return ''.join(result)
+
+    # Keep the old name as a thin wrapper so nothing external breaks.
+    def fix_json_with_triple_quotes(self, content: str) -> dict:
+        return self._repair_json(content)
+
+    # ------------------------------------------------------------------
 
     def complete(
         self,
         prompt: str,
-        dataframes,table_names, typology="SQL",involved_cols=None
+        dataframes, table_names, typology="SQL", involved_cols=None
     ) -> Any:
-        """
-        Make a completion request with optional structured output.
-
-        :param prompt: The prompt to send to the model
-        :param **kwargs: Additional arguments to pass to litellm.completion
-        """
         usage_total = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
         }
-        initial_message = prompt
-        #if typology == "PANDAS":
-        #    initial_message = self.add_suffix_constraint(initial_message, dataframes,table_names,involved_cols)
-        initial_message = self.reform_prompt_constraint(initial_message)
-        #print(involved_cols)
-        #print(initial_message)
-        messages = [{"role": "system", "content": "You are an expert Data Engineer"},{"role": "user", "content": initial_message}]
-        completion_args = {
-            "model": self.config["model"],
-            "messages": messages,
-            "temperature": self.temperature,
-        }
-        
+        initial_message = self.reform_prompt_constraint(prompt)
+
+        # FIX 2: do NOT bake `messages` into completion_args up-front.
+        # Instead, update completion_args["messages"] right before every
+        # router.completion call so that retry feedback is actually sent.
+        messages = [
+            {"role": "system", "content": "You are an expert Data Engineer"},
+            {"role": "user", "content": initial_message},
+        ]
+
         last_content = ""
         last_error = None
-
         good_queries: dict[str, dict] = {}
         all_errors = []
+
         for attempt in range(self.max_retries):
             try:
-                #print(f"Attempt {attempt + 1}/{self.max_retries}...")
+                # FIX 2: always build completion_args from the current messages list.
+                completion_args = {
+                    "model": self.config["model"],
+                    "messages": messages,
+                    "temperature": self.temperature,
+                    #"max_tokens": 16000,
+                }
 
                 response = self.router.completion(**completion_args)
                 usage = response["usage"]
@@ -113,180 +255,158 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 usage_total["completion_tokens"] += usage.get("completion_tokens", 0)
                 usage_total["total_tokens"] += usage.get("total_tokens", 0)
                 content = response["choices"][0]["message"]["content"]
-                # Parse structured output
+                # Guard: some models return None for content (e.g. tool-call-only responses)
+                if content is None:
+                    raise ValueError(
+                        "LLM returned None content – the model may have emitted a "
+                        "tool-call response instead of a text completion."
+                    )
                 last_content = content
+                print(last_content)
                 cleaned_content = self._clean_json_response(content)
                 try:
-                    json_data = self.fix_json_with_triple_quotes(cleaned_content)
+                    # FIX 1 & 3: use the robust repair pipeline
+                    json_data = self._repair_json(cleaned_content)
                     json_data = self._normalize_response(json_data)
-                    # Then validate with Pydantic
-                    #print(json_data)
                     result = self.response_model.model_validate(json_data)
                     result = result.model_dump()
-                    outcome, errors, accepted_queries,error_messages = self.validate_queries(dataframes, result,table_names,typology)
+                    outcome, errors, accepted_queries, error_messages = self.validate_queries(
+                        dataframes, result, table_names, typology
+                    )
                     for key, accepted_query in accepted_queries.items():
-                            accepted_query["keywords"] = self.count_keywords(accepted_query["code"], typology)
-                            good_queries[accepted_query["id"]] = accepted_query
-                    if not outcome:
-                       messages = [{"role": "system", "content": "You are an expert Data Engineer."},{"role": "user", "content": prompt}]
-                       #print(errors)
-                       messages.extend(errors)
-                       all_errors.extend(error_messages)
-                       pydantic = self.reform_prompt_constraint("")
-                       messages.append({"role": "user", "content":pydantic})
-                       continue
+                        accepted_query["keywords"] = self.count_keywords(accepted_query["code"], typology)
+                        good_queries[accepted_query["id"]] = accepted_query
 
-                    #print(f"✓ Success on attempt {attempt + 1}\n")
-                    return {"queries": list(good_queries.values())}, usage_total,all_errors
+                    if not outcome:
+                        # FIX 2: reassign messages and it will be picked up next iteration
+                        messages = [
+                            {"role": "system", "content": "You are an expert Data Engineer."},
+                            {"role": "user", "content": prompt},
+                        ]
+                        messages.extend(errors)
+                        all_errors.extend(error_messages)
+                        pydantic = self.reform_prompt_constraint("")
+                        messages.append({"role": "user", "content": pydantic})
+                        continue
+
+                    return (
+                        {"queries": list(good_queries.values())},
+                        usage_total,
+                        [e if isinstance(e, str) else str(e) for e in all_errors],
+                        self.config["model"],
+                    )
+
                 except json.JSONDecodeError as e:
-                    # JSON parsing failed
                     last_error = e
-                    all_errors.append(e)
+                    all_errors.append(f"Error JSONDecodeError: {e}")
                     error_msg = self._format_json_error(cleaned_content, e)
                     if attempt < self.max_retries - 1:
-                        messages = [{"role": "system", "content": "You are an expert Data Engineer, below are listed the instructions for generating and correcting queries."},{"role": "user", "content": initial_message}]
-                        messages.append({"role": "system", "content": last_content})
+                        # FIX 2: rebuild messages so the next iteration sends them
+                        messages = [
+                            {"role": "system", "content": "You are an expert Data Engineer, below are listed the instructions for generating and correcting queries."},
+                            {"role": "user", "content": initial_message},
+                            {"role": "system", "content": last_content},
+                        ]
                         pydantic = self.reform_prompt_constraint("")
-                        messages.append({"role": "user", "content": f"You generated a bad formatted output, that gave the following error message:\n{error_msg}\n{pydantic}"})
+                        messages.append({
+                            "role": "user",
+                            "content": f"You generated a bad formatted output, that gave the following error message:\n{error_msg}\n{pydantic}",
+                        })
                         time.sleep(self.retry_delay)
                         print(last_error)
                         continue
+
                 except ValidationError as e:
                     last_error = e
-                    all_errors.append(e)
+                    all_errors.append(f"Error ValidationError: {e}")
                     error_msg = self._format_validation_error(e)
                     if attempt < self.max_retries - 1:
-                        messages = [{"role": "system", "content": "You are an expert Data Engineer."},{"role": "user", "content": prompt}]
+                        # FIX 2: rebuild messages
+                        messages = [
+                            {"role": "system", "content": "You are an expert Data Engineer."},
+                            {"role": "user", "content": prompt},
+                            {"role": "system", "content": last_content},
+                        ]
                         pydantic = self.reform_prompt_constraint("")
-                        messages.append({"role": "system", "content":last_content})
-                        messages.append({"role": "user","content": f"Genereated queries are not valid, the error message geneated:\n{error_msg}\n{pydantic}"})
-                        #print("💬 Sending validation errors to LLM...\n")
+                        messages.append({
+                            "role": "user",
+                            "content": f"Generated queries are not valid, the error message generated:\n{error_msg}\n{pydantic}",
+                        })
                         print(last_error)
                         time.sleep(self.retry_delay)
                         continue
 
             except Exception as e:
                 last_error = e
-                #print(f"✗ Error on attempt {attempt + 1}: {e}")
-
-                # Wait before retry
                 if attempt < self.max_retries - 1:
-                        messages = [{"role": "system", "content": "You are an expert Data Engineer"},{"role": "user", "content": prompt}]
-                        # Add assistant's failed response
-                        messages.append({"role": "system", "content": last_content})
-                        # Add error feedback as user message
-                        messages.append({"role": "user", "content": f"Genereated queries that are not valid, error message geneated\n{e}\nMake a unique JSON compliant to the Pydantic format:\n{json.dumps(self.response_model.model_json_schema(), indent=2)}"})
-                        #print("💬 Sending validation errors to LLM...\n")
-                        print(last_error)
-                        time.sleep(self.retry_delay)
-        return {"queries": list(good_queries.values())}, usage_total,all_errors
+                    # FIX 2: rebuild messages
+                    messages = [
+                        {"role": "system", "content": "You are an expert Data Engineer"},
+                        {"role": "user", "content": prompt},
+                        {"role": "system", "content": last_content},
+                    ]
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Generated queries that are not valid, error message generated\n{e}\n"
+                            f"Make a unique JSON compliant to the Pydantic format:\n"
+                            f"{json.dumps(self.response_model.model_json_schema(), indent=2)}"
+                        ),
+                    })
+                    print(last_error)
+                    time.sleep(self.retry_delay)
 
+        return (
+            {"queries": list(good_queries.values())},
+            usage_total,
+            [e if isinstance(e, str) else str(e) for e in all_errors],
+            self.config["model"],
+        )
 
-    def count_keywords(self,query: str, kind: str = "SQL") -> dict[str, int]:
-        """
-        Count keyword occurrences in a SQL or Pandas query string.
-        kind: "sql" or "pandas"
-        """
+    def count_keywords(self, query: str, kind: str = "SQL") -> dict[str, int]:
         keywords = SQL_KEYWORDS if kind == "SQL" else PANDAS_KEYWORDS
         query_upper = query.upper() if kind == "SQL" else query
         counts = {}
-
         for kw in sorted(keywords):
             kw_pattern = kw.upper() if kind == "SQL" else kw
-            # Use word boundaries to avoid partial matches (e.g. IN inside INNER)
             pattern = rf'\b{re.escape(kw_pattern)}\b'
             matches = re.findall(pattern, query_upper, flags=re.IGNORECASE)
             if matches:
                 counts[kw] = len(matches)
-
         return counts
 
-    def validate_queries(self, dataframes, result, table_names,type):
-        if type=="SQL":
+    def validate_queries(self, dataframes, result, table_names, type):
+        if type == "SQL":
             return self.validate_sql_queries(dataframes, result, table_names)
         else:
             return self.validate_dataframe_queries(dataframes, result, table_names)
 
-
     def validate_dataframe_queries(self, dataframes, result, table_names):
-        """Validate pandas/polars queries."""
-        validator = PandasValidator(dataframes, list(table_names.keys()),table_names)
+        validator = PandasValidator(dataframes, list(table_names.keys()), table_names)
         return validator.validate_queries(result)
-
 
     def validate_sql_queries(self, dataframes, result, table_names):
-        """Validate SQL queries."""
-        validator = SQLValidator(dataframes, list(table_names.keys()),table_names)
+        validator = SQLValidator(dataframes, list(table_names.keys()), table_names)
         return validator.validate_queries(result)
 
-    def fix_json_with_triple_quotes(self,content: str) -> dict:
-        """
-        Fix JSON that contains Python triple-quoted strings.
-        """
-        # Step 1: Trova tutte le occorrenze di triple quotes
-        pattern = r'"""[\s\S]*?"""'
-        
-        matches = list(re.finditer(pattern, content))
-        
-        # Step 2: Sostituisci ogni match con una stringa JSON valida
-        offset = 0
-        result = content
-        
-        for match in matches:
-            original = match.group(0)
-            # Rimuovi le triple virgolette
-            inner_content = original[3:-3].strip()
-            
-            # Escape dei caratteri speciali
-            escaped = (inner_content
-                    .replace('\\', '\\\\')
-                    .replace('"', '\\"')
-                    .replace('\n', '\\n')  # Rimuovi newline o usa \\n se vuoi preservarli
-                    .replace('\r', '')
-                    .replace('\t', ' '))
-            
-            # Sostituisci nel risultato
-            start = match.start() + offset
-            end = match.end() + offset
-            replacement = f'"{escaped}"'
-            result = result[:start] + replacement + result[end:]
-            
-            # Aggiorna l'offset
-            offset += len(replacement) - len(original)
-        
-        # Step 3: Parse del JSON
-        return json.loads(result)
-
-
     def _normalize_response(self, json_data):
-        """Normalize response to match QuerySet schema."""
-        # Se è già una lista, wrappala in {"queries": [...]}
         if isinstance(json_data, list):
             return {"queries": json_data}
-        
-        # Se è un dict, verifica che abbia la chiave queries
         if isinstance(json_data, dict):
             if "queries" not in json_data:
-                # Se ha altre chiavi che sembrano query, prova a recuperare
                 if len(json_data) > 0:
-                    # Potrebbe essere un singolo query object
                     return {"queries": [json_data]}
             return json_data
-        
-        # Fallback: wrappa in struttura corretta
         return {"queries": [json_data]}
 
     def add_suffix_constraint(self, prompt, dataframes, table_names, involved_cols):
         from itertools import combinations
-
-        # Find common columns between each pair of tables
         common_cols_info = []
         for (name_a, df_a), (name_b, df_b) in combinations(zip(table_names, dataframes), 2):
             common = set(df_a.columns) & set(df_b.columns)
             common_cols_info.append(
                 f"  {name_a} ∩ {name_b}: {sorted(common) if common else '(no common columns)'}"
             )
-
         constraint = (
             "### Suffix Constraint Information\n"
             "Columns suffixed after merge (ONLY these get a suffix):\n"
@@ -298,11 +418,4 @@ class LLMClientStatementGenerator(LLMClientStructured):
             )
             + "All other columns keep their original name — do not add any suffix to them.\n"
         )
-
         return f"{prompt}\n{constraint}"
-
-
-
-
-
-

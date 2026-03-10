@@ -1,6 +1,6 @@
 from pathlib import Path
 from .. import utils
-#import utils
+import time
 import json
 from .TaskProposer import TaskProposerLLMClient
 from .StatementClient import LLMClientStatementGenerator
@@ -98,6 +98,7 @@ class StatementGenerationAgent:
         max_cols: int = 20,
         sample_size: int = 5,
     ) -> dict | None:
+        columns = 0
         try:
             prompt_str=""
             tables = []
@@ -112,7 +113,7 @@ class StatementGenerationAgent:
                     sample_size,
                     self.bad_tokens
                 )
-                #print(df.columns)
+                columns += len(df.columns)
                 tables.append(df)
                 prompt_str = self.prompt.update(
                     dataset_info["dataset_name"],
@@ -124,13 +125,18 @@ class StatementGenerationAgent:
                     json.dumps(aliases, indent=2),
                     match
                 )
-            result, tokens,errors = self._client.complete(prompt_str, tables, aliases, typology=kind,involved_cols=involved_cols)
+            start = time.perf_counter()    
+            result, tokens,errors,model = self._client.complete(prompt_str, tables, aliases, typology=kind,involved_cols=involved_cols)
+            time_elapsed = time.perf_counter() - start
+            avg_cols = columns/len(dataset_paths)
             #print(prompt_str)
             return {
                     "result": result,
                     "token_usage": tokens,
                     "errors":errors,
-
+                    "model":model,
+                    "time_elapsed":time_elapsed,
+                    "avg_cols": avg_cols
                 }
         except FileNotFoundError as e:
             print(f"Error: '{e}'")
@@ -141,7 +147,7 @@ class StatementGenerationAgent:
 
 
 class GenerateResponseAgent:
-    def __init__(self, config_path: Path,kind:str,max_tokens:int=2000):
+    def __init__(self, config_path: Path,max_tokens:int=2000):
         self.config_path = config_path
         self.prompt = ResponseGenerationPrompt()
         self._client = LLMClient(self.config_path)

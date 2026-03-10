@@ -1,6 +1,6 @@
 # LLM Configuration File
 # Primary model (will be tried first)
-model: "oci/meta.llama-3.3-70b-instruct"
+model: "oci/openai.gpt-oss-120b"
 # Fallback models (tried in order if primary fails)
 fallback_models:
    - "ollama_chat/llama3.1:8b"
@@ -31,6 +31,8 @@ provider_params:
     oci_tenancy: os.environ/OCI_TENANCY
     oci_key_file: os.environ/OCI_KEY_FILE
     oci_compartment_id: os.environ/OCI_COMPARTMENT_ID
+    max_tokens: 4000
+    timeout: 300
 
 # Common parameters (applied to all models)
 
