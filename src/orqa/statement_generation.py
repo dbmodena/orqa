@@ -52,12 +52,16 @@ def _make_join_correlation_match(task_spec, df_q, df_r, alias_q, alias_r):
     involved = {alias_q: {q_key, q_target}, alias_r: {r_key, r_target}}
     return {
         "description": (
-            f"JOIN-CORRELATION: {alias_q} ⋈ {alias_r} "
-            f"ON {alias_q}.{q_key} = {alias_r}.{r_key} "
-            f"AND {alias_q}.{q_target} = {alias_r}.{r_target}"
+            f"JOIN-CORRELATION: merge {alias_q} ⋈ {alias_r} "
+            f"ON LOWER({alias_q}.{q_key}) = LOWER({alias_r}.{r_key}), "
+            f"then correlate {alias_q}.{q_target} with {alias_r}.{r_target}"
         ),
         "pandas_expr": (
-            f"pd.merge({alias_q}, {alias_r}, left_on=['{q_key}', '{q_target}'], right_on=['{r_key}', '{r_target}'],suffixes=('_{alias_q}', '_{alias_r}'))"
+            f"{alias_q}.merge({alias_r}, "
+            f"left_on={alias_q}['{q_key}'].str.lower(), "
+            f"right_on={alias_r}['{r_key}'].str.lower(), "
+            f"suffixes=('_{alias_q}', '_{alias_r}'))"
+            f"[['{q_target}_{alias_q}', '{r_target}_{alias_r}']].corr()"
         ),
         "columns": {k: list(v) for k, v in involved.items()},
     }
@@ -245,5 +249,6 @@ def generate_statements(cfg:OrQAConfig):
     generate_random_walks(cfg)
     #cfg.candidates_discovery.proposed_tasks_path
     process_all_candidates(cfg.candidates_discovery.candidates_path, cfg.candidates_discovery.tasks_results_path, cfg.datasets_path, cfg.statement_generation.query_candidates_path)
-    create_statements(cfg.llm_config_path.joinpath("litellm.yaml"),cfg.datasets_path, cfg.statement_generation.query_candidates_path,cfg.statement_generation.queries_path, cfg.statement_generation.kind,cfg.statement_generation.max_cols, datasets_metadata=metadata,bad_tokens=cfg.statement_generation.bad_tokens)
+    for kind in ["PANDAS","SQL"]:#cfg.statement_generation.kind
+        create_statements(cfg.llm_config_path.joinpath("litellm.yaml"),cfg.datasets_path, cfg.statement_generation.query_candidates_path,cfg.statement_generation.queries_path, kind,cfg.statement_generation.max_cols, datasets_metadata=metadata,bad_tokens=cfg.statement_generation.bad_tokens)
     

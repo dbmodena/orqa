@@ -18,6 +18,13 @@ You will be provided with:
 - Only use explicitly defined matches - no inferred relationships
 - DuckDB syntax only - ANSI SQL compatible
 
+### Join Rules
+When joining tables on string-type keys, ALWAYS apply `LOWER()` to the key columns on BOTH sides of the join condition:
+```sql
+ON LOWER(t1.key_col) = LOWER(t2.key_col)
+```
+This prevents silent mismatches caused by inconsistent casing in string keys.
+
 ### Natural Language Questions
 ✓ Business terms (customers, revenue)  
 ✓ Outcome-focused (insights, trends)  
@@ -30,8 +37,15 @@ You will be provided with:
 - Each uses all provided tables
 - Each follows match definitions exactly
 - Each has semantically aligned NL question
-- Each has a difficulty value that can be "simple", "hard" or challenging
+- Each has a difficulty value that can be "simple", "hard" or "challenging"
+- Each has a **motivation**: a concise business justification (1–2 sentences) explaining *why* this question is analytically valuable and what decision or insight it supports
 - All conform to Pydantic schema
+
+### Motivation Guidelines
+The motivation must:
+- Be written in business language, not technical terms
+- Explain the analytical purpose (e.g., identifying churn risk, optimizing revenue, benchmarking performance)
+- Be distinct across the three queries — avoid repeating the same business rationale
 
 ### SQL difficulty levels
 - Simple: single-table `SELECT`, basic `WHERE`, optional `ORDER BY`/`LIMIT`, ≤1 aggregate, no subqueries.  

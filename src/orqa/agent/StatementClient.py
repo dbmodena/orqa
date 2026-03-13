@@ -37,13 +37,13 @@ SQL_KEYWORDS = {
     "SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING",
     "JOIN", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "OUTER JOIN", "FULL JOIN", "CROSS JOIN",
     "UNION", "UNION ALL", "INTERSECT", "EXCEPT",
-    "SUM", "AVG", "MIN", "MAX", "COUNT", "RANK", "ROW_NUMBER", "DENSE_RANK",
+    "SUM", "AVG", "MIN", "MAX", "COUNT", "RANK", "ROW_NUMBER", "DENSE_RANK", "CORR",
     "CAST", "COALESCE", "NULLIF", "CASE", "WHEN", "THEN", "ELSE",
     "DISTINCT", "LIMIT", "OFFSET", "WITH", "AS", "ON", "AND", "OR", "NOT", "IN", "EXISTS",
 }
 
 PANDAS_KEYWORDS = {
-    "merge", "join", "concat", "groupby", "agg", "aggregate",
+    "merge", "join", "concat", "groupby", "agg", "aggregate","corr",
     "sum", "mean", "avg", "min", "max", "count", "nunique", "rank",
     "sort_values", "sort_index", "drop_duplicates", "fillna", "dropna",
     "apply", "map", "filter", "query", "where", "assign", "pivot", "melt",
@@ -262,7 +262,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                         "tool-call response instead of a text completion."
                     )
                 last_content = content
-                print(last_content)
+                #print(last_content)
                 cleaned_content = self._clean_json_response(content)
                 try:
                     # FIX 1 & 3: use the robust repair pipeline

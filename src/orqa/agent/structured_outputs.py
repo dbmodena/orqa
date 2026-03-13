@@ -127,7 +127,22 @@ class Result(BaseModel):
                 unique_tasks.append(task)
         return unique_tasks
 
-
+class Table(BaseModel):
+    name: str = Field(
+        ...,
+        description=(
+            "The alias of the table as provided in the lookup aliases. "
+            "Must exactly match one of the aliases supplied in the prompt."
+        )
+    )
+    reason: str = Field(
+        ...,
+        description=(
+            "A business-oriented justification for why this table is needed. "
+            "Explain what unique information it contributes to answering the question "
+            "and why the query cannot be answered without it."
+        )
+    )
 
 
 
@@ -155,32 +170,12 @@ class Query(BaseModel):
             "the natural language question."
         )
     )
-    
-    query_type: Literal["sql", "pandas"] = Field(
+    tables: List[Table] = Field(
         ...,
-        description="Type of query: 'sql' for SQL queries or 'pandas' for Pandas operations."
+        description="List of tables involved in the query and why they're employed in the query."
     )
 
-    #tables: List[str] = Field(
-    #    ...,
-    #    description=(
-    #        "List of table names (for SQL) or DataFrame names (for Pandas) "
-    #        "used in the code."
-    #    )
-    #)
 
-    #columns: List[str] = Field(
-    #    ...,
-    #    description="List of column names referenced in the code."
-    #)
-
-
-    difficulty: str = Field(
-        ...,
-        description=(
-            "Query complexity from simple, hard or challenging. "
-        )
-    )
 
 
 class QuerySet(BaseModel):

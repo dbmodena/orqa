@@ -1,6 +1,13 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple, Any
 import json 
+import re
+
+TECHNICAL_TERMS = [
+    'record', 'records', 'dataset', 'datasets', 'dataframe', 'dataframes',
+    'table', 'tables', 'row', 'rows', 'column', 'columns', 'schema',
+    'index', 'indices', 'null', 'nan', 'dtype', 'merge', 'join'
+]
 
 class QueryValidator(ABC):
     """Base class for query validation."""
@@ -13,7 +20,12 @@ class QueryValidator(ABC):
         self.lookup_dict=lookup_dict
         self.errors = []
 
-
+    def _check_technical_terms_in_question(self, question: str) -> bool:
+        """Returns True if the question contains technical/data terms a user shouldn't know."""
+        question_lower = question.lower()
+        found = [term for term in TECHNICAL_TERMS if re.search(rf'\b{term}\b', question_lower)]
+        self.technical_terms_found = found
+        return len(found) > 0
     
     def validate_queries(self, result: Dict) -> Tuple[bool, Dict, Dict]:
         """
@@ -41,13 +53,21 @@ class QueryValidator(ABC):
             query_code = self._preprocess_query(query_code.strip())
             actual_query["code"]=query_code
             try:
-                self._execute_query(query_code)
+                result_data = self._execute_query(query_code)
+                if self._is_empty_result(result_data):
+                    raise ValueError(self._build_empty_result_feedback())
                 tables_used = self._check_table_usage(query_code)
                 if not tables_used:
                     raise ValueError(self._build_unused_tables_feedback())
+
+                if not self._check_tables_field_coverage(actual_query):
+                    raise ValueError(self._build_tables_field_coverage_feedback())
+                
                 tables_used = self._check_table_names_in_question(actual_query["question"])
                 if tables_used:
                      raise ValueError(self._build_question_tables_feedback())
+                if self._check_technical_terms_in_question(actual_query["question"]):
+                    raise ValueError(self._build_technical_terms_feedback())
                 self.good_queries[idx] = actual_query
                 
 
@@ -89,12 +109,53 @@ class QueryValidator(ABC):
 
     def _check_table_usage(self, query_text) -> bool:
         tables_used = set()
-        #query_text = query["code"]
         for table_name in self.table_names:
             if table_name in query_text:
                 tables_used.add(table_name)
         self.unused_tables = set(self.table_names) - tables_used
         return len(self.unused_tables) == 0
+
+    def _check_tables_field_coverage(self, query: dict) -> bool:
+        """Returns True if the 'tables' field contains one entry per expected table.
+        If an entry uses the real dataset name instead of the alias, it is normalised
+        to the alias before the comparison so the check is not tripped by naming style."""
+        # Build reverse map: dataset_name -> alias
+        alias_by_name = {v: k for k, v in self.lookup_dict.items()}
+
+        normalised_tables = []
+        for t in query.get("tables", []):
+            entry = dict(t)
+            raw_name = entry.get("name", "").strip()
+            # If the LLM used the real dataset name, swap it for the alias.
+            entry["name"] = alias_by_name.get(raw_name, raw_name)
+            normalised_tables.append(entry)
+
+        # Write normalised entries back so downstream code sees the corrected names.
+        query["tables"] = normalised_tables
+
+        declared = {t["name"] for t in normalised_tables}
+        self.tables_field_missing = set(self.table_names) - declared
+        self.tables_field_extra = declared - set(self.table_names)
+        return len(self.tables_field_missing) == 0
+
+    def _build_tables_field_coverage_feedback(self) -> str:
+        lines = [
+            "The 'tables' field must contain one entry for every table used in the query.",
+        ]
+        if self.tables_field_missing:
+            missing_list = "\n".join(f"  - {t}" for t in sorted(self.tables_field_missing))
+            lines.append(f"Missing entries for the following tables:\n{missing_list}")
+        if self.tables_field_extra:
+            extra_list = "\n".join(f"  - {t}" for t in sorted(self.tables_field_extra))
+            lines.append(
+                f"The following entries do not match any known table alias and must be removed:\n{extra_list}"
+            )
+        lines.append(
+            "Each entry must set 'name' to the exact table alias, "
+            "'reason' to why the table is needed, and "
+            "'join_justification' to why it is combined with the other tables in this way."
+        )
+        return "\n".join(lines)
 
     @abstractmethod
     def _preprocess_query(self, query: str) -> str:
@@ -102,17 +163,36 @@ class QueryValidator(ABC):
         pass
     
     @abstractmethod
-    def _execute_query(self, query: str) -> None:
-        """Execute query in appropriate environment. Raises exception on error."""
+    def _execute_query(self, query: str) -> Any:
+        """Execute query in appropriate environment. Raises exception on error.
+        Must return the query result (DataFrame or similar) for empty-result detection."""
         pass
-    
-    @abstractmethod
-    def _get_language_specific_rules(self) -> List[str]:
-        """Return language-specific validation rules."""
-        pass
-    
 
-    
+    def _is_empty_result(self, result: Any) -> bool:
+        """Return True if the query produced no rows. Works for pandas/polars DataFrames."""
+        if result is None:
+            return True
+        if hasattr(result, 'empty'):       # pandas DataFrame / Series
+            return result.empty
+        if hasattr(result, 'is_empty'):    # polars DataFrame
+            return result.is_empty()
+        if hasattr(result, '__len__'):
+            return len(result) == 0
+        return False
+
+    @abstractmethod
+    def _build_empty_result_feedback(self) -> str:
+        """Return a language-specific hint when the query returns no rows."""
+        pass
+
+    def _build_technical_terms_feedback(self) -> str:
+        feedback_lines = [
+            "The natural language question must not contain technical data terms.",
+            f"Found: {', '.join(self.technical_terms_found)}.",
+            "Rephrase the question as a business user with no knowledge of the underlying data structure would ask it.",
+            "Example: instead of 'join the records from both tables', say 'combine sales with customer info'."
+        ]
+        return "\n".join(feedback_lines)
     
     def _build_unused_tables_feedback(self) -> Dict:
         """Build feedback message for unused tables."""

@@ -39,10 +39,10 @@ class SQLValidator(QueryValidator):
 
         masked = _LITERAL_RE.sub(_stash, query)
 
-        # 2. Run the transformation on literal-free text.
-        masked = self._fix_agg_core(masked)
+        ## 2. Run the transformation on literal-free text.
+        #masked = self._fix_agg_core(masked)
 
-        # 3. Restore the original literals.
+        ## 3. Restore the original literals.
         def _restore(m: re.Match) -> str:
             return literals[int(m.group(1))]
 
@@ -120,7 +120,7 @@ class SQLValidator(QueryValidator):
     # ------------------------------------------------------------------
     # _execute_query
     # ------------------------------------------------------------------
-    def _execute_query(self, query: str) -> None:
+    def _execute_query(self, query: str) -> Any:
         con = duckdb.connect(database=":memory:")
         try:
             for df, name in zip(self.dataframes, self.table_names):
@@ -131,7 +131,8 @@ class SQLValidator(QueryValidator):
                 query.rstrip(";").rstrip(),
                 flags=re.IGNORECASE,
             ).rstrip()
-            con.execute(sanitized + " LIMIT 1")
+            result = con.execute(sanitized + " LIMIT 100").df()
+            return result
 
         except duckdb.ParserException as e:
             raise ValueError(
@@ -166,12 +167,27 @@ class SQLValidator(QueryValidator):
         finally:
             con.close()
 
-    def _get_language_specific_rules(self) -> List[str]:
-        return [
-            "- Column names must exactly match the schema.",
-            "- Amount may be stored as text; CAST to DOUBLE when using SUM or AVG.",
-            f"- Available tables: {', '.join(self.table_names)}",
-        ]
+    def _build_empty_result_feedback(self) -> str:
+        return "\n".join([
+            "The query returned 0 rows.",
+            "This usually means a JOIN or WHERE condition matched nothing due to case or type mismatches.",
+            "Suggestions:",
+            "  1. String join keys: normalize casing on both sides using LOWER():",
+            "       JOIN table2 ON LOWER(table1.key) = LOWER(table2.key)",
+            "  2. String filters: wrap the column and the literal in LOWER():",
+            "       WHERE LOWER(column_name) = 'expected value'",
+            "  3. Numeric columns stored as text: cast before comparing or aggregating:",
+            "       TRY_CAST(column_name AS DOUBLE)",
+            "  4. Date/range filters: verify that the range or category value actually exists in the data.",
+            "Rewrite the query applying LOWER() or TRY_CAST() where relevant.",
+        ])
+
+    #def _get_language_specific_rules(self) -> List[str]:
+    #    return [
+    #        "- Column names must exactly match the schema.",
+    #        "- Amount may be stored as text; CAST to DOUBLE when using SUM or AVG.",
+    #        f"- Available tables: {', '.join(self.table_names)}",
+    #    ]
 
     def _get_language_name(self) -> str:
         return "SQL"

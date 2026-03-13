@@ -19,7 +19,7 @@ class PandasValidator(QueryValidator):
     def _preprocess_query(self, query: str) -> str:
         return self.clean_pandas(query)
 
-    def _execute_query(self, query: str) -> None:
+    def _execute_query(self, query: str) -> Any:
         safe_builtins = {
             'abs': abs, 'min': min, 'max': max, 'sum': sum,
             'len': len, 'range': range, 'enumerate': enumerate,
@@ -46,8 +46,31 @@ class PandasValidator(QueryValidator):
         sys.stderr = StringIO()
 
         try:
-            compiled_code = compile(query, '<string>', 'exec')
-            exec(compiled_code, local_namespace)
+            # Split into statements; execute all but capture the last expression.
+            statements = [s.strip() for s in query.split(';') if s.strip()]
+            if not statements:
+                return None
+
+            # Execute all statements except the last.
+            for stmt in statements[:-1]:
+                compiled_code = compile(stmt, '<string>', 'exec')
+                exec(compiled_code, local_namespace)
+
+            # Try to eval the last statement to capture a DataFrame result.
+            last = statements[-1]
+            try:
+                result = eval(last, local_namespace)
+                return result
+            except SyntaxError:
+                # Last statement is not an expression (e.g. an assignment) — exec it.
+                compiled_code = compile(last, '<string>', 'exec')
+                exec(compiled_code, local_namespace)
+                # Try to find the most recently assigned DataFrame in local scope.
+                for val in reversed(list(local_namespace.values())):
+                    if isinstance(val, (pd.DataFrame, pd.Series)):
+                        return val
+                return None
+
         except KeyError as e:
             raise KeyError(
                 f'Column {str(e)} not found at runtime.\n\n'
@@ -67,7 +90,23 @@ class PandasValidator(QueryValidator):
             sys.stdout = old_stdout
             sys.stderr = old_stderr
 
-    def _get_language_specific_rules(self) -> List[str]:
+    def _build_empty_result_feedback(self) -> str:
+        return "\n".join([
+            "The query returned an empty DataFrame (0 rows).",
+            "This usually means a merge or filter condition matched nothing due to case or type mismatches.",
+            "Suggestions:",
+            "  1. String join keys: apply .str.lower() on BOTH sides before merging:",
+            "       df1.merge(df2, left_on=df1['key'].str.lower(), right_on=df2['key'].str.lower())",
+            "     or use .assign() before chaining:",
+            "       df1.assign(_key=df1['key'].str.lower()).merge(",
+            "           df2.assign(_key=df2['key'].str.lower()), on='_key', ...)",
+            "  2. Numeric columns stored as strings: cast with .astype(float) before filtering or aggregating.",
+            "  3. Boolean filters: check that the condition is not accidentally excluding all rows",
+            "     (e.g. a date range or category value that does not exist in the data).",
+            "Rewrite the query applying these normalizations where relevant.",
+        ])
+
+
         return [
             '- Column names must exactly match the DataFrame schema.',
             '- Use correct pandas/polars syntax (e.g., df[\'column\'] for pandas, df[\'column\'] for polars).',

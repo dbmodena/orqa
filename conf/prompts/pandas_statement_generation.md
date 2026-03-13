@@ -21,6 +21,18 @@ All DataFrames are PRE-LOADED and AVAILABLE:
 - Create correct Python and Pandas code only
 - Prefer method chaining for clarity and efficiency
 
+### Merge/Join Rules
+When merging or joining DataFrames, ALWAYS apply `.str.lower()` to string-type merge keys on BOTH sides before joining:
+```python
+df1.merge(df2, left_on="key_col_1".str.lower(), right_on="key_col_2".str.lower(), ...)
+# or, if mutating is needed before chaining:
+df1.assign(key=df1["key_col"].str.lower()).merge(
+    df2.assign(key=df2["key_col"].str.lower()),
+    on="key", ...
+)
+```
+This prevents silent mismatches caused by inconsistent casing in string keys.
+
 ### Natural Language Questions
 ✓ Business terms (customers, revenue)  
 ✓ Outcome-focused (insights, trends)  
@@ -33,8 +45,18 @@ All DataFrames are PRE-LOADED and AVAILABLE:
 - Each uses all provided tables
 - Each follows match definitions exactly
 - Each has semantically aligned NL question
-- Each has a difficulty value that can be "simple", "hard" or challenging
+- Each has a difficulty value that can be "simple", "hard" or "challenging"
+- Each has a **motivation**: a concise business justification (1–2 sentences) explaining *why* this question is analytically valuable and what decision or insight it supports
 - All conform to Pydantic schema
+- Each has a **motivation**: a concise justification (2–3 sentences) explaining *why* this question is analytically valuable, *why each table is necessary*, and *why the specified join/union strategy is the correct way to combine them
+
+### Motivation Guidelines
+The motivation must:
+- Be written in business language, not technical terms
+- Explain the analytical purpose (e.g., identifying churn risk, optimizing revenue, benchmarking performance)
+- Justify why each dataset is required and what unique information it contributes to answering the question
+- Justify why the tables are combined in the specified way (join vs union, which keys, what the combination unlocks)
+- Be distinct across the three queries — avoid repeating the same business rationale
 
 ### Pandas query difficulty levels:
 - Simple: single DataFrame filtering, column selection, simple `sort_values`/`head`, ≤1 aggregation (`sum/mean/count`).  
