@@ -246,9 +246,9 @@ def generate_statements(cfg:OrQAConfig):
         source=cfg.source,
     )
     ### first we generate the random walks
-    generate_random_walks(cfg)
+    #generate_random_walks(cfg)
     #cfg.candidates_discovery.proposed_tasks_path
-    process_all_candidates(cfg.candidates_discovery.candidates_path, cfg.candidates_discovery.tasks_results_path, cfg.datasets_path, cfg.statement_generation.query_candidates_path)
-    for kind in ["PANDAS","SQL"]:#cfg.statement_generation.kind
-        create_statements(cfg.llm_config_path.joinpath("litellm.yaml"),cfg.datasets_path, cfg.statement_generation.query_candidates_path,cfg.statement_generation.queries_path, kind,cfg.statement_generation.max_cols, datasets_metadata=metadata,bad_tokens=cfg.statement_generation.bad_tokens)
+    #process_all_candidates(cfg.candidates_discovery.candidates_path, cfg.candidates_discovery.tasks_results_path, cfg.datasets_path, cfg.statement_generation.query_candidates_path)
+    #for kind in ["SQL"]:#cfg.statement_generation.kind
+    create_statements(cfg.llm_config_path.joinpath("litellm.yaml"),cfg.datasets_path, cfg.statement_generation.query_candidates_path,cfg.statement_generation.queries_path, "PANDAS" ,cfg.statement_generation.max_cols, datasets_metadata=metadata,bad_tokens=cfg.statement_generation.bad_tokens)
     

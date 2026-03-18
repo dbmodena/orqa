@@ -131,7 +131,7 @@ class LLMClient:
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                print(f"Attempt {attempt + 1}/{self.max_retries}...")
+                #print(f"Attempt {attempt + 1}/{self.max_retries}...")
                 response = self.router.completion(**completion_args)
                 usage = response["usage"]
                 usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
@@ -139,7 +139,7 @@ class LLMClient:
                 usage_total["total_tokens"] += usage.get("total_tokens", 0)
                 content = response["choices"][0]["message"]["content"]
                 last_content = content
-                print(f"✓ Success on attempt {attempt + 1}\n")
+                #print(f"✓ Success on attempt {attempt + 1}\n")
                 return last_content, usage_total
             except Exception as e:
                 last_error = e
@@ -150,9 +150,9 @@ class LLMClient:
                     print(f"Retrying in {self.retry_delay} seconds...\n")
                     time.sleep(self.retry_delay)
         # All retries exhausted
-        print(f"\n❌ Failed after {self.max_retries} attempts")
-        print(f"Last error: {last_error}")
-        if last_content and not self.raw:
-            print(f"\nLast response preview:\n{last_content[:300]}...\n")
+        #print(f"\n❌ Failed after {self.max_retries} attempts")
+        #print(f"Last error: {last_error}")
+        #if last_content and not self.raw:
+        #    print(f"\nLast response preview:\n{last_content[:300]}...\n")
 
         return {}, usage_total

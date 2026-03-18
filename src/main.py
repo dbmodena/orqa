@@ -70,8 +70,8 @@ def nyc():
     # socrata_cleaning(cfg)
     # create_blend_index(cfg)
     # candidates_discovery(cfg)
-    generate_statements(cfg)
-    #generate_response(cfg)
+    # generate_statements(cfg)
+    generate_response(cfg)
 
 
 def main():

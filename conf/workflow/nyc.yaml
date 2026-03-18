@@ -95,4 +95,6 @@ tasks:
     kind: "SQL"
     max_cols: 10
     bad_tokens: ['s','None','R']
-    max_response_tokens: 500
+    max_response_tokens: 300
+    max_memory_usage: 512
+    max_pool_time: 60

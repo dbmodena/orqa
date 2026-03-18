@@ -4,19 +4,98 @@ import polars as pl
 from typing import List, Dict, Tuple, Any
 from .QueryValidator import QueryValidator
 import re
-import json
-
 # Matches any single-quoted SQL string literal, including '' escapes inside.
 _LITERAL_RE = re.compile(r"'(?:''|[^'])*'")
 
+UNAUTHORIZED_SQL_COMMANDS = [
+    # Memory/config manipulation
+    'set memory_limit', 'set threads', 'set max_memory',
+    'set worker_threads', 'pragma', 'set enable',
+
+    # File I/O (all valid and dangerous in DuckDB)
+    'copy ', 'export database', 'import database',
+    'read_csv', 'read_parquet', 'read_json', 'read_csv_auto',
+    'attach ', 'detach ',
+
+    # Extension loading
+    'load ', 'install ',
+
+    # DDL - schema modification
+    'create table', 'create view', 'create index',
+    'drop table', 'drop view', 'drop index',
+    'alter table', 'truncate',
+
+    # DML - data modification
+    'insert into', 'update ', 'delete from',
+
+    # System access
+    'information_schema', 'pg_', 'shell(', 'system(',
+    'call dbms', 'exec ',
+]
+SQL_CARTESIAN_PATTERNS = [
+    # FROM with multiple tables and no JOIN keyword
+    (
+        r'\bFROM\b[^;]+,[^;]+\bWHERE\b',
+        "Implicit cross join via comma-separated tables in FROM clause"
+    ),
+    # Explicit CROSS JOIN
+    (
+        r'\bCROSS\s+JOIN\b',
+        "Explicit CROSS JOIN detected"
+    ),
+    # JOIN with no ON or USING clause (e.g. JOIN table WHERE ...)
+    (
+        r'\bJOIN\s+\w+\s+(?!AS\s+\w+\s*)(?!ON\b)(?!USING\b)\b(?:WHERE|GROUP|ORDER|LIMIT|LEFT|RIGHT|INNER|OUTER|;|$)',
+        "JOIN without ON or USING clause"
+    ),
+    # FROM with multiple comma-separated tables and no WHERE at all
+    (
+        r'\bFROM\s+\w+\s*,\s*\w+(?:\s*,\s*\w+)*\s*(?:GROUP|ORDER|LIMIT|;|$)',
+        "Multiple tables in FROM with no WHERE/JOIN condition"
+    ),
+    # USING or ON clause that always evaluates to true: ON 1=1
+    (
+        r'\bON\s+1\s*=\s*1\b',
+        "Always-true JOIN condition (ON 1=1)"
+    ),
+]
 
 class SQLValidator(QueryValidator):
     """Validator for SQL queries."""
 
     def _preprocess_query(self, query: str) -> str:
+        self._check_banned_sql_commands(query)
+        query = self._strip_set_statements(query)
+        warnings = self.check_sql_cartesian(query)
+        if warnings:
+            raise ValueError(
+                "Potentially dangerous query — possible Cartesian product detected:\n"
+                + "\n".join(f"  - {w}" for w in warnings)
+                + "\nRewrite using explicit JOIN ... ON conditions."
+            )
         query_code = self.remove_redundant_aliases(query)
         query_code = self.fix_aggregates(query_code)
         return query_code.replace("`", '"')
+    
+    def _check_banned_sql_commands(self, query: str) -> None:
+        query_lower = query.lower()
+        found = [cmd for cmd in UNAUTHORIZED_SQL_COMMANDS if cmd in query_lower]
+        if found:
+            raise ValueError(
+                f"Query contains unauthorized SQL commands: {', '.join(found)}\n"
+                "These commands are not permitted for security and stability reasons."
+            )
+    def check_sql_cartesian(self,query: str) -> list[str]:
+        warnings = []
+        for pattern, message in SQL_CARTESIAN_PATTERNS:
+            if re.search(pattern, query, re.IGNORECASE | re.DOTALL):
+                warnings.append(message)
+        return warnings
+    
+    def _strip_set_statements(self, query: str) -> str:
+        """Remove any SET configuration statements from the query."""
+        # Matches SET ... ; at the start or anywhere in the query
+        return re.sub(r'\bSET\s+\w+\s*=\s*[^;]+;?\s*', '', query, flags=re.IGNORECASE).strip()
 
     # ------------------------------------------------------------------
     # fix_aggregates
@@ -118,10 +197,12 @@ class SQLValidator(QueryValidator):
         return pattern.sub(r'\1 \2', query)
 
     # ------------------------------------------------------------------
-    # _execute_query
+    # _run_query
     # ------------------------------------------------------------------
-    def _execute_query(self, query: str) -> Any:
+    def _run_query(self, query: str) -> Any:
         con = duckdb.connect(database=":memory:")
+        con.execute(f"SET memory_limit='{self.mem_limit / (1024 ** 2)}MB'")
+        con.execute("SET threads=2")
         try:
             for df, name in zip(self.dataframes, self.table_names):
                 con.register(name, df)

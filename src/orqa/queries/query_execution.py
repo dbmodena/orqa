@@ -29,7 +29,7 @@ class QueryExecutor:
         self.datasets_path = Path(datasets_path)
         self.bad_tokens = bad_tokens
 
-    def execute(self, entry: dict, query: dict) -> pd.DataFrame | None:
+    def execute(self, entry: dict, query: dict,query_kind:str) -> pd.DataFrame | None:
         """
         Execute a single query dict (as found inside entry["data"]["queries"])
         using the table mapping defined in entry["tables"].
@@ -37,17 +37,16 @@ class QueryExecutor:
         Returns a pandas DataFrame with the query result, or None on failure.
         """
         tables_map: dict[str, str] = entry.get("tables", {})
-        query_type: str = query.get("query_type", "sql").lower()
         code: str = query.get("code", "")
 
         dataframes = self._load_tables(tables_map)
 
-        if query_type == "sql":
+        if query_kind.lower() == "sql":
             return self._execute_sql(code, dataframes)
-        elif query_type in ("pandas", "python"):
+        elif query_kind.lower() in ("pandas", "python"):
             return self._execute_pandas(code, dataframes)
         else:
-            raise ValueError(f"Unknown query_type: '{query_type}'")
+            raise ValueError(f"Unknown query_type: '{query_kind}'")
 
     def _load_tables(self, tables_map: dict[str, str]) -> dict[str, pd.DataFrame]:
         dataframes: dict[str, pd.DataFrame] = {}
@@ -86,8 +85,16 @@ class QueryExecutor:
                 "Pandas query did not assign a 'result' variable. "
                 "Make sure the generated code ends with `result = …`."
             )
-        if not isinstance(result, pd.DataFrame):
-            result = pd.DataFrame(result)
+        if isinstance(result, pd.DataFrame):
+            return result
+        elif isinstance(result, pd.Series):
+            result = result.to_frame()  # Convert Series to DataFrame
+        elif isinstance(result, (int, float, str, bool)):
+            result = pd.DataFrame([{"result": result}])  # Wrap scalar into a 1-row DataFrame
+        elif isinstance(result, list):
+            result = pd.DataFrame(result)  # Wrap list
+        else:
+            result = pd.DataFrame([result])  # Fallback: wrap into single-row DF
         return result
     
 
