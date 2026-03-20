@@ -143,6 +143,15 @@ class Table(BaseModel):
             "and why the query cannot be answered without it."
         )
     )
+    columns_involved: List[str] = Field(
+        ...,
+        description=(
+            "The minimal subset of columns from this table strictly necessary to answer "
+            "the question. Include only columns referenced in filters, joins, aggregations, "
+            "or the final output — omit anything not directly used."
+        )
+    )
+
 
 
 

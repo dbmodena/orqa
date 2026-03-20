@@ -32,13 +32,14 @@ This prevents silent mismatches caused by inconsistent casing in string keys.
 ✗ No SQL operations mentioned
 
 ### Generate
-3 queries of incremental difficulty (simple, hard and challenging) where:
+3 queries of incremental difficulty (easy, medium and hard) where:
 - Each implements the mandatory operation type
 - Each uses all provided tables
 - Each follows match definitions exactly
 - Each has semantically aligned NL question
-- Each has a difficulty value that can be "simple", "hard" or "challenging"
+- Each has a difficulty value that can be "easy", "medium" or "hard"
 - Each has a **motivation**: a concise business justification (1–2 sentences) explaining *why* this question is analytically valuable and what decision or insight it supports
+- Each table entry includes only the minimal column subset actually used to answer the question
 - All conform to Pydantic schema
 
 ### Motivation Guidelines
@@ -48,9 +49,9 @@ The motivation must:
 - Be distinct across the three queries — avoid repeating the same business rationale
 
 ### SQL difficulty levels
-- Simple: single-table `SELECT`, basic `WHERE`, optional `ORDER BY`/`LIMIT`, ≤1 aggregate, no subqueries.  
-- Hard: multi-table `JOIN`, `GROUP BY`+`HAVING`, multiple aggregates, nested filters, one non-correlated subquery or `UNION`/`INTERSECT`/`EXCEPT`.  
-- Challenging: correlated or multi-level subqueries, window functions, complex set ops, `CASE`, CTEs (incl. recursive), or combinations of several advanced features.
+- Easy: single-table `SELECT`, basic `WHERE`, optional `ORDER BY`/`LIMIT`, ≤1 aggregate, no subqueries.  
+- Medium: multi-table `JOIN`, `GROUP BY`+`HAVING`, multiple aggregates, nested filters, one non-correlated subquery or `UNION`/`INTERSECT`/`EXCEPT`.  
+- Hard: correlated or multi-level subqueries, window functions, complex set ops, `CASE`, CTEs (incl. recursive), or combinations of several advanced features.
 
 ### Tables involved in the queries
 Realize the queries and their natural language counterparts using the following tables. 

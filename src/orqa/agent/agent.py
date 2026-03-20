@@ -55,12 +55,12 @@ class CandidatesDiscoveryAgent:
                 column_typings=column_typings,
             )
 
-            print("=" * 60)
-            print("TASKS PROPOSAL RESULTS")
+            #print("=" * 60)
+            #print("TASKS PROPOSAL RESULTS")
             #print("=" * 60)
             #print(prompt_str)
             #print("=" * 60)
-            print(result)
+            #print(result)
             #print("=" * 60)
             #print(tokens)
 

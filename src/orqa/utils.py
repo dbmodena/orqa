@@ -223,8 +223,8 @@ def prepare_dataset(
     bad_tokens: list = []
 ) -> tuple[dict, dict]:
 
-    df = pd_read_dataset(dataset_path)
-
+    df = pd_read_dataset(dataset_path,na_values=bad_tokens)
+    df.dropna()
     # Normalize column names to handle case/whitespace mismatches
     col_map = {c.strip().lower(): c for c in df.columns}
     resolved_cols = [
@@ -234,11 +234,11 @@ def prepare_dataset(
     ]
 
     # Remove rows containing any bad token across all columns
-    if bad_tokens:
-        mask = ~df.apply(
-            lambda col: col.astype(str).isin([str(t) for t in bad_tokens])
-        ).any(axis=1)
-        df = df[mask]
+    #if bad_tokens:
+    #    mask = ~df.apply(
+    #        lambda col: col.astype(str).isin([str(t) for t in bad_tokens])
+    #    ).any(axis=1)
+    #    df = df[mask]
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
         if len(df.columns) > limit_to_n_columns:

@@ -176,7 +176,7 @@ class Query(BaseModel):
     difficulty: str = Field(
         ...,
         description=(
-            "Query complexity from simple, hard or challenging. "
+            "Query complexity from easy, medium or hard. "
         )
     )
 
