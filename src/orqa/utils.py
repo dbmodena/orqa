@@ -223,7 +223,7 @@ def prepare_dataset(
     bad_tokens: list = []
 ) -> tuple[dict, dict]:
 
-    df = pd_read_dataset(dataset_path,na_values=bad_tokens)
+    df = pd_read_dataset(dataset_path,opts={"csv": {"na_values": bad_tokens, "low_memory":False},"parquet": {"na_values": bad_tokens, "low_memory":False}})
     df.dropna()
     # Normalize column names to handle case/whitespace mismatches
     col_map = {c.strip().lower(): c for c in df.columns}
@@ -254,14 +254,17 @@ def prepare_dataset(
     dataset_info["dataset_name"] = dataset_path.stem
     return df, dataset_info
 
-def remove_bad_tokens(df,bad_tokens):
-    if bad_tokens:
-        mask = ~df.apply(
-            lambda col: col.astype(str).isin([str(t) for t in bad_tokens])
-        ).any(axis=1)
-        df = df[mask]
-    return df 
-
+#def remove_bad_tokens(df,bad_tokens):
+#    if bad_tokens:
+#        mask = ~df.apply(
+#            lambda col: col.astype(str).isin([str(t) for t in bad_tokens])
+#        ).any(axis=1)
+#        df = df[mask]
+#    return df 
+#def remove_bad_tokens(df,bad_tokens):
+#    df = pd_read_dataset(dataset_path,na_values=bad_tokens)
+#    df.dropna()
+#    return df
 
 def save_json(data, path: Path, indent: int = 2) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

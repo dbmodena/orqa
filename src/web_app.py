@@ -4,8 +4,6 @@ web_app.py — Browser UI for the OrQA pipeline.
 
 Run:
     uvicorn web_app:app --reload --port 8000
-
-Static files:  ./static/index.html  |  ./static/style.css  |  ./static/app.js
 """
 
 from __future__ import annotations
@@ -23,17 +21,15 @@ from fastapi.staticfiles import StaticFiles
 load_dotenv()
 os.environ["DATADIR"] = "D:\\"
 
-# ── Project imports ───────────────────────────────────────────────────────────
 from conf import load_config
 from orqa.statement_generation import stream_generate_statements
 from orqa.statement_judge import QueryResponsePipeline
 from orqa.utils import load_json
 
-_HERE         = Path(os.path.dirname(__file__))   # src/
-_PROJECT_ROOT = _HERE.parent                       # orqa/
+_HERE         = Path(os.path.dirname(__file__))
+_PROJECT_ROOT = _HERE.parent
 _STATIC_DIR   = _HERE / "static"
 
-# ── Source registry ───────────────────────────────────────────────────────────
 _SOURCE_REGISTRY = [
     (
         "nyc",
@@ -94,7 +90,24 @@ def _load_all_sources() -> dict[str, SourceEntry]:
 _SOURCES: dict[str, SourceEntry] = _load_all_sources()
 
 
-# ── Readiness helpers ─────────────────────────────────────────────────────────
+# ── Kind helper ───────────────────────────────────────────────────────────────
+
+def _cfg_kind(cfg) -> str:
+    """
+    Read cfg.statement_generation.kind directly.
+    Falls back to 'PANDAS' if the attribute is missing or falsy.
+    Works for both instance and class attributes.
+    """
+    sg = cfg.statement_generation
+    # Try direct attribute access — works for class attrs, instance attrs, properties
+    try:
+        kind = sg.kind
+    except AttributeError:
+        kind = None
+    return (kind or "PANDAS").upper()
+
+
+# ── Readiness ─────────────────────────────────────────────────────────────────
 
 def _required_files(entry: SourceEntry) -> list[dict]:
     if entry.error or entry.cfg is None:
@@ -125,6 +138,7 @@ def _required_files(entry: SourceEntry) -> list[dict]:
 
 
 def _statements_info(entry: SourceEntry) -> dict:
+    """Count queries across ALL languages stored in the file."""
     if entry.error or entry.cfg is None:
         return {"exists": False, "query_count": 0}
     queries_path: Path = entry.cfg.statement_generation.queries_path
@@ -134,8 +148,8 @@ def _statements_info(entry: SourceEntry) -> dict:
         data  = load_json(queries_path)
         count = 0
         for model_entries in data.values():
-            for kind_key, kind_entries_map in model_entries.items():
-                for ent in kind_entries_map.values():
+            for kind_entries in model_entries.values():
+                for ent in kind_entries.values():
                     queries = ent.get("data", {}).get("queries", [])
                     if queries:
                         count += len(queries)
@@ -144,44 +158,42 @@ def _statements_info(entry: SourceEntry) -> dict:
         return {"exists": False, "query_count": 0}
 
 
-def _generation_status(entry: SourceEntry, kind: str) -> dict:
-    """
-    For a given language kind, return how many matches have been processed
-    vs the total in the candidates file, so the UI can offer a resume option.
-    Returns:
-        { "last_idx": int, "total": int, "is_complete": bool, "done_count": int }
-    """
-    empty = {"last_idx": -1, "total": 0, "is_complete": False, "done_count": 0}
+def _generation_status(entry: SourceEntry) -> dict:
+    """Progress for cfg.statement_generation.kind only."""
+    empty = {"kind": "PANDAS", "last_idx": -1, "total": 0,
+             "is_complete": False, "done_count": 0, "query_count": 0}
     if entry.error or entry.cfg is None:
         return empty
-    cfg = entry.cfg
+    cfg  = entry.cfg
+    kind = _cfg_kind(cfg)
     try:
         candidates_path: Path = cfg.statement_generation.query_candidates_path
         total = len(load_json(candidates_path)) if candidates_path.exists() else 0
     except Exception:
         total = 0
-
     queries_path: Path = cfg.statement_generation.queries_path
     if not queries_path.exists() or total == 0:
-        return {**empty, "total": total}
-
+        return {**empty, "kind": kind, "total": total}
     try:
         data = load_json(queries_path)
         done_indices: set[int] = set()
+        query_count: int = 0
         for model_entries in data.values():
-            for stored_idx in model_entries.get(kind, {}).keys():
+            for stored_idx, ent in model_entries.get(kind, {}).items():
                 done_indices.add(int(stored_idx))
-        done_count  = len(done_indices)
-        last_idx    = max(done_indices) if done_indices else -1
-        is_complete = done_count >= total
+                query_count += len(ent.get("data", {}).get("queries", []))
+        done_count = len(done_indices)
+        last_idx   = max(done_indices) if done_indices else -1
         return {
+            "kind":        kind,
             "last_idx":    last_idx,
             "total":       total,
-            "is_complete": is_complete,
+            "is_complete": done_count >= total,
             "done_count":  done_count,
+            "query_count": query_count,
         }
     except Exception:
-        return {**empty, "total": total}
+        return {**empty, "kind": kind, "total": total}
 
 
 def _get_source_or_404(source: str) -> SourceEntry:
@@ -194,6 +206,7 @@ def _get_source_or_404(source: str) -> SourceEntry:
 
 
 def _read_queries(cfg) -> list[dict]:
+    """Return queries for ALL languages stored in the file."""
     queries_path: Path = cfg.statement_generation.queries_path
     if not queries_path.exists():
         return []
@@ -223,7 +236,7 @@ def _read_queries(cfg) -> list[dict]:
 
 
 def _find_query_in_store(cfg, entry_key: str, query_id: int):
-    """Locate and return (q_entry dict, query dict, language str) from the JSON store."""
+    """Search across ALL languages."""
     data = load_json(cfg.statement_generation.queries_path)
     for _model_key, model_entries in data.items():
         for kind_key, kind_entries in model_entries.items():
@@ -245,14 +258,12 @@ app = FastAPI(title="OrQA Pipeline UI")
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 
-# ── SSE helper ────────────────────────────────────────────────────────────────
-
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-async def _statements_to_sse(cfg, kind: str = "PANDAS", resume_from: int = 0):
-    """Wrap stream_generate_statements into SSE text chunks."""
+async def _statements_to_sse(cfg, resume_from: int = 0):
+    kind = _cfg_kind(cfg)
     async for event in stream_generate_statements(cfg, kind=kind, resume_from=resume_from):
         yield _sse(event["type"], event)
 
@@ -266,41 +277,72 @@ async def index() -> FileResponse:
 
 @app.get("/api/sources")
 async def get_sources() -> list[dict]:
-    return [
-        {
+    result = []
+    for e in _SOURCES.values():
+        kind = _cfg_kind(e.cfg) if e.cfg and not e.error else None
+        gen  = _generation_status(e) if e.cfg and not e.error else {
+            "kind": kind or "PANDAS", "last_idx": -1, "total": 0,
+            "is_complete": False, "done_count": 0,
+        }
+        result.append({
             "id":         e.id,
             "label":      e.label,
             "type":       e.type,
             "error":      e.error,
+            "kind":       kind,       # <-- cfg.statement_generation.kind
             "files":      _required_files(e),
             "statements": _statements_info(e),
-            "generation": {
-                kind: _generation_status(e, kind)
-                for kind in ["PANDAS", "SQL"]
-            },
-        }
-        for e in _SOURCES.values()
-    ]
+            "generation": gen,
+        })
+    return result
+
+
+@app.get("/api/debug-kind/{source}")
+async def debug_kind(source: str) -> dict:
+    """
+    Call this in your browser to verify what _cfg_kind is reading:
+        /api/debug-kind/nyc
+    """
+    e = _SOURCES.get(source)
+    if e is None:
+        return {"error": f"Unknown source: {source}"}
+    if e.error:
+        return {"error": e.error}
+    cfg = e.cfg
+    sg  = cfg.statement_generation
+
+    # Inspect the statement_generation object thoroughly
+    kind_direct   = getattr(sg, "kind", "<<AttributeError>>")
+    sg_type       = type(sg).__name__
+    sg_dict       = vars(sg) if hasattr(sg, "__dict__") else "<<no __dict__>>"
+    sg_class_vars = {k: v for k, v in vars(type(sg)).items()
+                     if not k.startswith("__") and not callable(v)}
+
+    return {
+        "source":              source,
+        "cfg_kind_result":     _cfg_kind(cfg),
+        "kind_direct":         str(kind_direct),
+        "statement_generation_type":      sg_type,
+        "statement_generation_instance_vars": str(sg_dict),
+        "statement_generation_class_vars":    str(sg_class_vars),
+    }
 
 
 @app.post("/api/run/statements/{source}")
-async def run_statements(source: str, kind: str = "PANDAS") -> StreamingResponse:
+async def run_statements(source: str) -> StreamingResponse:
     entry = _get_source_or_404(source)
     return StreamingResponse(
-        _statements_to_sse(entry.cfg, kind=kind, resume_from=0),
+        _statements_to_sse(entry.cfg, resume_from=0),
         media_type="text/event-stream",
     )
 
 
 @app.post("/api/resume/statements/{source}")
-async def resume_statements(source: str, kind: str = "PANDAS") -> StreamingResponse:
-    """Resume generation from the last unprocessed match index."""
+async def resume_statements(source: str) -> StreamingResponse:
     entry  = _get_source_or_404(source)
-    status = _generation_status(entry, kind)
-    # resume_from = last successfully stored index + 1
-    resume_from = status["last_idx"] + 1
+    status = _generation_status(entry)
     return StreamingResponse(
-        _statements_to_sse(entry.cfg, kind=kind, resume_from=resume_from),
+        _statements_to_sse(entry.cfg, resume_from=status["last_idx"] + 1),
         media_type="text/event-stream",
     )
 
@@ -313,64 +355,52 @@ async def get_queries(source: str) -> list[dict]:
 
 @app.get("/api/debug/{source}")
 async def debug_source(source: str) -> dict:
-    """
-    Returns a breakdown of the queries JSON structure so you can spot
-    where counts diverge between _statements_info and _read_queries.
-    Hit this in the browser: /api/debug/nyc
-    """
     entry = _get_source_or_404(source)
     cfg   = entry.cfg
     queries_path: Path = cfg.statement_generation.queries_path
     if not queries_path.exists():
         return {"error": f"File not found: {queries_path}"}
-
-    data     = load_json(queries_path)
-    summary  = {}
+    data        = load_json(queries_path)
+    summary     = {}
     total_all   = 0
     total_shown = 0
-
     for model_key, model_entries in data.items():
         summary[model_key] = {}
         for kind_key, kind_entries in model_entries.items():
             summary[model_key][kind_key] = {}
             for entry_key, ent in kind_entries.items():
-                status  = ent.get("status", "MISSING")
                 queries = ent.get("data", {}).get("queries", [])
-                evicted = ent.get("data", {}) == {"__evicted__": True}
                 summary[model_key][kind_key][entry_key] = {
-                    "status":       status,
-                    "query_count":  len(queries),
-                    "evicted":      evicted,
+                    "status":      ent.get("status", "MISSING"),
+                    "query_count": len(queries),
                 }
                 total_all += len(queries)
-                if queries:       # same gate as fixed _read_queries
+                if queries:
                     total_shown += len(queries)
-
     return {
-        "queries_path": str(queries_path),
-        "total_queries_in_file":    total_all,
+        "queries_path":              str(queries_path),
+        "active_kind":               _cfg_kind(cfg),
+        "total_queries_in_file":     total_all,
         "total_queries_shown_in_ui": total_shown,
-        "breakdown": summary,
+        "breakdown":                 summary,
     }
 
 
 @app.post("/api/response/{source}/{entry_key}/{query_id}")
 async def generate_response(source: str, entry_key: str, query_id: int) -> dict:
-    """Execute query + generate NL response."""
     entry    = _get_source_or_404(source)
     pipeline = QueryResponsePipeline(entry.cfg)
-    q_entry, query, language = _find_query_in_store(entry.cfg, entry_key, query_id)
+    q_entry, query, kind = _find_query_in_store(entry.cfg, entry_key, query_id)
     if q_entry is None:
         raise HTTPException(status_code=404, detail=f"Query {entry_key}/{query_id} not found")
-    return await pipeline.run_single_async(q_entry, query, entry_key, language=language, generate_nl=True)
+    return await pipeline.run_single_async(q_entry, query, entry_key, language=kind, generate_nl=True)
 
 
 @app.post("/api/execute/{source}/{entry_key}/{query_id}")
 async def execute_query(source: str, entry_key: str, query_id: int) -> dict:
-    """Execute query only — returns DataFrame, skips NL generation."""
     entry    = _get_source_or_404(source)
     pipeline = QueryResponsePipeline(entry.cfg)
-    q_entry, query, language = _find_query_in_store(entry.cfg, entry_key, query_id)
+    q_entry, query, kind = _find_query_in_store(entry.cfg, entry_key, query_id)
     if q_entry is None:
         raise HTTPException(status_code=404, detail=f"Query {entry_key}/{query_id} not found")
-    return await pipeline.run_single_async(q_entry, query, entry_key, language=language, generate_nl=False)
+    return await pipeline.run_single_async(q_entry, query, entry_key, language=kind, generate_nl=False)

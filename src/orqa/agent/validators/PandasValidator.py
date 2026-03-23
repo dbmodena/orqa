@@ -167,10 +167,10 @@ class PandasValidator(QueryValidator):
     # Execution — sandbox wraps _run_query via base _execute_query,
     # so we only need to patch pandas inside _run_query itself.
     # ------------------------------------------------------------------
-    def _run_query(self, query: str) -> Any:
+    def _run_query(self, query: str,dataframes:list) -> Any:
         restore = _patch_pandas(max_rows=self.MAX_RESULT_ROWS, max_mb=self.mem_limit_mb)
         try:
-            return self._exec(query)
+            return self._exec(query,dataframes)
         finally:
             restore()
 

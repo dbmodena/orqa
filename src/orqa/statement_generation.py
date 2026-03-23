@@ -193,7 +193,7 @@ def create_statements(
     csv_folder: Path,
     candidates_path: Path,
     output_path: Path,
-    kind: str = "PANDAS",
+    kind: str,
     max_cols: int = 15,
     datasets_metadata: dict | None = None,
     extension: str = "csv",
@@ -251,7 +251,7 @@ def create_statements(
 
 async def stream_generate_statements(
     cfg: OrQAConfig,
-    kind: str = "PANDAS",
+    kind: str,
     resume_from: int = 0,
 ) -> AsyncGenerator[dict, None]:
     """
@@ -375,7 +375,7 @@ def generate_statements(cfg: OrQAConfig) -> None:
         cfg.datasets_path,
         cfg.statement_generation.query_candidates_path,
         cfg.statement_generation.queries_path,
-        "PANDAS",
+        cfg.statement_generation.kind,
         cfg.statement_generation.max_cols,
         datasets_metadata=metadata,
         bad_tokens=cfg.statement_generation.bad_tokens,

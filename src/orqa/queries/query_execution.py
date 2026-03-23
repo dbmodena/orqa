@@ -39,8 +39,8 @@ class QueryExecutor:
         tables_map: dict[str, str] = entry.get("tables", {})
         code: str = query.get("code", "")
 
-        dataframes = self._load_tables(tables_map)
-
+        dataframes = self.prefilter_dataframes(self._load_tables(tables_map),query.get("tables", {}))
+        
         if query_kind.lower() == "sql":
             return self._execute_sql(code, dataframes)
         elif query_kind.lower() in ("pandas", "python"):
@@ -48,6 +48,18 @@ class QueryExecutor:
         else:
             raise ValueError(f"Unknown query_type: '{query_kind}'")
 
+
+    def prefilter_dataframes(self, dfs: dict[str, pd.DataFrame], tables: list) -> dict[str, pd.DataFrame]:
+        dataframes = {}
+        for table in sorted(tables, key=lambda t: t["name"]):
+            name = table["name"]
+            df = dfs[name]
+            if table["columns_involved"]:
+                dataframes[name] = df[table["columns_involved"]]
+            else:
+                dataframes[name] = df
+        return dataframes
+    
     def _load_tables(self, tables_map: dict[str, str]) -> dict[str, pd.DataFrame]:
         dataframes: dict[str, pd.DataFrame] = {}
         for alias, dataset_id in tables_map.items():
@@ -56,7 +68,10 @@ class QueryExecutor:
                 raise FileNotFoundError(
                     f"CSV file not found for table '{alias}': {csv_path}"
                 )
-            df = utils.remove_bad_tokens(pd.read_csv(csv_path, low_memory=False),self.bad_tokens)
+            #df = utils.remove_bad_tokens(pd.read_csv(csv_path, low_memory=False),self.bad_tokens)
+            df = utils.pd_read_dataset(csv_path,opts={"csv": {"na_values": self.bad_tokens, "low_memory":False},"parquet": {"na_values": self.bad_tokens, "low_memory":False}})
+
+            df.dropna()
             dataframes[alias] = df
         return dataframes
 

@@ -86,7 +86,7 @@ class QueryResponsePipeline:
         entry: dict,
         query: dict,
         entry_key: str,
-        language: str = "PANDAS",
+        language,
         max_result_rows: int = 10,
         generate_nl: bool = True,
     ) -> dict:

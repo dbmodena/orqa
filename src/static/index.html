@@ -7,6 +7,36 @@
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="/static/style.css"/>
+<style>
+/* ── Kind indicator ── */
+.kind-indicator {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 16px; padding: 12px 18px;
+  background: var(--accent-pale);
+  border: 1px solid #b3d4c8;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.kind-indicator svg { flex-shrink: 0; color: var(--accent); opacity: .75; }
+.kind-indicator-body {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.kind-indicator-label { color: var(--text-mid); font-size: 13px; }
+.kind-pill {
+  font-family: 'DM Mono', monospace;
+  font-size: 13px; font-weight: 700; letter-spacing: .06em;
+  color: var(--accent); background: #fff;
+  border: 1.5px solid var(--accent);
+  border-radius: 5px; padding: 1px 10px;
+}
+.kind-indicator code {
+  font-family: 'DM Mono', monospace; font-size: 11px;
+  color: var(--text-muted); background: var(--tag-bg);
+  padding: 1px 6px; border-radius: 3px;
+}
+/* ── Language tag on query cards ── */
+.tag-lang { background: var(--accent-pale); color: var(--accent); font-weight: 700; }
+</style>
 </head>
 <body>
 
@@ -45,18 +75,27 @@
 <!-- ── Main ── -->
 <main class="shell">
 
-  <!-- Source selector -->
   <div class="section-label">Data Sources</div>
   <div class="source-grid" id="sourceGrid"></div>
 
-  <!-- Work area (shown when source selected) -->
   <div id="workArea" style="display:none">
 
-    <!-- File readiness -->
     <div class="section-label" style="margin-top:40px">File Readiness</div>
     <div class="readiness-panel" id="readinessPanel"></div>
 
-    <!-- Existing / interrupted statements notice -->
+    <!-- ── THIS is what was missing ── -->
+    <div class="kind-indicator" id="kindIndicator" style="display:none">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <path d="M2 4h12M2 8h8M2 12h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <div class="kind-indicator-body">
+        <span class="kind-indicator-label">Generating</span>
+        <span class="kind-pill" id="kindPill">—</span>
+        <span class="kind-indicator-label">queries &nbsp;·&nbsp; <code>cfg.statement_generation.kind</code></span>
+      </div>
+    </div>
+
+    <!-- Banner -->
     <div class="exists-banner" id="existsBanner" style="display:none" data-state="complete">
       <div class="exists-icon" id="existsIcon"></div>
       <div class="exists-body">
@@ -66,24 +105,24 @@
       <div class="exists-actions" id="existsActions"></div>
     </div>
 
-    <!-- Confirm dialog (re-generate from scratch) -->
+    <!-- Confirm dialog -->
     <div class="confirm-backdrop" id="confirmBackdrop" style="display:none" onclick="closeConfirm()"></div>
     <div class="confirm-dialog"   id="confirmDialog"   style="display:none">
-      <div class="confirm-title">Re-generate from scratch?</div>
+      <div class="confirm-title">Confirm generation</div>
       <div class="confirm-body" id="confirmBody"></div>
       <div class="confirm-actions">
         <button class="btn btn-ghost"  onclick="closeConfirm()">Cancel</button>
-        <button class="btn btn-danger" id="confirmOkBtn">Yes, re-generate</button>
+        <button class="btn btn-danger" id="confirmOkBtn">Yes, proceed</button>
       </div>
     </div>
 
-    <!-- Run button row (shown when no existing statements) -->
+    <!-- Run row -->
     <div class="run-row" id="runRow">
-      <button class="btn btn-run" id="runBtn" disabled onclick="startStatements()">
+      <button class="btn btn-run" id="runBtn" disabled onclick="onRunClick()">
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
           <path d="M2.5 1.5l8 4.5-8 4.5V1.5z" fill="currentColor"/>
         </svg>
-        Run Statements
+        Run
       </button>
       <span class="run-hint" id="runHint">Select a source to begin</span>
     </div>
@@ -107,7 +146,6 @@
       <div class="log-box" id="logBox"></div>
     </div>
 
-    <!-- Done flash -->
     <div class="done-flash" id="doneFlash" style="display:none"></div>
 
     <!-- Queries -->
@@ -135,10 +173,9 @@
     </div>
 
   </div><!-- /workArea -->
-
 </main>
 
-<!-- ── Result modal ── -->
+<!-- Modal -->
 <div class="modal-backdrop" id="modalBackdrop" onclick="closeModal()" style="display:none"></div>
 <div class="modal" id="resultModal" style="display:none">
   <div class="modal-hdr">
@@ -148,9 +185,7 @@
     </div>
     <button class="modal-close" onclick="closeModal()">✕</button>
   </div>
-  <div class="modal-body" id="modalBody">
-    <!-- populated dynamically -->
-  </div>
+  <div class="modal-body" id="modalBody"></div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
