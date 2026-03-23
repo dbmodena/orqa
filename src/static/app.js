@@ -512,7 +512,7 @@ function renderQueries() {
 
     const div = document.createElement('div');
     div.className = 'qcard';
-    div.id = `card-${q.entry_key}-${q.query_id}`;
+    div.id = `card-${q.entry_key}-${q.query_id}-${q.language}`;
     div.innerHTML = `
       <div class="qcard-hdr">
         <span class="qcard-num">#${q.entry_key}.${q.query_id}</span>
@@ -526,9 +526,9 @@ function renderQueries() {
           </div>
         </div>
         <button class="btn-play ${hasResp ? 'done-play' : ''}"
-          id="playBtn-${q.entry_key}-${q.query_id}"
+          id="playBtn-${q.entry_key}-${q.query_id}-${q.language}"
           title="${hasResp ? 'View result' : 'Run query & generate response'}"
-          onclick="runQuery('${q.entry_key}', ${q.query_id})">
+          onclick="runQuery('${q.entry_key}', ${q.query_id}, '${q.language}')">
           ${playIcon}
         </button>
       </div>`;
@@ -537,17 +537,17 @@ function renderQueries() {
 }
 
 /* ── Single query execution ──────────────────────────────────────────────────── */
-async function runQuery(entryKey, queryId) {
-  const q           = allQueries.find(x => x.entry_key == entryKey && x.query_id == queryId);
+async function runQuery(entryKey, queryId, language) {
+  const q           = allQueries.find(x => x.entry_key == entryKey && x.query_id == queryId && x.language === language);
   const hasResponse = !!(q?.response);
-  const btn = document.getElementById(`playBtn-${entryKey}-${queryId}`);
+  const btn = document.getElementById(`playBtn-${entryKey}-${queryId}-${language}`);
   btn.disabled = true;
   btn.innerHTML = `<span class="spinner-sm"></span>`;
   openModalLoading(q, hasResponse ? 'Running query…' : 'Executing query & generating response…');
 
   const endpoint = hasResponse
-    ? `/api/execute/${activeSource}/${entryKey}/${queryId}`
-    : `/api/response/${activeSource}/${entryKey}/${queryId}`;
+    ? `/api/execute/${activeSource}/${entryKey}/${queryId}?language=${encodeURIComponent(language)}`
+    : `/api/response/${activeSource}/${entryKey}/${queryId}?language=${encodeURIComponent(language)}`;
 
   try {
     const res  = await fetch(endpoint, { method: 'POST' });
@@ -564,7 +564,7 @@ async function runQuery(entryKey, queryId) {
     if (data.response) {
       btn.classList.add('done-play');
       btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 7l3 3 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-      const tags = document.getElementById(`card-${entryKey}-${queryId}`)?.querySelector('.qcard-tags');
+      const tags = document.getElementById(`card-${entryKey}-${queryId}-${language}`)?.querySelector('.qcard-tags');
       if (tags && !tags.querySelector('.tag-done'))
         tags.insertAdjacentHTML('beforeend', '<span class="tag tag-done">✓ response</span>');
     }

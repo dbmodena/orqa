@@ -235,11 +235,13 @@ def _read_queries(cfg) -> list[dict]:
     return items
 
 
-def _find_query_in_store(cfg, entry_key: str, query_id: int):
-    """Search across ALL languages."""
+def _find_query_in_store(cfg, entry_key: str, query_id: int, language: str | None = None):
+    """Search across ALL languages, optionally filtered by language."""
     data = load_json(cfg.statement_generation.queries_path)
     for _model_key, model_entries in data.items():
         for kind_key, kind_entries in model_entries.items():
+            if language and kind_key != language:
+                continue
             q_entry = kind_entries.get(str(entry_key))
             if q_entry is None:
                 continue
@@ -387,20 +389,20 @@ async def debug_source(source: str) -> dict:
 
 
 @app.post("/api/response/{source}/{entry_key}/{query_id}")
-async def generate_response(source: str, entry_key: str, query_id: int) -> dict:
+async def generate_response(source: str, entry_key: str, query_id: int, language: str | None = None) -> dict:
     entry    = _get_source_or_404(source)
     pipeline = QueryResponsePipeline(entry.cfg)
-    q_entry, query, kind = _find_query_in_store(entry.cfg, entry_key, query_id)
+    q_entry, query, kind = _find_query_in_store(entry.cfg, entry_key, query_id, language)
     if q_entry is None:
         raise HTTPException(status_code=404, detail=f"Query {entry_key}/{query_id} not found")
     return await pipeline.run_single_async(q_entry, query, entry_key, language=kind, generate_nl=True)
 
 
 @app.post("/api/execute/{source}/{entry_key}/{query_id}")
-async def execute_query(source: str, entry_key: str, query_id: int) -> dict:
+async def execute_query(source: str, entry_key: str, query_id: int, language: str | None = None) -> dict:
     entry    = _get_source_or_404(source)
     pipeline = QueryResponsePipeline(entry.cfg)
-    q_entry, query, kind = _find_query_in_store(entry.cfg, entry_key, query_id)
+    q_entry, query, kind = _find_query_in_store(entry.cfg, entry_key, query_id, language)
     if q_entry is None:
         raise HTTPException(status_code=404, detail=f"Query {entry_key}/{query_id} not found")
     return await pipeline.run_single_async(q_entry, query, entry_key, language=kind, generate_nl=False)
