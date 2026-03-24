@@ -59,6 +59,10 @@ fallback_querying:
   module: "structured_outputs"
   class: "Query"
 
+statement_judge:
+  module: "structured_outputs"
+  class: "Judgments"
+
 # Local Ollama setup
 # model: ollama_chat/llama3.3:latest
 # api_base: http://localhost:11434

@@ -219,6 +219,18 @@ class SQLStatementGenerationPrompt(Prompt):
     
 
 
+class JudgementResponseGenerationPrompt(Prompt):
+    _prompt_path = PROMPT_PATH.joinpath("judge.md")
+    def __init__(self):
+        super().__init__()
+
+    def update(
+        self,
+        data
+    ) -> str:
+        return self._update(data=data)
+    
+
 class ResponseGenerationPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("response_generation.md")
     def __init__(self):

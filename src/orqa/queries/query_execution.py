@@ -24,12 +24,20 @@ class QueryExecutor:
     exposes the same Table_0 / Table_1 / … variables as DataFrames.
     The Pandas code is expected to assign its final result to a variable called
     `result`.
+
+    NOTE: Tables are passed to DuckDB / pandas *with all their columns intact*.
+    The `columns_involved` field on each query table describes which columns the
+    query *references* (for joins, filters, selects), not which columns to
+    expose to the executor.  Pre-filtering to only those columns would break any
+    query that selects additional columns, and was the root cause of
+    non-deterministic results across repeated executions.
     """
-    def __init__(self, datasets_path: Path,bad_tokens:list=[]):
+
+    def __init__(self, datasets_path: Path, bad_tokens: list = []):
         self.datasets_path = Path(datasets_path)
         self.bad_tokens = bad_tokens
 
-    def execute(self, entry: dict, query: dict,query_kind:str) -> pd.DataFrame | None:
+    def execute(self, entry: dict, query: dict, query_kind: str) -> pd.DataFrame | None:
         """
         Execute a single query dict (as found inside entry["data"]["queries"])
         using the table mapping defined in entry["tables"].
@@ -38,9 +46,11 @@ class QueryExecutor:
         """
         tables_map: dict[str, str] = entry.get("tables", {})
         code: str = query.get("code", "")
+        columns_per_table: str = query.get("tables")
+        # Load full DataFrames — do NOT pre-filter columns.
+        # columns_involved describes query intent, not which columns to expose.
+        dataframes = self._load_tables(tables_map,columns_per_table)
 
-        dataframes = self.prefilter_dataframes(self._load_tables(tables_map),query.get("tables", {}))
-        
         if query_kind.lower() == "sql":
             return self._execute_sql(code, dataframes)
         elif query_kind.lower() in ("pandas", "python"):
@@ -48,31 +58,30 @@ class QueryExecutor:
         else:
             raise ValueError(f"Unknown query_type: '{query_kind}'")
 
-
-    def prefilter_dataframes(self, dfs: dict[str, pd.DataFrame], tables: list) -> dict[str, pd.DataFrame]:
-        dataframes = {}
-        for table in sorted(tables, key=lambda t: t["name"]):
-            name = table["name"]
-            df = dfs[name]
-            if table["columns_involved"]:
-                dataframes[name] = df[table["columns_involved"]]
-            else:
-                dataframes[name] = df
-        return dataframes
-    
-    def _load_tables(self, tables_map: dict[str, str]) -> dict[str, pd.DataFrame]:
+    def _load_tables(self, tables_map: dict[str, str],columns_per_table) -> dict[str, pd.DataFrame]:
         dataframes: dict[str, pd.DataFrame] = {}
         for alias, dataset_id in tables_map.items():
             csv_path = self.datasets_path / f"{dataset_id}.csv"
+            involved_columns = next(
+                table["columns_involved"]
+                for table in columns_per_table
+                if table["name"] == alias
+            )
             if not csv_path.exists():
                 raise FileNotFoundError(
                     f"CSV file not found for table '{alias}': {csv_path}"
                 )
-            #df = utils.remove_bad_tokens(pd.read_csv(csv_path, low_memory=False),self.bad_tokens)
-            df = utils.pd_read_dataset(csv_path,opts={"csv": {"na_values": self.bad_tokens, "low_memory":False},"parquet": {"na_values": self.bad_tokens, "low_memory":False}})
-
-            df.dropna()
+            df = utils.pd_read_dataset(
+                csv_path,
+                opts={
+                    "csv":     {"na_values": self.bad_tokens, "low_memory": False},
+                    "parquet": {"na_values": self.bad_tokens, "low_memory": False},
+                },
+            )
+            df=df.dropna()
+            df=df[involved_columns]
             dataframes[alias] = df
+            print(f"{alias}: {df.columns}")
         return dataframes
 
     def _execute_sql(self, sql: str, dataframes: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -101,19 +110,21 @@ class QueryExecutor:
                 "Make sure the generated code ends with `result = …`."
             )
         if isinstance(result, pd.DataFrame):
+            #print(result)
             return result
         elif isinstance(result, pd.Series):
-            result = result.to_frame()  # Convert Series to DataFrame
+            #print(result.to_frame())
+            return result.to_frame()
         elif isinstance(result, (int, float, str, bool)):
-            result = pd.DataFrame([{"result": result}])  # Wrap scalar into a 1-row DataFrame
+            #print( pd.DataFrame([{"result": result}]))
+            return pd.DataFrame([{"result": result}])
         elif isinstance(result, list):
-            result = pd.DataFrame(result)  # Wrap list
+            #print(pd.DataFrame(result))
+            return pd.DataFrame(result)
         else:
-            result = pd.DataFrame([result])  # Fallback: wrap into single-row DF
-        return result
-    
+            #print(pd.DataFrame([result]))
+            return pd.DataFrame([result])
 
-    
     def _inject_result(self, code: str) -> str:
         """
         If the last statement in `code` is a bare expression (not already
@@ -126,7 +137,6 @@ class QueryExecutor:
 
         last = tree.body[-1]
 
-        # Already assigns result — nothing to do
         if (
             isinstance(last, ast.Assign)
             and any(
@@ -140,10 +150,8 @@ class QueryExecutor:
         ):
             return code
 
-        # Last statement is a bare expression — turn it into result = <expr>
         if isinstance(last, ast.Expr):
             lines = code.splitlines()
-            # Grab the source lines that belong to the last node
             expr_lines = lines[last.lineno - 1 : last.end_lineno]
             expr_lines[0] = "result = " + expr_lines[0]
             lines[last.lineno - 1 : last.end_lineno] = expr_lines

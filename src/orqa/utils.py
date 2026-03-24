@@ -224,7 +224,7 @@ def prepare_dataset(
 ) -> tuple[dict, dict]:
 
     df = pd_read_dataset(dataset_path,opts={"csv": {"na_values": bad_tokens, "low_memory":False},"parquet": {"na_values": bad_tokens, "low_memory":False}})
-    df.dropna()
+    df = df.dropna()
     # Normalize column names to handle case/whitespace mismatches
     col_map = {c.strip().lower(): c for c in df.columns}
     resolved_cols = [

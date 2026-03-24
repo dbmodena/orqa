@@ -217,7 +217,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
     def complete(
         self,
         prompt: str,
-        dataframes, table_names, typology="SQL", involved_cols=None
+        dataframes, table_names, typology="SQL", involved_cols=None, feedback:list = None
     ) -> Any:
         usage_total = {
             "prompt_tokens": 0,
@@ -225,7 +225,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
             "total_tokens": 0,
         }
         initial_message = self.reform_prompt_constraint(prompt)
-
+        count = 0
         # FIX 2: do NOT bake `messages` into completion_args up-front.
         # Instead, update completion_args["messages"] right before every
         # router.completion call so that retry feedback is actually sent.
@@ -233,7 +233,8 @@ class LLMClientStatementGenerator(LLMClientStructured):
             {"role": "system", "content": "You are an expert Data Engineer"},
             {"role": "user", "content": initial_message},
         ]
-
+        if feedback is not None:
+            messages.extend(feedback)
         last_content = ""
         last_error = None
         good_queries: dict[str, dict] = {}
@@ -262,7 +263,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                         "tool-call response instead of a text completion."
                     )
                 last_content = content
-                #print(last_content)
+                ##print(last_content)
                 cleaned_content = self._clean_json_response(content)
                 try:
                     # FIX 1 & 3: use the robust repair pipeline
@@ -274,8 +275,10 @@ class LLMClientStatementGenerator(LLMClientStructured):
                         dataframes, result, table_names, typology
                     )
                     for key, accepted_query in accepted_queries.items():
-                        accepted_query["keywords"] = self.count_keywords(accepted_query["code"], typology)
-                        good_queries[accepted_query["id"]] = accepted_query
+                        #accepted_query["keywords"] = self.count_keywords(accepted_query["code"], typology)
+                        accepted_query["id"] = f"{count}"
+                        good_queries[f"{count}"] = accepted_query
+                        count = count + 1
 
                     if not outcome:
                         # FIX 2: reassign messages and it will be picked up next iteration
@@ -313,7 +316,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                             "content": f"You generated a bad formatted output, that gave the following error message:\n{error_msg}\n{pydantic}",
                         })
                         time.sleep(self.retry_delay)
-                        print(last_error)
+                        #print(last_error)
                         continue
 
                 except ValidationError as e:
@@ -332,7 +335,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                             "role": "user",
                             "content": f"Generated queries are not valid, the error message generated:\n{error_msg}\n{pydantic}",
                         })
-                        print(last_error)
+                        #print(last_error)
                         time.sleep(self.retry_delay)
                         continue
 
@@ -353,7 +356,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                             f"{json.dumps(self.response_model.model_json_schema(), indent=2)}"
                         ),
                     })
-                    print(last_error)
+                    #print(last_error)
                     time.sleep(self.retry_delay)
 
         return (

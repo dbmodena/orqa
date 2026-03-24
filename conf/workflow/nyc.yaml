@@ -92,7 +92,7 @@ tasks:
     sm_macro_avg_threshold: 0.5
     sm_micro_avg_threshold: 0.5
   query_generation:
-    kind: "SQL"
+    kind: "PANDAS"
     max_cols: 10
     bad_tokens: ['s','None','R','NaN']
     max_response_tokens: 300

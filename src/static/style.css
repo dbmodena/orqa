@@ -556,6 +556,49 @@ body {
   font-size: 13px; text-align: center;
 }
 
+/* ── Judge feedback ───────────────────────────────────────────────────────── */
+.judge-feedback {
+  font-size: 14px; line-height: 1.65;
+  color: var(--text);
+  background: #fffdf5;
+  border: 1px solid #f0d98a;
+  border-left: 3px solid #e6b800;
+  border-radius: 7px;
+  padding: 12px 16px;
+}
+
+/* ── Keywords grid ────────────────────────────────────────────────────────── */
+.kw-grid {
+  display: flex; flex-direction: column; gap: 5px;
+}
+.kw-chip {
+  display: grid;
+  grid-template-columns: 160px 1fr 36px;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+.kw-label {
+  font-family: 'DM Mono', monospace;
+  font-size: 12px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.kw-bar-wrap {
+  background: var(--tag-bg);
+  border-radius: 99px; height: 6px; overflow: hidden;
+}
+.kw-bar {
+  display: block; height: 100%;
+  background: var(--accent-soft);
+  border-radius: 99px;
+  transition: width .3s ease;
+}
+.kw-count {
+  font-family: 'DM Mono', monospace;
+  font-size: 11px; color: var(--text-muted);
+  text-align: right;
+}
+
 /* ── Scrollbar ────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar       { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

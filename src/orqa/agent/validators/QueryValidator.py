@@ -119,7 +119,28 @@ class QueryValidator(ABC):
 
         status, *rest = queue.get()
         if status == "error":
-            raise RuntimeError(f"{rest[0]}: {rest[1]}")
+            exc_type_name, exc_msg = rest[0], rest[1]
+            # Reconstruct the original exception type so that callers such as
+            # _normalize_pandas_error can match on isinstance(e, KeyError) etc.
+            exc_type = {
+                "KeyError":          KeyError,
+                "ValueError":        ValueError,
+                "TypeError":         TypeError,
+                "MemoryError":       MemoryError,
+                "SyntaxError":       SyntaxError,
+                "TimeoutError":      TimeoutError,
+                "NameError":         NameError,
+                "AttributeError":    AttributeError,
+                "IndexError":        IndexError,
+                "ZeroDivisionError": ZeroDivisionError,
+                "OverflowError":     OverflowError,
+                # pandas-specific — arrive as their class name from the worker
+                "MergeError":           ValueError,
+                "ParserError":          ValueError,
+                "OutOfBoundsDatetime":  ValueError,
+                "InvalidIndexError":    KeyError,
+            }.get(exc_type_name, RuntimeError)
+            raise exc_type(exc_msg)
         return rest[0]
 
     # ------------------------------------------------------------------
@@ -153,7 +174,7 @@ class QueryValidator(ABC):
 
         for idx, q in enumerate(result["queries"]):
             actual_query = q
-            dataframes = self.prefilter_dataframes(actual_query['tables'])
+            dataframes, ordered_names = self.prefilter_dataframes(actual_query['tables'])
             try:
                 raw_code = q.get("code") or ""
                 if not raw_code.strip():
@@ -162,8 +183,7 @@ class QueryValidator(ABC):
                 query_code = self.replace_aliases(raw_code, self.lookup_dict)
                 query_code = self._preprocess_query(query_code.strip())
                 actual_query["code"] = query_code
-
-                result_data = self._execute_query(query_code,dataframes)
+                result_data = self._execute_query(query_code, dataframes, ordered_names)
 
                 if self._is_empty_result(result_data):
                     raise ValueError(self._build_empty_result_feedback())
@@ -177,7 +197,6 @@ class QueryValidator(ABC):
                 technical_terms = self._check_technical_terms_in_question(actual_query["question"])
                 if technical_terms:
                     raise ValueError(self._build_technical_terms_feedback(technical_terms))
-
                 self.good_queries[idx] = actual_query
 
             except Exception as e:
@@ -198,13 +217,13 @@ class QueryValidator(ABC):
         pass
 
     @abstractmethod
-    def _run_query(self, query: str,dataframes:list) -> Any:
+    def _run_query(self, query: str, dataframes: list, table_names: list) -> Any:
         """Execute the query and return a DataFrame result."""
         pass
 
-    def _execute_query(self, query: str,dataframes:list) -> Any:
+    def _execute_query(self, query: str, dataframes: list, table_names: list) -> Any:
         """Wrap _run_query in a sandbox. Override in subclass if needed."""
-        return self._run_in_sandbox(self._run_query, args=(query,dataframes,))
+        return self._run_in_sandbox(self._run_query, args=(query, dataframes, table_names))
 
     @abstractmethod
     def _build_empty_result_feedback(self) -> str:
@@ -219,13 +238,38 @@ class QueryValidator(ABC):
     # ------------------------------------------------------------------
 
     def prefilter_dataframes(self, tables):
+        # Build a name→DataFrame lookup from the constructor-ordered lists.
+        # This is the only safe way to match — positional zip is wrong because
+        # the query's 'tables' field can list tables in any order.
+        df_by_name = dict(zip(self.table_names, self.dataframes))
+
         dataframes = []
-        for dataframe, table in zip(self.dataframes, sorted(tables, key=lambda t: t["name"])):
-            if table["columns_involved"]:
-                dataframes.append(dataframe[table["columns_involved"]])
+        ordered_names = []
+        for table in tables:
+            name = table["name"]
+            dataframe = df_by_name.get(name)
+            if dataframe is None:
+                raise KeyError(
+                    f"Table '{name}' referenced in the query was not found in the "
+                    f"available tables: {self.table_names}.\n"
+                    "Check for a typo or a stale table name."
+                )
+            cols = table.get("columns_involved") or []
+            if cols:
+                existing = [c for c in cols if c in dataframe.columns]
+                missing  = [c for c in cols if c not in dataframe.columns]
+                if missing:
+                    raise KeyError(
+                        f"columns_involved references columns that do not exist in table "
+                        f"'{name}': {missing}.\n"
+                        "Check column names for typos or stale references after a rename."
+                    )
+                dataframes.append(dataframe[existing])
             else:
                 dataframes.append(dataframe)
-        return dataframes
+            ordered_names.append(name)
+
+        return dataframes, ordered_names
 
 
     def replace_aliases(self, code: str, aliases: dict) -> str:
@@ -374,6 +418,13 @@ class QueryValidator(ABC):
                 lambda e: "must reference all provided tables" in e.lower(),
                 "Every query MUST join ALL provided tables. "
                 "No table can be omitted — each one contributes required columns."
+            ),
+            (
+                "disjoint sub-queries",
+                lambda e: "disjoint query detected" in e.lower(),
+                "Every query must form a SINGLE connected result. "
+                "Do not produce two separate merge chains — all table groups must be "
+                "linked together via merge(), join(), or concat() into one final expression."
             ),
         ]
 

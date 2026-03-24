@@ -228,6 +228,7 @@ def _read_queries(cfg) -> list[dict]:
                         "language":        kind_key,
                         "query_code":      q.get("query") or q.get("code") or q.get("pandas_query", ""),
                         "tables":          tables,
+                        "judge_feedback": q.get("judge_feedback"),
                         "response":        q.get("response"),
                         "produce_result":  q.get("produce_result"),
                         "execution_error": q.get("execution_error"),
@@ -247,7 +248,7 @@ def _find_query_in_store(cfg, entry_key: str, query_id: int, language: str | Non
                 continue
             query = next(
                 (q for q in q_entry.get("data", {}).get("queries", [])
-                 if q.get("id") == query_id),
+                 if q.get("id") == str(query_id)),
                 None,
             )
             if query is not None:
@@ -388,16 +389,6 @@ async def debug_source(source: str) -> dict:
     }
 
 
-@app.post("/api/response/{source}/{entry_key}/{query_id}")
-async def generate_response(source: str, entry_key: str, query_id: int, language: str | None = None) -> dict:
-    entry    = _get_source_or_404(source)
-    pipeline = QueryResponsePipeline(entry.cfg)
-    q_entry, query, kind = _find_query_in_store(entry.cfg, entry_key, query_id, language)
-    if q_entry is None:
-        raise HTTPException(status_code=404, detail=f"Query {entry_key}/{query_id} not found")
-    return await pipeline.run_single_async(q_entry, query, entry_key, language=kind, generate_nl=True)
-
-
 @app.post("/api/execute/{source}/{entry_key}/{query_id}")
 async def execute_query(source: str, entry_key: str, query_id: int, language: str | None = None) -> dict:
     entry    = _get_source_or_404(source)
@@ -405,4 +396,8 @@ async def execute_query(source: str, entry_key: str, query_id: int, language: st
     q_entry, query, kind = _find_query_in_store(entry.cfg, entry_key, query_id, language)
     if q_entry is None:
         raise HTTPException(status_code=404, detail=f"Query {entry_key}/{query_id} not found")
-    return await pipeline.run_single_async(q_entry, query, entry_key, language=kind, generate_nl=False)
+    result = await pipeline.run_single_async(q_entry, query, entry_key, language=kind, generate_nl=False)
+    # Inject the already-stored NL response — no LLM call needed.
+    if result.get("response") is None:
+        result["response"] = query.get("response")
+    return result

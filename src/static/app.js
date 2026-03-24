@@ -539,15 +539,12 @@ function renderQueries() {
 /* ── Single query execution ──────────────────────────────────────────────────── */
 async function runQuery(entryKey, queryId, language) {
   const q           = allQueries.find(x => x.entry_key == entryKey && x.query_id == queryId && x.language === language);
-  const hasResponse = !!(q?.response);
   const btn = document.getElementById(`playBtn-${entryKey}-${queryId}-${language}`);
   btn.disabled = true;
   btn.innerHTML = `<span class="spinner-sm"></span>`;
-  openModalLoading(q, hasResponse ? 'Running query…' : 'Executing query & generating response…');
+  openModalLoading(q, 'Executing query…');
 
-  const endpoint = hasResponse
-    ? `/api/execute/${activeSource}/${entryKey}/${queryId}?language=${encodeURIComponent(language)}`
-    : `/api/response/${activeSource}/${entryKey}/${queryId}?language=${encodeURIComponent(language)}`;
+  const endpoint = `/api/execute/${activeSource}/${entryKey}/${queryId}?language=${encodeURIComponent(language)}`;
 
   try {
     const res  = await fetch(endpoint, { method: 'POST' });
@@ -560,7 +557,6 @@ async function runQuery(entryKey, queryId, language) {
       q.language        = data.language     || q.language;
       q.query_tables    = data.query_tables || q.query_tables;
     }
-    if (hasResponse && !data.response) data.response = q.response;
     if (data.response) {
       btn.classList.add('done-play');
       btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 7l3 3 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -636,6 +632,45 @@ function openModal(q, data) {
   html += nlText
     ? `<div class="nl-response md-body">${marked.parse(nlText)}</div>`
     : `<div style="font-size:13px;color:var(--text-muted)">No response yet — click ▶ to run.</div>`;
+  html += `</div>`;
+
+  // ── Judge Feedback ──
+  const judgeFeedback = src.judge_feedback ?? q?.judge_feedback ?? null;
+  html += `<div class="result-section">
+    <div class="result-section-label">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style="opacity:.6">
+        <path d="M6 1l1.3 2.6L10 4.1 8 6l.5 3L6 7.8 3.5 9 4 6 2 4.1l2.7-.5z"
+              fill="currentColor"/>
+      </svg>
+      Judge Feedback
+    </div>`;
+  if (judgeFeedback) {
+    html += `<div class="judge-feedback md-body">${marked.parse(String(judgeFeedback))}</div>`;
+  } else {
+    html += `<div style="font-size:13px;color:var(--text-muted)">No judge feedback available.</div>`;
+  }
+  html += `</div>`;
+
+  // ── Keywords ──
+  const keywords = src.keywords ?? q?.keywords ?? null;
+  html += `<div class="result-section">
+    <div class="result-section-label">Keywords</div>`;
+  if (keywords && typeof keywords === 'object' && Object.keys(keywords).length > 0) {
+    const sorted = Object.entries(keywords).sort((a, b) => b[1] - a[1]);
+    const maxCnt = sorted[0][1] || 1;
+    html += `<div class="kw-grid">`;
+    sorted.forEach(([kw, cnt]) => {
+      const pct = Math.round((cnt / maxCnt) * 100);
+      html += `<div class="kw-chip">
+        <span class="kw-label">${esc(kw)}</span>
+        <span class="kw-bar-wrap"><span class="kw-bar" style="width:${pct}%"></span></span>
+        <span class="kw-count">${esc(cnt)}</span>
+      </div>`;
+    });
+    html += `</div>`;
+  } else {
+    html += `<div style="font-size:13px;color:var(--text-muted)">Keyword count not available.</div>`;
+  }
   html += `</div>`;
 
   const queryTables = src.query_tables ?? q?.query_tables ?? [];

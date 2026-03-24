@@ -31,6 +31,13 @@ This prevents silent mismatches caused by inconsistent casing in string keys.
 ✗ No table/column names  
 ✗ No SQL operations mentioned
 
+### Table Usage Rules
+Every table referenced must be **genuinely necessary** to answer the question:
+- A table is justified only if its columns appear in the SELECT output, WHERE filters, or aggregation logic — not merely in a JOIN condition.
+- Using a table solely to restrict rows via a JOIN is **not** a justified use, unless the question explicitly requires cross-table validation (e.g. "find records that exist in both datasets").
+- Ask yourself: *if this table were removed, would the question still be fully answerable?* If yes, redesign the query so every table contributes meaningfully, or remove it.
+- Each table entry must list only the minimal column subset actually used to answer the question.
+
 ### Generate
 3 queries of incremental difficulty (easy, medium and hard) where:
 - Each implements the mandatory operation type
@@ -38,7 +45,7 @@ This prevents silent mismatches caused by inconsistent casing in string keys.
 - Each follows match definitions exactly
 - Each has semantically aligned NL question
 - Each has a difficulty value that can be "easy", "medium" or "hard"
-- Each has a **motivation**: a concise business justification (1–2 sentences) explaining *why* this question is analytically valuable and what decision or insight it supports
+- Each has a **motivation**: a concise business justification (2–3 sentences) explaining *why* this question is analytically valuable, *why each table is necessary and what unique columns it contributes*, and what decision or insight it supports
 - Each table entry includes only the minimal column subset actually used to answer the question
 - All conform to Pydantic schema
 
@@ -46,6 +53,7 @@ This prevents silent mismatches caused by inconsistent casing in string keys.
 The motivation must:
 - Be written in business language, not technical terms
 - Explain the analytical purpose (e.g., identifying churn risk, optimizing revenue, benchmarking performance)
+- Justify why each dataset is required and what **specific columns** it uniquely contributes to answering the question — not just that it "provides additional information"
 - Be distinct across the three queries — avoid repeating the same business rationale
 
 ### SQL difficulty levels

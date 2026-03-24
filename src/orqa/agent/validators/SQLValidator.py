@@ -29,10 +29,10 @@ UNAUTHORIZED_SQL_COMMANDS = [
 ]
 
 SQL_CARTESIAN_PATTERNS = [
-    (
-        r'\bFROM\b[^;]+,[^;]+\bWHERE\b',
-        "Implicit cross join via comma-separated tables in FROM clause"
-    ),
+    #(
+    #    r'\bFROM\b[^;]+,[^;]+\bWHERE\b',
+    #    "Implicit cross join via comma-separated tables in FROM clause"
+    #),
     (
         r'\bCROSS\s+JOIN\b',
         "Explicit CROSS JOIN detected"
@@ -70,6 +70,7 @@ class SQLValidator(QueryValidator):
                 + "\nRewrite using explicit JOIN ... ON conditions."
             )
 
+        #self._check_query_connectivity(query)
         query = self._remove_redundant_aliases(query)
         query = self._fix_aggregates(query)
         return query.replace("`", '"')
@@ -154,14 +155,147 @@ class SQLValidator(QueryValidator):
         return ''.join(result)
 
     # ------------------------------------------------------------------
+    # Connectivity check — detects disjoint sub-queries
+    # ------------------------------------------------------------------
+    def _check_query_connectivity(self, query: str) -> None:
+        """
+        Verify that all tables referenced in the query are connected into a
+        single result through JOIN … ON conditions or UNION / UNION ALL.
+
+        Strategy
+        --------
+        1. Find every table name (case-insensitive) actually referenced in the query.
+        2. Build an alias → canonical-table map from every FROM / JOIN clause.
+        3. Build an adjacency graph:
+           - JOIN … ON left_alias.col = right_alias.col  →  edge between the two tables.
+           - UNION / UNION ALL  →  fully connects all referenced tables (they share a
+             result set by definition, even without an ON clause).
+        4. Split on semicolons: each statement is treated as its own island unless the
+           tables it touches are already linked via JOIN/UNION in that statement.
+        5. BFS over the graph — if any referenced table is unreachable, raise.
+        """
+        from collections import defaultdict
+
+        table_names_set = set(self.table_names)
+        ql = query.lower()
+        tl_names = [t.lower() for t in table_names_set]
+
+        referenced = frozenset(
+            t for t in table_names_set
+            if re.search(rf'\b{re.escape(t.lower())}\b', ql)
+        )
+        if len(referenced) < 2:
+            return  # single table or empty — nothing to check
+
+        # ------------------------------------------------------------------
+        # Build alias → canonical-table map from FROM / JOIN clauses
+        # e.g.  "FROM orders o"  →  alias_map["o"] = "orders"
+        # ------------------------------------------------------------------
+        alias_map: dict[str, str] = {}
+        from_join_pat = re.compile(
+            r'(?:from|join)\s+(\w+)(?:\s+(?:as\s+)?(\w+))?', re.IGNORECASE
+        )
+        for m in from_join_pat.finditer(query):
+            tbl_raw   = m.group(1).lower()
+            alias_raw = m.group(2).lower() if m.group(2) else tbl_raw
+            if tbl_raw in tl_names:
+                canonical = next(t for t in table_names_set if t.lower() == tbl_raw)
+                alias_map[alias_raw] = canonical
+                alias_map[tbl_raw]   = canonical
+
+        def resolve_alias(name: str) -> str | None:
+            return alias_map.get(name.lower())
+
+        # ------------------------------------------------------------------
+        # Build adjacency
+        # ------------------------------------------------------------------
+        adjacency: dict[str, set] = defaultdict(set)
+
+        # JOIN … ON left_alias.col = right_alias.col
+        join_on_pat = re.compile(
+            r'join\s+(\w+)(?:\s+(?:as\s+)?(\w+))?\s+on\s+(\w+)\.\w+\s*=\s*(\w+)\.\w+',
+            re.IGNORECASE,
+        )
+        for m in join_on_pat.finditer(query):
+            left_alias  = m.group(3)
+            right_alias = m.group(4)
+            left_tbl  = resolve_alias(left_alias)
+            right_tbl = resolve_alias(right_alias)
+            if left_tbl and right_tbl and left_tbl != right_tbl:
+                adjacency[left_tbl].add(right_tbl)
+                adjacency[right_tbl].add(left_tbl)
+
+        # UNION / UNION ALL → fully connect all referenced tables
+        if re.search(r'\bunion\b', ql):
+            nodes = list(referenced)
+            for i in range(len(nodes)):
+                for j in range(i + 1, len(nodes)):
+                    adjacency[nodes[i]].add(nodes[j])
+                    adjacency[nodes[j]].add(nodes[i])
+
+        # ------------------------------------------------------------------
+        # BFS reachability
+        # ------------------------------------------------------------------
+        start = next(iter(referenced))
+        visited: set = {start}
+        queue = [start]
+        while queue:
+            node = queue.pop()
+            for nb in adjacency.get(node, set()):
+                if nb not in visited:
+                    visited.add(nb)
+                    queue.append(nb)
+
+        if referenced <= visited:
+            return  # ✓ fully connected
+
+        # ------------------------------------------------------------------
+        # Identify islands and raise
+        # ------------------------------------------------------------------
+        remaining = set(referenced)
+        islands: list[frozenset] = []
+        while remaining:
+            root = next(iter(remaining))
+            island: set = {root}
+            q = [root]
+            while q:
+                node = q.pop()
+                for nb in adjacency.get(node, set()):
+                    if nb not in island:
+                        island.add(nb)
+                        q.append(nb)
+            islands.append(frozenset(island))
+            remaining -= island
+
+        island_descriptions = "\n".join(
+            f"  Group {i + 1}: {', '.join(sorted(island))}"
+            for i, island in enumerate(islands)
+        )
+        raise ValueError(
+            f"Disjoint query detected — the query produces {len(islands)} independent "
+            f"sub-results that are never combined:\n\n"
+            f"{island_descriptions}\n\n"
+            "Every table must be connected to the others through at least one "
+            "JOIN … ON condition or UNION that links them into a single result.\n\n"
+            "Common causes:\n"
+            "  1. Multiple SELECT statements separated by semicolons with no JOIN or UNION\n"
+            "  2. A JOIN written without an ON clause (already caught above)\n"
+            "  3. A subquery that references a table but is never joined back\n\n"
+            "Fix: ensure every table group is connected, e.g.:\n"
+            "  ✓ SELECT … FROM orders o JOIN customers c ON o.customer_id = c.id\n"
+            "  ✓ SELECT id FROM orders UNION SELECT id FROM customers\n"
+            "  ✗ SELECT * FROM orders; SELECT * FROM customers"
+        )
+
+    # ------------------------------------------------------------------
     # Execution — runs inside sandbox process via base _execute_query
     # ------------------------------------------------------------------
-    def _run_query(self, query: str,dataframes:list) -> Any:
+    def _run_query(self, query: str, dataframes: list, table_names: list) -> Any:
         con = duckdb.connect(database=":memory:")
         con.execute(f"SET memory_limit='{self.mem_limit_mb}MB'")
         con.execute("SET threads=2")
         try:
-            for df, name in zip(dataframes, self.table_names):
+            for df, name in zip(dataframes, table_names):
                 con.register(name, df)
 
             sanitized = re.sub(

@@ -160,9 +160,9 @@ class Query(BaseModel):
     A structured query (SQL or Pandas) paired with a natural language question
     that expresses the intent of the query.
     """
-    id: int = Field(..., description=(
-        "Incremental identifier of the query."
-    ))
+    #id: int = Field(..., description=(
+    #    "Incremental identifier of the query."
+    #))
     question: str = Field(
         ...,
         description=(
@@ -192,6 +192,37 @@ class QuerySet(BaseModel):
     Container for multiple queries (SQL or Pandas) generated together.
     """
     queries: List[Query] = Field(
+        ...,
+        description="List of queries with matching natural language questions."
+    )
+
+
+class Judgment(BaseModel):
+    """
+    Structured judgement
+    """
+    id: int = Field(..., description=(
+        "Identifier of the query."
+    ))
+    Feedback: str = Field(
+        ...,
+        description=(
+            "Natural language feedback to the generated query."
+        )
+    )
+    Approved: bool = Field(..., description=(
+        "Binary classification of the generated query."
+    ))
+    Response: str = Field(
+        ...,
+        description=(
+            "Natural language response to the generated query."
+        )
+    )
+
+
+class Judgments(BaseModel):
+    queries: List[Judgment] = Field(
         ...,
         description="List of queries with matching natural language questions."
     )
