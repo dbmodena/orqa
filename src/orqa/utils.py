@@ -9,7 +9,22 @@ import pandas as pd
 from bs4 import BeautifulSoup
 import os
 
+SQL_KEYWORDS = {
+    "SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING",
+    "JOIN", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "OUTER JOIN", "FULL JOIN", "CROSS JOIN",
+    "UNION", "UNION ALL", "INTERSECT", "EXCEPT","LOWER", "UPPER",
+    "SUM", "AVG", "MIN", "MAX", "COUNT", "RANK", "ROW_NUMBER", "DENSE_RANK", "CORR",
+    "CAST", "COALESCE", "NULLIF", "CASE", "WHEN", "THEN", "ELSE",
+    "DISTINCT", "LIMIT", "OFFSET", "WITH", "AS", "ON", "AND", "OR", "NOT", "IN", "EXISTS",
+}
 
+PANDAS_KEYWORDS = {
+    "merge", "join", "concat", "groupby", "agg", "aggregate","corr", "lower","upper",
+    "sum", "mean", "avg", "min", "max", "count", "nunique", "rank",
+    "sort_values", "sort_index", "drop_duplicates", "fillna", "dropna",
+    "apply", "map", "filter", "query", "where", "assign", "pivot", "melt",
+    "stack", "unstack", "explode", "resample", "rolling", "expanding",
+}
 
 
 def pl_read_dataset(dataset_path: Path, opts: dict = {}) -> pl.DataFrame:
@@ -275,6 +290,16 @@ def load_json(path: Path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-
+def count_keywords(query: str, kind: str = "SQL") -> dict[str, int]:
+        keywords = SQL_KEYWORDS if kind == "SQL" else PANDAS_KEYWORDS
+        query_upper = query.upper() if kind == "SQL" else query
+        counts = {}
+        for kw in sorted(keywords):
+            kw_pattern = kw.upper() if kind == "SQL" else kw
+            pattern = rf'\b{re.escape(kw_pattern)}\b'
+            matches = re.findall(pattern, query_upper, flags=re.IGNORECASE)
+            if matches:
+                counts[kw] = len(matches)
+        return counts
 
 

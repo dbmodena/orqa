@@ -293,14 +293,14 @@ async def stream_generate_statements(
     successes = failures = 0
 
     # Collect indices already stored in the file for this kind so we skip them
-    done_indices: set[int] = set()
-    for model_entries in results.values():
-        for stored_idx in model_entries.get(kind, {}).keys():
-            done_indices.add(int(stored_idx))
+    #done_indices: set[int] = set()
+    #for model_entries in results.values():
+    #    for stored_idx in model_entries.get(kind, {}).keys():
+    #        done_indices.add(int(stored_idx))
 
     for idx, match in enumerate(all_matches):
         # Skip matches before the resume point or already processed
-        if idx < resume_from or idx in done_indices:
+        if idx < resume_from: #or idx in done_indices:
             continue
 
         def _process_one(match=match, idx=idx):

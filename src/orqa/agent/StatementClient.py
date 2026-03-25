@@ -33,22 +33,7 @@ from .validators.SQLValidator import SQLValidator
 from .validators.PandasValidator import PandasValidator
 import re
 
-SQL_KEYWORDS = {
-    "SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING",
-    "JOIN", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "OUTER JOIN", "FULL JOIN", "CROSS JOIN",
-    "UNION", "UNION ALL", "INTERSECT", "EXCEPT",
-    "SUM", "AVG", "MIN", "MAX", "COUNT", "RANK", "ROW_NUMBER", "DENSE_RANK", "CORR",
-    "CAST", "COALESCE", "NULLIF", "CASE", "WHEN", "THEN", "ELSE",
-    "DISTINCT", "LIMIT", "OFFSET", "WITH", "AS", "ON", "AND", "OR", "NOT", "IN", "EXISTS",
-}
 
-PANDAS_KEYWORDS = {
-    "merge", "join", "concat", "groupby", "agg", "aggregate","corr",
-    "sum", "mean", "avg", "min", "max", "count", "nunique", "rank",
-    "sort_values", "sort_index", "drop_duplicates", "fillna", "dropna",
-    "apply", "map", "filter", "query", "where", "assign", "pivot", "melt",
-    "stack", "unstack", "explode", "resample", "rolling", "expanding",
-}
 
 
 
@@ -366,17 +351,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
             self.config["model"],
         )
 
-    def count_keywords(self, query: str, kind: str = "SQL") -> dict[str, int]:
-        keywords = SQL_KEYWORDS if kind == "SQL" else PANDAS_KEYWORDS
-        query_upper = query.upper() if kind == "SQL" else query
-        counts = {}
-        for kw in sorted(keywords):
-            kw_pattern = kw.upper() if kind == "SQL" else kw
-            pattern = rf'\b{re.escape(kw_pattern)}\b'
-            matches = re.findall(pattern, query_upper, flags=re.IGNORECASE)
-            if matches:
-                counts[kw] = len(matches)
-        return counts
+
 
     def validate_queries(self, dataframes, result, table_names, type):
         if type == "SQL":

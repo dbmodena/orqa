@@ -231,6 +231,7 @@ def _read_queries(cfg) -> list[dict]:
                         "judge_feedback": q.get("judge_feedback"),
                         "response":        q.get("response"),
                         "produce_result":  q.get("produce_result"),
+                        "keywords": q.get("keyword_count"),
                         "execution_error": q.get("execution_error"),
                     })
     return items
