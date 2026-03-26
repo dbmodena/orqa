@@ -9,6 +9,7 @@ dependencies = [
     "bitarray>=3.8.0",
     "blend",
     "duckdb>=1.4.3",
+    "fastapi>=0.135.2",
     "fastexcel>=0.19.0",
     "inflection>=0.5.1",
     "jsonlines>=4.0.0",
@@ -23,6 +24,7 @@ dependencies = [
     "seaborn>=0.13.2",
     "tqdm>=4.67.1",
     "ulod",
+    "uvicorn>=0.42.0",
     "valentine>=0.4.1",
     "wrapt-timeout-decorator>=1.5.1",
 ]
