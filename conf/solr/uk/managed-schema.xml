@@ -99,17 +99,17 @@ attribute with the form `ckan-X.Y` -->
     <!-- IMPORTANT: Extra OrQA fiedl to store nested structures :IMPORTANT -->
     <!-- See https://solr.apache.org/guide/solr/latest/indexing-guide/indexing-nested-documents.html#schema-configuration -->
     <fieldType name="_nest_path_" class="solr.NestPathField" />
-    <!-- END: Extra Canada fields :END -->
+    <!-- END: Extra OrQA fields :END -->
 </types>
 
 
 <fields>
     <field name="index_id" type="string" indexed="true" stored="true" required="true" />
     
-    <!-- IMPORTANT: Extra OrQA fiedl to store nested structures :IMPORTANT -->
+    <!-- IMPORTANT: Extra OrQA field to store nested structures :IMPORTANT -->
     <field name="_root_" type="string" indexed="true" stored="false" docValues="false" />
     <field name="_nest_path_" type="_nest_path_" />
-    <!-- END: Extra Canada fields :END -->
+    <!-- END: Extra OrQA fields :END -->
 
     <field name="id" type="string" indexed="true" stored="true" required="true" />
     <field name="site_id" type="string" indexed="true" stored="true" required="false" />
@@ -184,7 +184,7 @@ attribute with the form `ckan-X.Y` -->
     <dynamicField name="vocab_*" type="string" indexed="true" stored="true" multiValued="true"/>
     <dynamicField name="*" type="string" indexed="true"  stored="true" multiValued="true"/>
 
-    <!-- IMPORTANT: Extra UK fields :IMPORTANT -->
+    <!-- IMPORTANT: Extra OrQA CKAN fields :IMPORTANT -->
     <field name="catalog_type" type="string" indexed="true" stored="true" multiValued="true"/>
     <field name="keywords" type="string" indexed="true" stored="true" multiValued="true"/>
     <field name="subject" type="string" indexed="true" stored="true" multiValued="true"/>
@@ -197,15 +197,15 @@ attribute with the form `ckan-X.Y` -->
     <field name="res_resource_type" type="string" indexed="true" stored="true" multiValued="true"/>
     <field name="related_relationship" type="string" indexed="true" stored="true" multiValued="true"/>
     <field name="related_type" type="string" indexed="true" stored="true" multiValued="true"/>
-    <!-- END: Extra Canada fields :END -->
+    <!-- END: Extra OrQA CKAN fields :END -->
 </fields>
 
 <uniqueKey>index_id</uniqueKey>
 
-<!-- IMPORTANT: Extra Canada config :IMPORTANT -->
+<!-- IMPORTANT: Extra OrQA CKAN config :IMPORTANT -->
 <df>text</df>
 <solrQueryParser q.op="AND"/>
-<!-- END: Extra Canada config :END -->
+<!-- END: Extra OrQA CKAN config :END -->
 
 <copyField source="url" dest="urls"/>
 <copyField source="title" dest="title_ngram"/>

@@ -151,12 +151,13 @@ class CandidatesDiscovery:
     max_path_length: int
 
     overlap_ratio_threshold: float
-    
+
     sm_macro_avg_threshold: float
-    
+
     sm_micro_avg_threshold: float
 
     verbose: bool = field(default=False)
+
 
 @dataclass
 class StatementGeneration:
@@ -183,6 +184,7 @@ class StatementGeneration:
 
     # max number of tokens per natural languange response
     max_response_tokens: int
+
 
 @dataclass
 class OrQAConfig:
@@ -232,34 +234,22 @@ class OrQAConfig:
     statistics_path: Path = field(init=False)
 
     def __post_init__(self):
-        self.crawled_datasets_path = Path(
-            self.data_path, "datasets", "crawling", self.crawling.download_format
+        self.crawled_datasets_path = (
+            self.data_path / "datasets" / "crawling" / self.crawling.download_format
         )
 
-        self.datasets_path = Path(
-            self.data_path, "datasets", self.crawling.download_format
-        )
+        self.datasets_path = self.data_path / "datasets" / self.crawling.download_format
 
-        self.metadata_path = Path(self.data_path, "metadata")
-        self.logging_path = Path(self.data_path, "log")
-        self.tmp_path = Path(self.data_path, "tmp")
-        self.prompts_path = Path(__file__).parent.parent.parent.joinpath(
-            "conf", "prompts"
-        )
+        self.metadata_path = self.data_path / "metadata"
+        self.logging_path = self.data_path / "log"
+        self.tmp_path = self.data_path / "tmp"
+        self.prompts_path = Path(__file__) / ".." / ".." / ".." / "conf" / "prompts"
+        self.llm_config_path = Path(__file__) / ".." / ".." / ".." / "conf" / "llm"
+        self.statistics_path = self.data_path / "statistics"
         assert self.prompts_path.exists()
-
-        self.llm_config_path = Path(__file__).parent.parent.parent.joinpath(
-            "conf", "llm"
-        )
 
         self.pandas_opts = PandasOpts()
         self.polars_opts = PolarsOpts()
-
-        self.statistics_path = self.data_path / "statistics"
-
-
-
-
 
 
 def to_bytes(b: str) -> int:
@@ -304,9 +294,9 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     crawling_task = parsed["tasks"]["crawling"]
 
     # candidates discovery thresholds
-    #overlap_ratio_threshold = parsed["tasks"]["candidates_discovery"]["overlap_ratio_threshold"]
-    #sm_macro_avg_threshold = parsed["tasks"]["candidates_discovery"]["sm_macro_avg_threshold"]
-    #sm_micro_avg_threshold = parsed["tasks"]["candidates_discovery"]["sm_micro_avg_threshold"]
+    # overlap_ratio_threshold = parsed["tasks"]["candidates_discovery"]["overlap_ratio_threshold"]
+    # sm_macro_avg_threshold = parsed["tasks"]["candidates_discovery"]["sm_macro_avg_threshold"]
+    # sm_micro_avg_threshold = parsed["tasks"]["candidates_discovery"]["sm_micro_avg_threshold"]
 
     # For the Crawling stage, set to default values to deal with CKAN/Socrata differences
     # CKAN-only parameters
@@ -328,8 +318,8 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
 
     # setup the Indexing step
     indexing_task = parsed["tasks"]["indexing"]
-    index_folder_path = data_path.joinpath("blend")
-    index_database_path = index_folder_path.joinpath("index.db")
+    index_folder_path = data_path / "blend"
+    index_database_path = index_folder_path / "index.db"
     indexing = Indexing(
         **indexing_task,
         index_folder_path=index_folder_path,
@@ -343,19 +333,18 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
 
     # setup the Candidates Discovery step
     candidates_discovery_task = parsed["tasks"]["candidates_discovery"]
-    cand_disc_directory = data_path.joinpath("candidates_discovery")
+    cand_disc_directory = data_path / "candidates_discovery"
     cand_disc_directory.mkdir(exist_ok=True)
-    seeds_datasets_path = cand_disc_directory.joinpath("seeds_datasets.json")
-    proposed_tasks_path = cand_disc_directory.joinpath("proposed_tasks.json")
-    tasks_results_path = cand_disc_directory.joinpath("tasks_results.json")
-    matches_graph_path = cand_disc_directory.joinpath("matches_graph.gml")
-    final_candidates_path = cand_disc_directory.joinpath(
-        "final_generation_candidates.json"
-    )
+    seeds_datasets_path = cand_disc_directory / "seeds_datasets.json"
+    proposed_tasks_path = cand_disc_directory / "proposed_tasks.json"
+    tasks_results_path = cand_disc_directory / "tasks_results.json"
+    matches_graph_path = cand_disc_directory / "matches_graph.gml"
+    final_candidates_path = cand_disc_directory / "final_generation_candidates.json"
+
     # queries candidates path
-    query_candidates_path=cand_disc_directory.joinpath("query_candidates.json")
+    query_candidates_path = cand_disc_directory / "query_candidates.json"
     # generated queries path
-    queries_path=cand_disc_directory.joinpath("generated_queries.json")
+    queries_path = cand_disc_directory / "generated_queries.json"
 
     candidates_discovery = CandidatesDiscovery(
         seeds_datasets_path,
@@ -372,7 +361,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         query_candidates_path=query_candidates_path,
         queries_path=queries_path,
         bad_tokens=bad_tokens,
-        max_response_tokens=max_response_tokens
+        max_response_tokens=max_response_tokens,
     )
 
     orqa_cfg = OrQAConfig(
