@@ -7,16 +7,14 @@ from dotenv import load_dotenv
 from conf import load_config
 from orqa.cleaning import ckan_cleaning, socrata_cleaning
 
-# from orqa.crawling import crawl_canada, crawl_modena, crawl_nyc, crawl_uk
+from orqa.crawling import crawl_canada, crawl_modena, crawl_nyc, crawl_uk, crawl_bologna, crawl_paris, crawl_madrid
 from orqa.indexing import create_blend_index
 
-# from orqa.candidates_generation import candidates_discovery
+from orqa.candidates_generation import candidates_discovery
 from orqa.statement_generation import generate_statements
 from orqa.statement_judge import generate_response
 
 load_dotenv()
-os.environ["DATADIR"] = "D:\\"
-
 
 def canada():
     canada_yaml_path = Path(
@@ -75,12 +73,45 @@ def nyc():
     # socrata_cleaning(cfg)
     # create_blend_index(cfg)
     # candidates_discovery(cfg)
-    generate_statements(cfg)
+    #generate_statements(cfg)
     # generate_response(cfg)
 
 
+def bologna():
+    bologna_yaml_path = Path(
+        os.path.dirname(__file__), "..", "conf", "workflow", "bologna.yaml"
+    )
+    data_path = Path(os.environ["DATADIR"], "orqa", "ods", "bologna")
+
+    data_path.mkdir(parents=True, exist_ok=True)
+
+    cfg = load_config(bologna_yaml_path, data_path)
+    crawl_bologna(cfg)
+
+def madrid():
+    madrid_yaml_path = Path(
+        os.path.dirname(__file__), "..", "conf", "workflow", "madrid.yaml"
+    )
+    data_path = Path(os.environ["DATADIR"], "orqa", "ckan", "madrid")
+
+    data_path.mkdir(parents=True, exist_ok=True)
+
+    cfg = load_config(madrid_yaml_path, data_path)
+    crawl_madrid(cfg)
+
+def paris():
+    paris_yaml_path = Path(
+        os.path.dirname(__file__), "..", "conf", "workflow", "paris.yaml"
+    )
+    data_path = Path(os.environ["DATADIR"], "orqa", "ods", "paris")
+
+    data_path.mkdir(parents=True, exist_ok=True)
+
+    cfg = load_config(paris_yaml_path, data_path)
+    crawl_paris(cfg)
+
 def main():
-    accepted = ["canada", "uk", "nyc", "modena"]
+    accepted = ["canada", "uk", "nyc", "modena","bologna","paris","madrid"]
     assert len(sys.argv) == 2, f"Usage is: python main.py <{' | '.join(accepted)}>"
 
     match sys.argv[1]:
@@ -90,8 +121,12 @@ def main():
             uk()
         case "nyc":
             nyc()
-        case "modena":
-            modena()
+        case "bologna":
+            bologna()
+        case "paris":
+            paris()
+        case "madrid":
+            madrid()
         case _:
             raise ValueError(f"Usage is: python main.py <{' | '.join(accepted)}>")
 

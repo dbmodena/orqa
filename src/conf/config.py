@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
-
+import os
 import yaml
 
 
@@ -243,11 +243,11 @@ class OrQAConfig:
         self.metadata_path = self.data_path / "metadata"
         self.logging_path = self.data_path / "log"
         self.tmp_path = self.data_path / "tmp"
-        self.prompts_path = Path(__file__) / ".." / ".." / ".." / "conf" / "prompts"
-        self.llm_config_path = Path(__file__) / ".." / ".." / ".." / "conf" / "llm"
+        self.prompts_path = Path(os.getenv("ORQA_CONF")) / "prompts"
+        self.llm_config_path =  Path(os.getenv("ORQA_CONF")) / "llm"
         self.statistics_path = self.data_path / "statistics"
+        print(self.llm_config_path)
         assert self.prompts_path.exists()
-
         self.pandas_opts = PandasOpts()
         self.polars_opts = PolarsOpts()
 

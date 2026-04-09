@@ -177,3 +177,91 @@ def crawl_nyc(cfg: OrQAConfig):
     )
 
     socrata_download_datasets(download_cfg, nyc)
+
+
+
+from ulod.ckan.italy import ItalyCKAN, FerraraCKAN, MilanoCKAN
+from ulod.ckan.spain import MadridCKAN
+from ulod.bulk.ods import ODSDownloadConfig, ods_download_datasets
+from ulod.ods.italy import BolognaODS
+from ulod.ods.france import ParisODS
+
+
+connection_pool_kw = {"redirect": True, "timeout": 5}
+
+
+def _csv_only_filter_resource_metadata(metadata: dict[str, Any]) -> bool:
+    if metadata["format"].lower() not in ["csv"]:
+        return False
+    return True
+
+
+def crawl_paris(cfg: OrQAConfig):
+    """opendata.paris.fr — French, OpenDataSoft backend."""
+    download_destination = cfg.data_path
+    download_destination.mkdir(parents=True, exist_ok=True)
+
+    client = ParisODS(headers=headers, connection_kw=connection_pool_kw)
+    print(cfg.crawling.max_datasets)
+    download_cfg = ODSDownloadConfig(
+        download_destination,
+        max_datasets=cfg.crawling.max_datasets,
+        from_dataset_index=cfg.crawling.from_dataset_index,
+        batch_fetch_metadata=cfg.crawling.batch_fetch_metadata,
+        download_format=cfg.crawling.download_format,
+        http_headers=headers,
+        save_with_resource_name=True,
+        connection_pool_kw=connection_pool_kw,
+        max_workers=cfg.crawling.max_workers,
+        verbose=cfg.crawling.verbose,
+    )
+
+    ods_download_datasets(download_cfg, client)
+
+
+def crawl_bologna(cfg: OrQAConfig):
+    """opendata.comune.bologna.it — Italian, OpenDataSoft backend."""
+    download_destination = cfg.data_path
+    download_destination.mkdir(parents=True, exist_ok=True)
+
+    client = BolognaODS(headers=headers, connection_kw=connection_pool_kw)
+
+    download_cfg = ODSDownloadConfig(
+        download_destination,
+        max_datasets=cfg.crawling.max_datasets,
+        from_dataset_index=cfg.crawling.from_dataset_index,
+        batch_fetch_metadata=cfg.crawling.batch_fetch_metadata,
+        download_format=cfg.crawling.download_format,
+        http_headers=headers,
+        save_with_resource_name=True,
+        connection_pool_kw=connection_pool_kw,
+        max_workers=cfg.crawling.max_workers,
+        verbose=cfg.crawling.verbose,
+    )
+
+    ods_download_datasets(download_cfg, client)
+
+
+def crawl_madrid(cfg: OrQAConfig):
+    """datos.madrid.es — Spanish, CKAN backend."""
+    download_destination = cfg.data_path
+    download_destination.mkdir(parents=True, exist_ok=True)
+
+    client = MadridCKAN(headers=headers, connection_kw=connection_pool_kw)
+
+    download_cfg = CKANDownloadConfig(
+        download_destination,
+        max_datasets=cfg.crawling.max_datasets,
+        from_dataset_index=cfg.crawling.from_dataset_index,
+        batch_fetch_metadata=cfg.crawling.batch_fetch_metadata,
+        filter_resource_metadata=_csv_only_filter_resource_metadata,
+        download_format=cfg.crawling.download_format,
+        http_headers=headers,
+        save_with_resource_name=True,
+        connection_pool_kw=connection_pool_kw,
+        max_resource_size=cfg.crawling.max_resource_size,
+        max_workers=cfg.crawling.max_workers,
+        verbose=cfg.crawling.verbose,
+    )
+
+    ckan_download_datasets(download_cfg, client)
