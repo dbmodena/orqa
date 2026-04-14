@@ -30,7 +30,9 @@ PANDAS_KEYWORDS = {
 def pl_read_dataset(dataset_path: Path, opts: dict = {}) -> pl.DataFrame:
     match dataset_path.suffix:
         case ".csv":
-            return pl.read_csv(dataset_path, **opts.get("csv", {}))
+            csv_defaults = {"infer_schema_length": None}
+            csv_opts = {**csv_defaults, **opts.get("csv", {})}
+            return pl.read_csv(dataset_path, **csv_opts)
         case ".parquet":
             return pl.read_parquet(dataset_path, **opts.get("parquet", {}))
         case _:
@@ -42,7 +44,9 @@ def pl_read_dataset(dataset_path: Path, opts: dict = {}) -> pl.DataFrame:
 def pl_scan_dataset(dataset_path: Path, opts: dict = {}) -> pl.LazyFrame:
     match dataset_path.suffix:
         case ".csv":
-            return pl.scan_csv(dataset_path, **opts.get("csv", {}))
+            csv_defaults = {"infer_schema_length": None}
+            csv_opts = {**csv_defaults, **opts.get("csv", {})}
+            return pl.scan_csv(dataset_path, **csv_opts)
         case ".parquet":
             return pl.scan_parquet(dataset_path, **opts.get("parquet", {}))
         case _:

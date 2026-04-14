@@ -8,6 +8,7 @@ dependencies = [
     "bidict>=0.23.1",
     "bitarray>=3.8.0",
     "blend",
+    "cryptography",
     "duckdb>=1.4.3",
     "fastapi>=0.135.2",
     "fastexcel>=0.19.0",

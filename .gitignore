@@ -6,7 +6,7 @@
 job*.sh
 .venv
 *tmp
-
+venv
 *.ipynb_checkpoints
 data
 prev*
@@ -15,3 +15,8 @@ prev*
 .env
 __pycache__
 oci
+.pytest_cache
+conf\llm\oci_api_key.pem
+.hypothesis
+.kiro
+tests

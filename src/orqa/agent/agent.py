@@ -6,7 +6,7 @@ from .TaskProposer import TaskProposerLLMClient
 from .StatementClient import LLMClientStatementGenerator
 from .StatementJudge import LLMStatementJudge
 from .LLMClient import LLMClient
-from .prompting import CandidatesDiscoveryPrompt,JudgementResponseGenerationPrompt,PandasStatementGenerationPrompt,SQLStatementGenerationPrompt,ResponseGenerationPrompt
+from .prompting import CandidatesDiscoveryPrompt,JudgementResponseGenerationPrompt,SingleTableJudgementResponseGenerationPrompt,PandasStatementGenerationPrompt,SQLStatementGenerationPrompt,ResponseGenerationPrompt,SingleTablePandasPrompt,SingleTableSQLPrompt
 from ..queries.query_execution import QueryExecutor
 import pandas as pd
 import copy
@@ -80,9 +80,9 @@ class CandidatesDiscoveryAgent:
 
 
 class JudgementResponseAgent:
-    def __init__(self, config_path: Path, kind: str, executor, entry: dict, max_tokens: int = 2000):
+    def __init__(self, config_path: Path, kind: str, executor, entry: dict, max_tokens: int = 2000, single_table: bool = False):
         self.config_path = config_path
-        self.prompt = JudgementResponseGenerationPrompt()
+        self.prompt = SingleTableJudgementResponseGenerationPrompt() if single_table else JudgementResponseGenerationPrompt()
         self._client = LLMStatementJudge(config_path)
         self.max_tokens = max_tokens
         self.executor = executor
@@ -360,6 +360,161 @@ class StatementGenerationAgent:
             print(f"Error: '{e}'")
         except Exception as e:
             raise e
+
+
+class SingleTableStatementGenerationAgent:
+    def __init__(self, config_path: Path, kind: str, bad_tokens: list, max_judge_iterations: int = 3):
+        self.config_path = config_path
+        if kind == "PANDAS":
+            self.prompt = SingleTablePandasPrompt()
+        else:
+            self.prompt = SingleTableSQLPrompt()
+        self._client = LLMClientStatementGenerator(self.config_path)
+        self.bad_tokens = bad_tokens
+        self.max_judge_iterations = max_judge_iterations
+
+    def generate_statements(
+        self,
+        dataset_path,
+        alias: dict,
+        kind: str,
+        metadata: dict,
+        max_cols: int = 20,
+        sample_size: int = 5,
+    ) -> dict | None:
+        try:
+            df, dataset_info = utils.prepare_dataset(
+                dataset_path,
+                [],
+                max_cols,
+                sample_size,
+                self.bad_tokens,
+            )
+
+            base_prompt = self.prompt.update(
+                dataset_info["dataset_name"],
+                dataset_info["num_rows"],
+                dataset_info["num_columns"],
+                metadata,
+                dataset_info["columns_details"],
+                dataset_info["sample_data"],
+                json.dumps(alias, indent=2),
+            )
+
+            avg_cols = len(df.columns)
+
+            datasets_path = dataset_path.parent
+            executor = QueryExecutor(datasets_path=datasets_path, bad_tokens=self.bad_tokens)
+            entry = {"tables": alias}
+
+            judge = JudgementResponseAgent(self.config_path, kind, executor, entry, single_table=True)
+
+            all_approved_executed: list = []
+            all_tokens = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            all_errors: list = []
+            last_model = ""
+            total_time = 0.0
+            feedback_messages = None
+            pending_queries: list = []
+            expected_ids: set[str] = set()
+
+            for iteration in range(self.max_judge_iterations):
+                start = time.perf_counter()
+                result, tokens, errors, model = self._client.complete(
+                    base_prompt,
+                    [df],
+                    alias,
+                    typology=kind,
+                    feedback=feedback_messages,
+                )
+                total_time += time.perf_counter() - start
+
+                for k in all_tokens:
+                    all_tokens[k] += tokens.get(k, 0)
+                all_errors.extend(errors)
+                last_model = model
+
+                pending_queries = result.get("queries", [])
+                if not pending_queries:
+                    print("⚠️  No queries returned by the statement client — stopping.")
+                    break
+
+                # validate returned IDs haven't shifted on correction iterations
+                returned_ids = {str(q.get("id")) for q in pending_queries}
+                if iteration > 0 and not returned_ids.issubset(expected_ids):
+                    rogue = returned_ids - expected_ids
+                    print(f"⚠️  Unexpected IDs returned on iteration {iteration + 1}: {rogue} — stopping.")
+                    break
+                expected_ids = returned_ids
+
+                evaluation = judge.evaluate(pending_queries)
+
+                all_approved_executed.extend(evaluation["approved"])
+
+                # surface execution failures back to the generator alongside any judge feedback
+                execution_failure_feedback = []
+                if evaluation["execution_failures"]:
+                    failure_lines = "\n".join(
+                        f"- id={f['id']}: {f['error']}"
+                        for f in evaluation["execution_failures"]
+                    )
+                    failure_queries = [f["query"] for f in evaluation["execution_failures"]]
+                    execution_failure_feedback = [
+                        {
+                            "role": "assistant",
+                            "content": json.dumps({"queries": failure_queries}, indent=2),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                "The following queries failed execution entirely. "
+                                "Fix ONLY these queries and return them with the same IDs:\n\n"
+                                + failure_lines
+                            ),
+                        },
+                    ]
+
+                if evaluation["all_done"]:
+                    break
+
+                # merge judge feedback and execution failure feedback for next iteration
+                feedback_messages = (evaluation["feedback_messages"] or []) + execution_failure_feedback
+
+            # build final approved queries enriched with judge response and feedback
+            approved_query_ids = {str(er["id"]) for er in all_approved_executed}
+            expected_alias = list(alias.keys())[0]
+            approved_queries = []
+            for q in pending_queries:
+                if str(q.get("id")) not in approved_query_ids:
+                    continue
+                # Enforce exactly one Table entry referencing the single dataset alias (Req 8.2)
+                tables = q.get("tables", [])
+                if len(tables) != 1 or tables[0].get("name") != expected_alias:
+                    q["tables"] = [{"name": expected_alias, "reason": tables[0].get("reason", "") if tables else "", "columns_involved": tables[0].get("columns_involved", []) if tables else []}]
+                approved_queries.append({
+                    **q,
+                    "response": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("Response", ""),
+                    "judge_feedback": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("Feedback", ""),
+                    "keyword_count": utils.count_keywords(q.get("code"), kind),
+                })
+
+            return {
+                "result": {"queries": approved_queries},
+                "token_usage": all_tokens,
+                "errors": all_errors,
+                "model": last_model,
+                "time_elapsed": total_time,
+                "avg_cols": avg_cols,
+                "executed_results": all_approved_executed,
+            }
+
+        except FileNotFoundError as e:
+            print(f"Error: '{e}'")
+        except Exception as e:
+            raise e
+
+
+
 
 class GenerateResponseAgent:
     def __init__(self, config_path: Path,max_tokens:int=2000):

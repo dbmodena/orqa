@@ -1,12 +1,13 @@
 import asyncio
 import json
+import random
 import sys
 from pathlib import Path
 from typing import AsyncGenerator
 
 import pandas as pd
 
-from .agent.agent import StatementGenerationAgent
+from .agent.agent import StatementGenerationAgent, SingleTableStatementGenerationAgent
 from .utils import load_datasets_metadata, load_dataset_info, save_json, load_json
 from conf import OrQAConfig
 from dataclasses import dataclass, field
@@ -187,6 +188,45 @@ def _build_match_inputs(
         involved_cols[alias]  = match["columns_by_table"].get(alias, [])
     return dataset_paths, aliases, metadatas, involved_cols
 
+def _is_single_table_candidate(match: dict) -> bool:
+    """Check if a candidate has a single dataset and no cross-table match definitions.
+
+    A single-table candidate is identified by:
+    - Having exactly one entry in the ``aliases`` mapping
+    - Having no SQL or Pandas cross-table match definitions
+
+    Args:
+        match: A candidate record loaded from the matches/candidates JSON.
+
+    Returns:
+        True if the candidate is a single-table candidate, False otherwise.
+    """
+    aliases = match.get("aliases", {})
+    if len(aliases) != 1:
+        return False
+
+    sql_matches = match.get("SQL_matches", [])
+    pandas_matches = match.get("PANDAS_matches", [])
+    return len(sql_matches) == 0 and len(pandas_matches) == 0
+
+
+
+def _sample_single_table_datasets(
+    csv_folder: Path,
+    count: int,
+    extension: str = "csv",
+    seed: int | None = None,
+) -> list[Path]:
+    """Sample *count* random CSV files from *csv_folder*.
+
+    If fewer files exist than *count*, all available files are returned.
+    """
+    all_csvs = sorted(csv_folder.glob(f"*.{extension}"))
+    if not all_csvs:
+        return []
+    rng = random.Random(seed)
+    return rng.sample(all_csvs, min(count, len(all_csvs)))
+
 
 def create_statements(
     config_path: Path,
@@ -198,6 +238,8 @@ def create_statements(
     datasets_metadata: dict | None = None,
     extension: str = "csv",
     bad_tokens: list | None = None,
+    enable_single_table: bool = False,
+    single_table_query_count: int | None = None,
 ) -> dict:
     """Synchronous batch statement generation (used by main.py CLI)."""
     datasets_metadata = datasets_metadata or {}
@@ -208,12 +250,66 @@ def create_statements(
     results     = load_json(output_file) if output_file.exists() else {}
     total       = len(all_matches)
     successes = failures = 0
+    idx = 0
+    # ── Single-table generation (random CSV sampling) ─────────────────────────
+    if enable_single_table and single_table_query_count:
+        sampled = _sample_single_table_datasets(csv_folder, single_table_query_count, extension)
+        st_total = len(sampled)
+        st_successes = st_failures = 0
+        st_failed = ['st_1', 'st_2', 'st_4', 'st_6', 'st_9', 'st_13', 'st_18', 'st_19', 'st_21', 'st_26', 'st_29', 'st_35', 'st_42', 'st_51', 'st_56', 'st_60', 'st_62', 'st_69', 'st_74', 'st_80', 'st_87', 'st_88']
 
+        numeric_failed = ['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '34', '37', '38', '40', '42', '44', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57', '58', '59', '60', '61', '62', '63', '64', '65', '66', '67', '68', '69', '70', '71', '72', '73', '74', '75', '76', '77', '79', '80', '81', '82', '83', '84', '85', '86', '87', '88', '89', '90', '92', '93', '94', '95', '96', '97', '98', '99']
+        agent = SingleTableStatementGenerationAgent(config_path, kind, bad_tokens)
+        for st_idx, csv_path in enumerate(sampled):
+            if f"st_{st_idx}" not in st_failed:
+                continue
+            dataset_name = csv_path.stem
+            aliases = {"Table_0": dataset_name}
+            metadata = datasets_metadata.get(dataset_name)
+
+            sys.stdout.write(
+                f"\r[single-table {st_idx+1}/{st_total}]  "
+                f"✅ {st_successes}   ❌ {st_failures}   "
+            )
+
+            content = agent.generate_statements(
+                csv_path, aliases, kind,
+                metadata, max_cols, sample_size=5,
+            )
+
+            result          = content["result"]
+            status          = "success" if result.get("queries") else "failure"
+            model           = content["model"].split("/")[-1]
+            generation_time = content["time_elapsed"]
+
+            if result.get("queries"): st_successes += 1
+            else:                     st_failures  += 1
+
+            # Store with a "st_" prefix to distinguish from cross-table indices
+            results.setdefault(model, {}).setdefault(kind, {})[f"st_{st_idx}"] = {
+                "status":          status,
+                "data":            result,
+                "tokens":          content["token_usage"],
+                "tables":          aliases,
+                "errors":          content["errors"],
+                "generation_time": generation_time,
+                "avg_cols":        content["avg_cols"],
+            }
+            save_json(results, output_file)
+            sys.stdout.flush()
+
+        successes += st_successes
+        failures  += st_failures
+
+    # ── Cross-table generation ────────────────────────────────────────────────
+    agent = StatementGenerationAgent(config_path, kind, bad_tokens)
     for idx, match in enumerate(all_matches):
-        agent = StatementGenerationAgent(config_path, kind, bad_tokens)
+        if idx not in numeric_failed:
+            continue
         sys.stdout.write(
             f"\r[{idx+1}/{total}]  ✅ Successes: {successes}   ❌ Failures: {failures}   "
         )
+
         dataset_paths, aliases, metadatas, involved_cols = _build_match_inputs(
             match, csv_folder, datasets_metadata, extension
         )
@@ -243,8 +339,10 @@ def create_statements(
         save_json(results, output_file)
         sys.stdout.flush()
 
+    
     print(f"\nResults saved to {output_file}")
     return results
+
 
 
 # ── Async streaming generation (used by web_app.py) ──────────────────────────
@@ -292,28 +390,24 @@ async def stream_generate_statements(
     total       = len(all_matches)
     successes = failures = 0
 
-    # Collect indices already stored in the file for this kind so we skip them
-    #done_indices: set[int] = set()
-    #for model_entries in results.values():
-    #    for stored_idx in model_entries.get(kind, {}).keys():
-    #        done_indices.add(int(stored_idx))
+    enable_single_table = cfg.statement_generation.enable_single_table
+    single_table_query_count = cfg.statement_generation.single_table_query_count
 
+    # ── Cross-table generation ────────────────────────────────────────────────
+    cross_agent = StatementGenerationAgent(
+        cfg.llm_config_path / "litellm.yaml",
+        kind,
+        cfg.statement_generation.bad_tokens,
+    )
     for idx, match in enumerate(all_matches):
-        # Skip matches before the resume point or already processed
-        if idx < resume_from: #or idx in done_indices:
+        if idx < resume_from:
             continue
 
-        def _process_one(match=match, idx=idx):
-            """Runs inside a thread — keeps the event loop free."""
-            agent = StatementGenerationAgent(
-                cfg.llm_config_path / "litellm.yaml",
-                kind,
-                cfg.statement_generation.bad_tokens,
-            )
+        def _process_cross(match=match):
             dataset_paths, aliases, metadatas, involved_cols = _build_match_inputs(
                 match, cfg.datasets_path, metadata, "csv"
             )
-            content = agent.generate_statements(
+            content = cross_agent.generate_statements(
                 dataset_paths, aliases, kind,
                 match[f"{kind}_matches"], involved_cols, metadatas,
                 cfg.statement_generation.max_cols, sample_size=5,
@@ -321,7 +415,7 @@ async def stream_generate_statements(
             return content, aliases
 
         try:
-            content, aliases = await loop.run_in_executor(None, _process_one)
+            content, aliases = await loop.run_in_executor(None, _process_cross)
         except Exception as exc:
             yield {"type": "error", "message": str(exc)}
             return
@@ -343,7 +437,6 @@ async def stream_generate_statements(
             "avg_cols":        content["avg_cols"],
         }
 
-        # Persist after each match (also in executor — avoids blocking on disk IO)
         await loop.run_in_executor(None, save_json, results, output_file)
 
         yield {
@@ -356,6 +449,67 @@ async def stream_generate_statements(
             "aliases":     list(aliases.values()),
             "query_count": len(result.get("queries", [])),
         }
+
+    # ── Single-table generation (random CSV sampling) ─────────────────────────
+    if enable_single_table and single_table_query_count:
+        sampled = await loop.run_in_executor(
+            None, _sample_single_table_datasets,
+            cfg.datasets_path, single_table_query_count, "csv",
+        )
+        st_total = len(sampled)
+
+        single_agent = SingleTableStatementGenerationAgent(
+            cfg.llm_config_path / "litellm.yaml",
+            kind,
+            cfg.statement_generation.bad_tokens,
+        )
+        for st_idx, csv_path in enumerate(sampled):
+            dataset_name = csv_path.stem
+            aliases = {"Table_0": dataset_name}
+
+            def _process_single(csv_path=csv_path, aliases=aliases):
+                content = single_agent.generate_statements(
+                    csv_path, aliases, kind,
+                    metadata.get(csv_path.stem),
+                    cfg.statement_generation.max_cols, sample_size=5,
+                )
+                return content
+
+            try:
+                content = await loop.run_in_executor(None, _process_single)
+            except Exception as exc:
+                yield {"type": "error", "message": str(exc)}
+                return
+
+            result = content["result"]
+            status = "success" if result.get("queries") else "failure"
+            model  = content["model"].split("/")[-1]
+
+            if result.get("queries"): successes += 1
+            else:                     failures  += 1
+
+            results.setdefault(model, {}).setdefault(kind, {})[f"st_{st_idx}"] = {
+                "status":          status,
+                "data":            result,
+                "tokens":          content["token_usage"],
+                "tables":          aliases,
+                "errors":          content["errors"],
+                "generation_time": content["time_elapsed"],
+                "avg_cols":        content["avg_cols"],
+            }
+
+            await loop.run_in_executor(None, save_json, results, output_file)
+
+            yield {
+                "type":        "progress",
+                "idx":         total + st_idx + 1,
+                "total":       total + st_total,
+                "successes":   successes,
+                "failures":    failures,
+                "status":      status,
+                "aliases":     list(aliases.values()),
+                "query_count": len(result.get("queries", [])),
+            }
 
     yield {"type": "done", "successes": successes, "failures": failures, "total": total}
 
@@ -370,13 +524,16 @@ def generate_statements(cfg: OrQAConfig) -> None:
         None,
         source=cfg.source,
     )
-    create_statements(
-        cfg.llm_config_path.joinpath("litellm.yaml"),
-        cfg.datasets_path,
-        cfg.statement_generation.query_candidates_path,
-        cfg.statement_generation.queries_path,
-        cfg.statement_generation.kind,
-        cfg.statement_generation.max_cols,
-        datasets_metadata=metadata,
-        bad_tokens=cfg.statement_generation.bad_tokens,
-    )
+    for lang in ["SQL","PANDAS"]:
+        create_statements(
+            cfg.llm_config_path.joinpath("litellm.yaml"),
+            cfg.datasets_path,
+            cfg.statement_generation.query_candidates_path,
+            cfg.statement_generation.queries_path,
+            lang,#cfg.statement_generation.kind,
+            cfg.statement_generation.max_cols,
+            datasets_metadata=metadata,
+            bad_tokens=cfg.statement_generation.bad_tokens,
+            enable_single_table=cfg.statement_generation.enable_single_table,
+            single_table_query_count=cfg.statement_generation.single_table_query_count,
+        )

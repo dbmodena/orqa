@@ -229,6 +229,19 @@ class JudgementResponseGenerationPrompt(Prompt):
         data
     ) -> str:
         return self._update(data=data)
+
+
+class SingleTableJudgementResponseGenerationPrompt(Prompt):
+    _prompt_path = PROMPT_PATH.joinpath("single_table_judge.md")
+    def __init__(self):
+        super().__init__()
+
+    def update(
+        self,
+        data
+    ) -> str:
+        return self._update(data=data)
+
     
 
 class ResponseGenerationPrompt(Prompt):
@@ -242,3 +255,55 @@ class ResponseGenerationPrompt(Prompt):
         data
     ) -> str:
         return self._update(data=data,question=question)
+
+
+
+class SingleTablePandasPrompt(Prompt):
+    _prompt_path = PROMPT_PATH.joinpath("single_table_pandas_statement_generation.md")
+
+    def update(
+        self,
+        dataset_name: str,
+        num_rows: int,
+        num_columns: int,
+        dataset_metadata: dict,
+        column_details: dict,
+        sample_data,
+        alias: str,
+    ) -> str:
+        query_dataset_prompt = DatasetDescription()
+        query_dataset_description = query_dataset_prompt.update(
+            dataset_name,
+            num_rows,
+            num_columns,
+            dataset_metadata,
+            column_details,
+            sample_data,
+        )
+        return self._update(table=query_dataset_description, alias=alias)
+
+
+class SingleTableSQLPrompt(Prompt):
+    _prompt_path = PROMPT_PATH.joinpath("single_table_sql_statement_generation.md")
+
+    def update(
+        self,
+        dataset_name: str,
+        num_rows: int,
+        num_columns: int,
+        dataset_metadata: dict,
+        column_details: dict,
+        sample_data,
+        alias: str,
+    ) -> str:
+        query_dataset_prompt = DatasetDescription()
+        query_dataset_description = query_dataset_prompt.update(
+            dataset_name,
+            num_rows,
+            num_columns,
+            dataset_metadata,
+            column_details,
+            sample_data,
+        )
+        return self._update(table=query_dataset_description, alias=alias)
+

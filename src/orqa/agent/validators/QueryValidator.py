@@ -174,8 +174,8 @@ class QueryValidator(ABC):
 
         for idx, q in enumerate(result["queries"]):
             actual_query = q
-            dataframes, ordered_names = self.prefilter_dataframes(actual_query['tables'])
             try:
+                dataframes, ordered_names = self.prefilter_dataframes(actual_query['tables'])
                 raw_code = q.get("code") or ""
                 if not raw_code.strip():
                     raise ValueError("query 'code' field is missing or empty")
@@ -295,8 +295,17 @@ class QueryValidator(ABC):
         return False
 
     def _check_table_usage(self, query_text: str) -> bool:
+        # Single-table mode: skip multi-table connectivity/usage check,
+        # only verify the single alias is referenced (Req 6.3, 6.4).
+        if len(self.table_names) == 1:
+            if self.table_names[0] in query_text:
+                return True
+            self.unused_tables = {self.table_names[0]}
+            return False
+
         self.unused_tables = {t for t in self.table_names if t not in query_text}
         return len(self.unused_tables) == 0
+
 
     def _check_table_names_in_question(self, question: str) -> bool:
         """Returns True if any table name leaks into the question."""

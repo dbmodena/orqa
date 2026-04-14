@@ -61,9 +61,27 @@ class LLMClientStatementGenerator(LLMClientStructured):
         table_names,
         typology: str = "SQL",
         involved_cols=None,
+        feedback: list | None = None,
     ) -> tuple[dict, dict, list[str], str]:
         """
         Generate, validate, and return SQL/Pandas queries.
+
+        Parameters
+        ----------
+        prompt : str
+            The base prompt describing the generation task.
+        dataframes : list
+            DataFrames to validate queries against.
+        table_names : dict
+            Mapping of table aliases to table names.
+        typology : str
+            Query language – ``"SQL"`` or ``"PANDAS"``.
+        involved_cols : optional
+            Column information used for suffix constraints.
+        feedback : list | None
+            Optional list of feedback messages from the judge loop.
+            When provided, the conversation starts with the base prompt
+            followed by the feedback messages instead of a fresh prompt.
 
         Returns
         -------
@@ -72,10 +90,18 @@ class LLMClientStatementGenerator(LLMClientStructured):
         usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         initial_message = self.reform_prompt_constraint(prompt)
 
-        messages = [
-            {"role": "system", "content": "You are an expert Data Engineer"},
-            {"role": "user", "content": initial_message},
-        ]
+        if feedback is not None:
+            # Judge iteration: start with the base prompt, then append feedback
+            messages = [
+                {"role": "system", "content": "You are an expert Data Engineer"},
+                {"role": "user", "content": initial_message},
+            ]
+            messages.extend(feedback)
+        else:
+            messages = [
+                {"role": "system", "content": "You are an expert Data Engineer"},
+                {"role": "user", "content": initial_message},
+            ]
 
         last_content = ""
         last_error = None
@@ -221,6 +247,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
             [str(e) for e in all_errors],
             self.config["model"],
         )
+
 
     # ------------------------------------------------------------------
     # Statement-specific helpers

@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 import os
 import yaml
 
@@ -159,6 +159,7 @@ class CandidatesDiscovery:
     verbose: bool = field(default=False)
 
 
+
 @dataclass
 class StatementGeneration:
     """
@@ -184,6 +185,42 @@ class StatementGeneration:
 
     # max number of tokens per natural languange response
     max_response_tokens: int
+
+    # Enable single-table query generation alongside cross-table generation
+    enable_single_table: bool = False
+    # Number of queries to generate per single table (None = fall back to cross-table count)
+    single_table_query_count: Optional[int] = None
+
+    def __post_init__(self):
+        # Validate enable_single_table is a bool, coerce common truthy/falsy values
+        if not isinstance(self.enable_single_table, bool):
+            if isinstance(self.enable_single_table, str):
+                if self.enable_single_table.lower() in ("true", "1", "yes"):
+                    self.enable_single_table = True
+                elif self.enable_single_table.lower() in ("false", "0", "no"):
+                    self.enable_single_table = False
+                else:
+                    raise ValueError(
+                        f"enable_single_table must be a bool, got string '{self.enable_single_table}'"
+                    )
+            elif isinstance(self.enable_single_table, (int, float)):
+                self.enable_single_table = bool(self.enable_single_table)
+            else:
+                raise TypeError(
+                    f"enable_single_table must be a bool, got {type(self.enable_single_table).__name__}"
+                )
+
+        # Validate single_table_query_count is a positive int or None
+        if self.single_table_query_count is not None:
+            if not isinstance(self.single_table_query_count, int) or isinstance(self.single_table_query_count, bool):
+                raise TypeError(
+                    f"single_table_query_count must be a positive int or None, "
+                    f"got {type(self.single_table_query_count).__name__}"
+                )
+            if self.single_table_query_count <= 0:
+                raise ValueError(
+                    f"single_table_query_count must be a positive int, got {self.single_table_query_count}"
+                )
 
 
 @dataclass
@@ -246,7 +283,7 @@ class OrQAConfig:
         self.prompts_path = Path(os.getenv("ORQA_CONF")) / "prompts"
         self.llm_config_path =  Path(os.getenv("ORQA_CONF")) / "llm"
         self.statistics_path = self.data_path / "statistics"
-        print(self.llm_config_path)
+        print(self.prompts_path)
         assert self.prompts_path.exists()
         self.pandas_opts = PandasOpts()
         self.polars_opts = PolarsOpts()
@@ -355,6 +392,14 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         **candidates_discovery_task,
     )
 
+    # Read optional single-table generation parameters from config
+    enable_single_table = parsed["tasks"]["query_generation"].get(
+        "enable_single_table", False
+    )
+    single_table_query_count = parsed["tasks"]["query_generation"].get(
+        "single_table_query_count", None
+    )
+
     statement_generation = StatementGeneration(
         kind=kind,
         max_cols=max_cols,
@@ -362,6 +407,8 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         queries_path=queries_path,
         bad_tokens=bad_tokens,
         max_response_tokens=max_response_tokens,
+        enable_single_table=enable_single_table,
+        single_table_query_count=single_table_query_count,
     )
 
     orqa_cfg = OrQAConfig(
