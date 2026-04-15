@@ -5,17 +5,27 @@ from typing import Any
 
 from fake_useragent import UserAgent
 from ulod.bulk.ckan import CKANDownloadConfig, ckan_download_datasets
-from ulod.ckan import CanadaCKAN
-from ulod.ckan.uk import UKCKAN
-from ulod.ckan.italy import ModenaCKAN
-
-from ulod.socrata import NYCSocrata
+from ulod.bulk.ods import ODSDownloadConfig, ods_download_datasets
 from ulod.bulk.socrata import SocrataDownloadConfig, socrata_download_datasets
+from ulod.countries.canada import Canada
+from ulod.countries.france import Paris
+from ulod.countries.italy import Bologna, Modena
+from ulod.countries.spain import Madrid
+from ulod.countries.uk import UK
+from ulod.countries.usa import NYC
 
 from conf import OrQAConfig
 
+
+def _csv_only_filter_resource_metadata(metadata: dict[str, Any]) -> bool:
+    if metadata["format"].lower() not in ["csv"]:
+        return False
+    return True
+
+
 ua = UserAgent()
 headers = {"User-Agent": ua.firefox}
+connection_pool_kw = {"redirect": True, "timeout": 5}
 
 
 def _canada_filter_resource_metadata(metadata: dict[str, Any]) -> bool:
@@ -87,7 +97,7 @@ def crawl_canada(cfg: OrQAConfig):
     download_destination = cfg.data_path
     download_destination.mkdir(parents=True, exist_ok=True)
 
-    canada = CanadaCKAN(headers=headers)
+    canada = Canada(headers=headers)
 
     download_cfg = CKANDownloadConfig(
         download_destination,
@@ -113,7 +123,7 @@ def crawl_uk(cfg: OrQAConfig):
     download_destination = cfg.data_path
     download_destination.mkdir(parents=True, exist_ok=True)
 
-    uk = UKCKAN(headers=headers)
+    uk = UK(headers=headers)
 
     download_cfg = CKANDownloadConfig(
         download_destination,
@@ -137,7 +147,7 @@ def crawl_modena(cfg: OrQAConfig):
     download_destination = cfg.data_path
     download_destination.mkdir(parents=True, exist_ok=True)
 
-    client = ModenaCKAN(headers=headers)
+    client = Modena(headers=headers)
 
     download_cfg = CKANDownloadConfig(
         download_destination,
@@ -160,7 +170,7 @@ def crawl_nyc(cfg: OrQAConfig):
     download_destination = cfg.data_path
     download_destination.mkdir(parents=True, exist_ok=True)
 
-    nyc = NYCSocrata(os.environ["SOCRATA_NYC_APP_TOKEN"])
+    nyc = NYC(os.environ["SOCRATA_NYC_APP_TOKEN"])
 
     download_cfg = SocrataDownloadConfig(
         download_destination,
@@ -179,29 +189,12 @@ def crawl_nyc(cfg: OrQAConfig):
     socrata_download_datasets(download_cfg, nyc)
 
 
-
-from ulod.ckan.italy import ItalyCKAN, FerraraCKAN, MilanoCKAN
-from ulod.ckan.spain import MadridCKAN
-from ulod.bulk.ods import ODSDownloadConfig, ods_download_datasets
-from ulod.ods.italy import BolognaODS
-from ulod.ods.france import ParisODS
-
-
-connection_pool_kw = {"redirect": True, "timeout": 5}
-
-
-def _csv_only_filter_resource_metadata(metadata: dict[str, Any]) -> bool:
-    if metadata["format"].lower() not in ["csv"]:
-        return False
-    return True
-
-
 def crawl_paris(cfg: OrQAConfig):
     """opendata.paris.fr — French, OpenDataSoft backend."""
     download_destination = cfg.data_path
     download_destination.mkdir(parents=True, exist_ok=True)
 
-    client = ParisODS(headers=headers, connection_kw=connection_pool_kw)
+    client = Paris(headers=headers, connection_kw=connection_pool_kw)
     print(cfg.crawling.max_datasets)
     download_cfg = ODSDownloadConfig(
         download_destination,
@@ -224,7 +217,7 @@ def crawl_bologna(cfg: OrQAConfig):
     download_destination = cfg.data_path
     download_destination.mkdir(parents=True, exist_ok=True)
 
-    client = BolognaODS(headers=headers, connection_kw=connection_pool_kw)
+    client = Bologna(headers=headers, connection_kw=connection_pool_kw)
 
     download_cfg = ODSDownloadConfig(
         download_destination,
@@ -247,7 +240,7 @@ def crawl_madrid(cfg: OrQAConfig):
     download_destination = cfg.data_path
     download_destination.mkdir(parents=True, exist_ok=True)
 
-    client = MadridCKAN(headers=headers, connection_kw=connection_pool_kw)
+    client = Madrid(headers=headers, connection_kw=connection_pool_kw)
 
     download_cfg = CKANDownloadConfig(
         download_destination,
@@ -265,3 +258,4 @@ def crawl_madrid(cfg: OrQAConfig):
     )
 
     ckan_download_datasets(download_cfg, client)
+

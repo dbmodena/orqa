@@ -1,13 +1,21 @@
 seed: 42
-source: ckan
+source: ods
 
 pandas:
   read:
     csv:
       nrows: 10_000
+      sep: ";"
     json:
       nrows: 10_000
 
+polars:
+  read:
+    csv:
+      separator: ";"
+  write:
+    csv:
+      separator: ","
 
 
 blend:
@@ -15,7 +23,7 @@ blend:
   max_cell_length: 128
   clean_args:
     lowercase: True
-    bad_tokens:
+    bad_tokens: # cells with exactly these values are skipped
       - "none"
       - "null"
       - "nan"
@@ -77,6 +85,7 @@ tasks:
     overlap_ratio_threshold: 50
     sm_macro_avg_threshold: 0.5
     sm_micro_avg_threshold: 0.5
+
   query_generation:
     kind: "SQL"
     max_cols: 10

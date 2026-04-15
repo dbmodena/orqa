@@ -5,10 +5,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from conf import load_config
-from orqa.cleaning import ckan_cleaning, socrata_cleaning
+from orqa.cleaning import ckan_cleaning, socrata_cleaning, ods_cleaning
 
 from orqa.crawling import crawl_canada, crawl_modena, crawl_nyc, crawl_uk, crawl_bologna, crawl_paris, crawl_madrid
 from orqa.indexing import create_blend_index
+from orqa.normalize_metadata import normalize_metadata
 
 from orqa.candidates_generation import candidates_discovery
 from orqa.statement_generation import generate_statements
@@ -85,7 +86,11 @@ def bologna():
     data_path.mkdir(parents=True, exist_ok=True)
 
     cfg = load_config(bologna_yaml_path, data_path)
-    crawl_bologna(cfg)
+    # crawl_bologna(cfg)
+    # ods_cleaning(cfg)
+    normalize_metadata(cfg)
+    # create_blend_index(cfg)
+
 
 def madrid():
     madrid_yaml_path = Path(

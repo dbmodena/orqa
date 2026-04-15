@@ -251,6 +251,10 @@ class OrQAConfig:
     # Where the datasets metadata are stored once downloaded
     metadata_path: Path = field(init=False)
 
+    # THe original and the normalized matadata filepaths
+    original_metadata_filepath: Path = field(init=False)
+    normalized_metadata_filepath: Path = field(init=False)
+
     # Where all the default prompts are stored
     # This path is not under the main data_path of OrQA,
     # but in the configuration directory already present
@@ -278,6 +282,9 @@ class OrQAConfig:
         self.datasets_path = self.data_path / "datasets" / self.crawling.download_format
 
         self.metadata_path = self.data_path / "metadata"
+        self.original_metadata_filepath = self.metadata_path / "metadata.json"
+        self.normalized_metadata_filepath = self.metadata_path / "normalized_metadata.json"
+
         self.logging_path = self.data_path / "log"
         self.tmp_path = self.data_path / "tmp"
         self.prompts_path = Path(os.getenv("ORQA_CONF")) / "prompts"
