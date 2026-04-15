@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Literal, Union
+from enum import Enum
 
 class DatasetAnalysisResult(BaseModel):
     """Result of dataset analysis with UNION and JOIN suggestions"""
@@ -197,26 +198,67 @@ class QuerySet(BaseModel):
     )
 
 
+
+
+class ViolatedCriterion(str, Enum):
+    vocabulary_mismatch    = "vocabulary_mismatch"
+    too_broad              = "too_broad"
+    unclear_result         = "unclear_result"
+    partial_implementation = "partial_implementation"
+    over_engineering       = "over_engineering"
+    trivial                = "trivial"
+    silent_filter_bias     = "silent_filter_bias"
+
+
 class Judgment(BaseModel):
-    """
-    Structured judgement
-    """
-    id: int = Field(..., description=(
-        "Identifier of the query."
-    ))
-    Feedback: str = Field(
+    id: int = Field(
+        ...,
+        description="Identifier of the query being evaluated, copied from input."
+    )
+    vagueness_check: str = Field(
         ...,
         description=(
-            "Natural language feedback to the generated query."
+            "Result of the portability self-check. Must start with 'YES' or 'NO' "
+            "(whether the question could apply to a completely different dataset), "
+            "followed by one sentence quoting the specific term(s) that anchor or "
+            "fail to anchor the question to its domain."
         )
     )
-    Approved: bool = Field(..., description=(
-        "Binary classification of the generated query."
-    ))
-    Response: str = Field(
+    requirements_check: str = Field(
         ...,
         description=(
-            "Natural language response to the generated query."
+            "Bidirectional coverage check in plain language. List every analytical "
+            "requirement extracted from the question and whether it is implemented. "
+            "Then list every operation in the query and whether it maps to a stated "
+            "requirement. Flag anything MISSING or UNJUSTIFIED explicitly."
+        )
+    )
+    violated_criteria: List[ViolatedCriterion] = Field(
+        default_factory=list,
+        description=(
+            "Exhaustive list of rejection criteria triggered. Must be empty if approved is true."
+        )
+    )
+    feedback: str = Field(
+        ...,
+        description=(
+            "If approved: explain what makes the result meaningful and why the "
+            "query complexity is justified. If rejected: quote the exact vague "
+            "terms or unjustified operations, referencing which criterion was violated."
+        )
+    )
+    approved: bool = Field(
+        ...,
+        description=(
+            "True only if both pre-flight checks pass and no rejection criterion "
+            "is triggered. Must be consistent with violated_criteria."
+        )
+    )
+    response: str = Field(
+        ...,
+        description=(
+            "Concise business-facing interpretation of the query result "
+            "(3–4 sentences, insights only). Empty string if approved is false."
         )
     )
 
@@ -224,5 +266,8 @@ class Judgment(BaseModel):
 class Judgments(BaseModel):
     queries: List[Judgment] = Field(
         ...,
-        description="List of queries with matching natural language questions."
+        description=(
+            "One Judgment per (question, query) pair submitted for evaluation. "
+            "Order must match the input order."
+        )
     )

@@ -119,18 +119,18 @@ class JudgementResponseAgent:
  
         approved = [
             er for er in executed
-            if judgments_by_id.get(str(er["id"]), {}).get("Approved", False)
+            if judgments_by_id.get(str(er["id"]), {}).get("approved", False)
         ]
         rejected = [
             er for er in executed
-            if not judgments_by_id.get(str(er["id"]), {}).get("Approved", False)
+            if not judgments_by_id.get(str(er["id"]), {}).get("approved", False)
         ]
  
         # update rejection counts and accumulated feedback per id
         for er in rejected:
             qid = str(er["id"])
             self._rejection_counts[qid] = self._rejection_counts.get(qid, 0) + 1
-            feedback = judgments_by_id.get(qid, {}).get("Feedback", "no feedback")
+            feedback = judgments_by_id.get(qid, {}).get("feedback", "no feedback")
             self._accumulated_feedback.setdefault(qid, []).append(feedback)
  
         # queries rejected more than twice are considered stuck — stop retrying them
@@ -148,7 +148,7 @@ class JudgementResponseAgent:
             if still_actionable
             else None
         )
- 
+        print(feedback_messages)
         return {
             "approved": approved,
             "rejected": still_actionable,
@@ -332,14 +332,13 @@ class StatementGenerationAgent:
  
                 # merge judge feedback and execution failure feedback for next iteration
                 feedback_messages = (evaluation["feedback_messages"] or []) + execution_failure_feedback
- 
             # build final approved queries enriched with judge response and feedback
             approved_query_ids = {str(er["id"]) for er in all_approved_executed}
             approved_queries = [
                 {
                     **q,
-                    "response": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("Response", ""),
-                    "judge_feedback": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("Feedback", ""),
+                    "response": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("response", ""),
+                    "judge_feedback": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("feedback", ""),
                     "keyword_count":utils.count_keywords(q.get("code"),kind)
                 }
                 for q in pending_queries
@@ -493,8 +492,8 @@ class SingleTableStatementGenerationAgent:
                     q["tables"] = [{"name": expected_alias, "reason": tables[0].get("reason", "") if tables else "", "columns_involved": tables[0].get("columns_involved", []) if tables else []}]
                 approved_queries.append({
                     **q,
-                    "response": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("Response", ""),
-                    "judge_feedback": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("Feedback", ""),
+                    "response": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("response", ""),
+                    "judge_feedback": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("feedback", ""),
                     "keyword_count": utils.count_keywords(q.get("code"), kind),
                 })
 

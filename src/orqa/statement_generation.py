@@ -256,13 +256,15 @@ def create_statements(
         sampled = _sample_single_table_datasets(csv_folder, single_table_query_count, extension)
         st_total = len(sampled)
         st_successes = st_failures = 0
-        st_failed = ['st_1', 'st_2', 'st_4', 'st_6', 'st_9', 'st_13', 'st_18', 'st_19', 'st_21', 'st_26', 'st_29', 'st_35', 'st_42', 'st_51', 'st_56', 'st_60', 'st_62', 'st_69', 'st_74', 'st_80', 'st_87', 'st_88']
+        #st_failed = ['st_1', 'st_2', 'st_4', 'st_6', 'st_9', 'st_13', 'st_18', 'st_19', 'st_21', 'st_26', 'st_29', 'st_35', 'st_42', 'st_51', 'st_56', 'st_60', 'st_62', 'st_69', 'st_74', 'st_80', 'st_87', 'st_88']
 
-        numeric_failed = ['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '34', '37', '38', '40', '42', '44', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57', '58', '59', '60', '61', '62', '63', '64', '65', '66', '67', '68', '69', '70', '71', '72', '73', '74', '75', '76', '77', '79', '80', '81', '82', '83', '84', '85', '86', '87', '88', '89', '90', '92', '93', '94', '95', '96', '97', '98', '99']
+        #numeric_failed = ['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '34', '37', '38', '40', '42', '44', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57', '58', '59', '60', '61', '62', '63', '64', '65', '66', '67', '68', '69', '70', '71', '72', '73', '74', '75', '76', '77', '79', '80', '81', '82', '83', '84', '85', '86', '87', '88', '89', '90', '92', '93', '94', '95', '96', '97', '98', '99']
         agent = SingleTableStatementGenerationAgent(config_path, kind, bad_tokens)
         for st_idx, csv_path in enumerate(sampled):
-            if f"st_{st_idx}" not in st_failed:
+            if kind == "SQL": 
                 continue
+            #if f"st_{st_idx}" not in st_failed:
+            #    continue
             dataset_name = csv_path.stem
             aliases = {"Table_0": dataset_name}
             metadata = datasets_metadata.get(dataset_name)
@@ -304,8 +306,10 @@ def create_statements(
     # ── Cross-table generation ────────────────────────────────────────────────
     agent = StatementGenerationAgent(config_path, kind, bad_tokens)
     for idx, match in enumerate(all_matches):
-        if idx not in numeric_failed:
-            continue
+        #if idx not in numeric_failed:
+        #    continue
+        if kind == "SQL" and idx < 50: 
+                continue
         sys.stdout.write(
             f"\r[{idx+1}/{total}]  ✅ Successes: {successes}   ❌ Failures: {failures}   "
         )

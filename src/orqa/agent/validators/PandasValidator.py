@@ -797,6 +797,19 @@ class PandasValidator(QueryValidator):
     # Feedback
     # ------------------------------------------------------------------
     def _build_empty_result_feedback(self) -> str:
+        if len(self.table_names) == 1:
+            return "\n".join([
+                "The query returned an empty DataFrame (0 rows).",
+                "This usually means a filter condition is too restrictive or matches nothing in the data.",
+                "Suggestions:",
+                "  1. Relax or widen the filter condition — check the actual values in the column before filtering.",
+                "  2. String filters: normalise casing with .str.lower() on both sides:",
+                "       df[df['col'].str.lower() == 'expected value']",
+                "  3. Numeric columns stored as strings: cast before comparing:",
+                "       df[df['col'].astype(float) > threshold]",
+                "  4. Check for leading/trailing whitespace: df['col'].str.strip()",
+                "Rewrite the query applying these normalizations where relevant.",
+            ])
         return "\n".join([
             "The query returned an empty DataFrame (0 rows).",
             "This usually means a merge or filter condition matched nothing due to case or type mismatches.",
@@ -806,8 +819,10 @@ class PandasValidator(QueryValidator):
             "     or use .assign() before chaining:",
             "       df1.assign(_key=df1['key'].str.lower()).merge(",
             "           df2.assign(_key=df2['key'].str.lower()), on='_key', ...)",
-            "  2. Numeric columns stored as strings: cast with .astype(float) before filtering or aggregating.",
-            "  3. Boolean filters: check that the condition is not accidentally excluding all rows.",
+            "  2. Relax join conditions: consider using a left/outer join instead of the default inner join",
+            "     to verify which side has no matches before tightening the condition.",
+            "  3. Numeric columns stored as strings: cast with .astype(float) before filtering or aggregating.",
+            "  4. Boolean filters: check that the condition is not accidentally excluding all rows.",
             "Rewrite the query applying these normalizations where relevant.",
         ])
 

@@ -22,3 +22,4 @@ conf\llm\oci_api_key.pem
 .hypothesis
 .kiro
 tests
+_orqa

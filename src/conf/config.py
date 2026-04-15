@@ -280,7 +280,7 @@ class OrQAConfig:
         )
 
         self.datasets_path = self.data_path / "datasets" / self.crawling.download_format
-
+        print(self.data_path)
         self.metadata_path = self.data_path / "metadata"
         self.original_metadata_filepath = self.metadata_path / "metadata.json"
         self.normalized_metadata_filepath = self.metadata_path / "normalized_metadata.json"
