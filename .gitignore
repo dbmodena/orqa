@@ -23,3 +23,6 @@ conf\llm\oci_api_key.pem
 .kiro
 tests
 _orqa
+!tests/
+tests/*
+!tests/test_main_cli.py

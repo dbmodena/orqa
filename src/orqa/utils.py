@@ -173,6 +173,49 @@ def load_datasets_metadata(
     return rv
 
 
+def load_normalized_datasets_metadata(metadata_path: Path) -> dict[str, dict]:
+    """Load normalized metadata and index it by resource identifier."""
+    with open(metadata_path, "r", encoding="utf-8") as file:
+        metadata = json.load(file)
+
+    if not isinstance(metadata, list):
+        raise ValueError(
+            f"Expected normalized metadata to be a JSON list, got {type(metadata)}"
+        )
+
+    rv = {}
+
+    for record in metadata:
+        if not isinstance(record, dict):
+            continue
+
+        resource_id = record.get("resource_id") or record.get("dataset_id")
+        if not resource_id:
+            continue
+
+        rv[resource_id] = prepare_normalized_metadata_for_prompt(record)
+
+    return rv
+
+
+def prepare_normalized_metadata_for_prompt(record: dict) -> dict:
+    """Adapt a normalized metadata record to the shape consumed by prompts."""
+    return {
+        "title": record.get("title", "N/A"),
+        "description": record.get("description", "N/A"),
+        "publisher": record.get("publisher", "N/A"),
+        "tags": record.get("tags", []),
+        "source": record.get("source", "N/A"),
+        "dataset_id": record.get("dataset_id", "N/A"),
+        "resource_id": record.get("resource_id", "N/A"),
+        "created_at": record.get("created_at", "N/A"),
+        "modified_at": record.get("modified_at", "N/A"),
+        "dataset_url": record.get("dataset_url", "N/A"),
+        "download_url": record.get("download_url", "N/A"),
+        "format": record.get("format", "N/A"),
+    }
+
+
 def load_dataset_info(
     dataset_path: Path,
     polars_opts: dict = {},
@@ -305,5 +348,4 @@ def count_keywords(query: str, kind: str = "SQL") -> dict[str, int]:
             if matches:
                 counts[kw] = len(matches)
         return counts
-
 

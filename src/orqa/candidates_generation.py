@@ -30,7 +30,11 @@ from conf import OrQAConfig
 
 from .agent.agent import CandidatesDiscoveryAgent
 from .graph import matches_graph
-from .utils import load_datasets_metadata, pl_read_dataset, remove_file_extension
+from .utils import (
+    load_normalized_datasets_metadata,
+    pl_read_dataset,
+    remove_file_extension,
+)
 
 SEP = "__"
 COMPLETION_CALLS_TIMEOUT = 1
@@ -242,8 +246,10 @@ def execute_tasks(
                         .get_column(target_column)
                     )
                 except pl.exceptions.InvalidOperationError as e:
+                    error_message = str(e).replace("\n\n", "\n")
                     print(
-                        f"Cast failed for JC attempt {i + 1}/{len(casting_exprs)}: {str(e).replace('\n\n', '\n')}"
+                        f"Cast failed for JC attempt {i + 1}/{len(casting_exprs)}: "
+                        f"{error_message}"
                     )
                 else:
                     is_float = True
@@ -278,8 +284,6 @@ def execute_tasks(
             print(f"Timeout on Join-Correlation for {query_id}: {e}")
 
     return candidates
-
-
 def pipeline(cfg: OrQAConfig):
     memory_limit_half()
     faulthandler.enable()
@@ -294,10 +298,8 @@ def pipeline(cfg: OrQAConfig):
     # load metadata for seed datasets
     # FIX: could not be better to load all metadata in memory directly?
     # or store them in document-oriented-like db?
-    datasets_metadata = load_datasets_metadata(
-        cfg.metadata_path.joinpath("metadata.json"),
-        None,  # [s[3 if len(s) == 4 else 2] for s in seed_datasets],
-        source=cfg.source,
+    datasets_metadata = load_normalized_datasets_metadata(
+        cfg.normalized_metadata_filepath
     )
 
     # setup the Agent
@@ -353,7 +355,13 @@ def pipeline(cfg: OrQAConfig):
             print("\n" + f" DATASET {dataset_id} ".center(PRINT_PAD, "=") + "\n")
 
             # get its metadata
-            metadata = datasets_metadata[resource_id]
+            metadata = datasets_metadata.get(resource_id)
+            if metadata is None:
+                print(
+                    f"Metadata not found for resource_id={resource_id} "
+                    f"in {cfg.normalized_metadata_filepath}"
+                )
+                continue
 
             # Propose tasks for this dataset
             g_t = time.time()
