@@ -1,13 +1,18 @@
 seed: 42
-source: ods
+source: ckan 
+# Valencia is now CKAN-based (april 2026) but it seems that 
+# up to few months ago it was OpendataSoft-based, and thus 
+# several datasets follow conventions adopted by this different
+# backend. For example, some of them use ";" instead of ","
+# We thus need to handle these differences.
 
 pandas:
   read:
     csv:
       nrows: 10_000
-      sep: ";"
     json:
       nrows: 10_000
+
 
 polars:
   read:
@@ -18,12 +23,13 @@ polars:
       separator: ","
 
 
+
 blend:
   xash_size: 128
   max_cell_length: 128
   clean_args:
     lowercase: True
-    bad_tokens: # cells with exactly these values are skipped
+    bad_tokens:
       - "none"
       - "null"
       - "nan"
@@ -32,6 +38,8 @@ blend:
       - "not available"
       - "no data"
       - "(null)"
+      - "no consta"
+      - "no hi consta"
 
       # we do not want to filer all the punctuations, 
       # or to replace all the punctuations with empty 
@@ -41,6 +49,8 @@ blend:
       - "-"
       - "."
       - "*"
+      - "---"
+      - "€"
 
       # These values are extremely frequent (>10M rows)
       # but are likely to give less information, when 
@@ -55,7 +65,6 @@ blend:
       - "2"
       - "no"
       - "yes"
-      - "ny"
 
 tasks:
   crawling:
@@ -64,14 +73,13 @@ tasks:
     batch_fetch_metadata: 10
     accept_zip: True
     download_format: csv 
-    engine: pandas
-    max_resource_size: 20MB
-    max_workers: 4
+    max_resource_size: 100MB
+    max_workers: 8
     verbose: True
 
   cleaning:
     filter_filenames_patterns: 
-        - "^varco.*"
+      - "^varco.*"
 
     filter_column_patterns:
       # Identifiers
@@ -81,8 +89,12 @@ tasks:
       - "geo_(point_2d|shape)$"
       - "^geom(_x_y)?$"
 
+    try_separators:
+      - ","
+      - ";"
+
   indexing:
-    max_process_workers: 2
+    max_process_workers: 4
     verbose: True
 
   candidates_discovery:

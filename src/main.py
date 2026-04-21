@@ -74,6 +74,14 @@ TARGETS = (
         relative_data_path=Path("orqa", "ckan", "madrid"),
     ),
     TargetSpec(
+        target_id="valencia",
+        country="spain",
+        city="valencia",
+        backend="ckan",
+        workflow_path=_PROJECT_ROOT / "conf" / "workflow" / "valencia.yaml",
+        relative_data_path=Path("orqa", "ckan", "valencia"),
+    ),
+    TargetSpec(
         target_id="paris",
         country="france",
         city="paris",

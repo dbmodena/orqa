@@ -271,7 +271,8 @@ class OrQAConfig:
     datasets_format: str
 
     filter_filenames_patterns: tuple[str, ...] = ()
-    filter_columns: tuple[str, ...] = ()
+    filter_column_patterns: tuple[str, ...] = ()
+    try_separators: tuple[str, ...] = ()
 
     statistics_path: Path = field(init=False)
 
@@ -425,13 +426,21 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     else:
         filter_filenames_patterns = tuple(filter_filenames_patterns)
 
-    filter_columns = cleaning_task.get("filter_columns", ())
-    if filter_columns in (None, "..."):
-        filter_columns = ()
-    elif isinstance(filter_columns, str):
-        filter_columns = (filter_columns,)
+    filter_column_patterns = cleaning_task.get("filter_column_patterns", ())
+    if filter_column_patterns in (None, "..."):
+        filter_column_patterns = ()
+    elif isinstance(filter_column_patterns, str):
+        filter_column_patterns = (filter_column_patterns,)
     else:
-        filter_columns = tuple(filter_columns)
+        filter_column_patterns = tuple(filter_column_patterns)
+
+    try_separators = cleaning_task.get("try_separators", ())
+    if try_separators in (None, "..."):
+        try_separators = ()
+    elif isinstance(try_separators, str):
+        try_separators = (try_separators,)
+    else:
+        try_separators = tuple(try_separators)
 
     orqa_cfg = OrQAConfig(
         source=source,
@@ -442,7 +451,8 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         candidates_discovery=candidates_discovery,
         statement_generation=statement_generation,
         filter_filenames_patterns=filter_filenames_patterns,
-        filter_columns=filter_columns,
+        filter_column_patterns=filter_column_patterns,
+        try_separators=try_separators,
         data_path=data_path,
         datasets_format=crawling.download_format,
     )

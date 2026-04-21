@@ -8,6 +8,7 @@ job*.sh
 *tmp
 venv
 .codex
+metadata_handling
 
 *.ipynb_checkpoints
 data

@@ -10,7 +10,7 @@ from ulod.bulk.socrata import SocrataDownloadConfig, socrata_download_datasets
 from ulod.countries.canada import Canada
 from ulod.countries.france import Paris
 from ulod.countries.italy import Bologna, Modena
-from ulod.countries.spain import Madrid
+from ulod.countries.spain import Madrid, Valencia
 from ulod.countries.uk import UK
 from ulod.countries.usa import NYC
 
@@ -240,6 +240,31 @@ def crawl_madrid(cfg: OrQAConfig):
     download_destination.mkdir(parents=True, exist_ok=True)
 
     client = Madrid(headers=headers, connection_kw=connection_pool_kw)
+
+    download_cfg = CKANDownloadConfig(
+        download_destination,
+        max_datasets=cfg.crawling.max_datasets,
+        from_dataset_index=cfg.crawling.from_dataset_index,
+        batch_fetch_metadata=cfg.crawling.batch_fetch_metadata,
+        filter_resource_metadata=_csv_only_filter_resource_metadata,
+        download_format=cfg.crawling.download_format,
+        http_headers=headers,
+        save_with_resource_name=True,
+        connection_pool_kw=connection_pool_kw,
+        max_resource_size=cfg.crawling.max_resource_size,
+        max_workers=cfg.crawling.max_workers,
+        verbose=cfg.crawling.verbose,
+    )
+
+    ckan_download_datasets(download_cfg, client)
+
+
+def crawl_valencia(cfg: OrQAConfig):
+    """ Valencia — Spanish, CKAN backend."""
+    download_destination = cfg.data_path
+    download_destination.mkdir(parents=True, exist_ok=True)
+
+    client = Valencia(headers=headers, connection_kw=connection_pool_kw)
 
     download_cfg = CKANDownloadConfig(
         download_destination,

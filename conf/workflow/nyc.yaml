@@ -61,6 +61,18 @@ tasks:
     max_workers: 4
     verbose: True
 
+  cleaning:
+    filter_column_patterns:
+      - "^the_geom$"
+      - "^location$"
+      - "^polygon$"
+      - "shape"
+      - "^coordinates$"
+      - "(brooklyn|manhattan|queens|bronx)_cooperatives_comparable_properties_address"
+      - "(brooklyn|manhattan|queens|bronx)_condominium_property_address"
+      - "comparable_rental_\d_address"
+      
+
   indexing:
     max_process_workers: 2
     verbose: True
