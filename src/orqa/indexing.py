@@ -14,12 +14,12 @@ def create_blend_index(cfg: OrQAConfig):
         max_cell_length=cfg.blend_opts.max_cell_length,
     )
 
-    logging_path = cfg.logging_path.joinpath("indexing", "blend.log")
+    logging_path = cfg.logging_path / "indexing" / "blend.log"
     logging_path.parent.mkdir(parents=True, exist_ok=True)
-
-    cfg.tmp_path.mkdir(parents=True, exist_ok=True)
-
+    
     print(" INDEXING TABLES WITH BLEND ".center(100, "="))
+    print(f"Index verbose: {cfg.indexing.verbose}")
+
     index_tables(
         index,
         cfg.datasets_path,
@@ -28,6 +28,5 @@ def create_blend_index(cfg: OrQAConfig):
         load_opts=cfg.polars_opts.scan[cfg.crawling.download_format],
         max_workers=cfg.indexing.max_process_workers,
         max_queue_size=1000,
-        # tmp_path=cfg.tmp_path
     )
     print(" INDEXING COMPLETED ".center(100, "="))

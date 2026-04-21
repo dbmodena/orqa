@@ -14,6 +14,7 @@ That step involves:
 """
 
 import logging
+import re
 
 import polars as pl
 from tqdm import tqdm
@@ -28,6 +29,10 @@ from orqa.utils import (
 
 
 def ckan_cleaning(cfg: OrQAConfig):
+    filter_columns = set(cfg.filter_columns)
+    filter_filenames_patterns = tuple(
+        re.compile(pattern) for pattern in cfg.filter_filenames_patterns
+    )
     records = []
 
     encodings = ["utf-8", "latin-1", "utf-8-sig"]
@@ -45,12 +50,14 @@ def ckan_cleaning(cfg: OrQAConfig):
         cfg.crawled_datasets_path.walk(), desc="Directories"
     ):
         for filename in tqdm(filenames, desc="Datasets"):
+            if any(pattern.search(filename) for pattern in filter_filenames_patterns):
+                continue
+
             path = dirpath / filename
             loaded = False
             preamble = None
 
             # check for HTML-like data
-
             for encoding in encodings:
                 try:
                     with open(path, "r", encoding=encoding) as file:
@@ -115,6 +122,8 @@ def ckan_cleaning(cfg: OrQAConfig):
             # remove empty rows and columns
             df = remove_null_rows(df)
             df = remove_null_columns(df)
+            if filter_columns:
+                df = df.select(pl.all().exclude(filter_columns))
 
             clean_rows, clean_cols = df.shape
 
@@ -170,7 +179,10 @@ def socrata_cleaning(cfg: OrQAConfig):
         "queens_condominium_property_address",
         "comparable_rental_1_address",
         "comparable_rental_2_address",
-    }
+    } | set(cfg.filter_columns)
+    filter_filenames_patterns = tuple(
+        re.compile(pattern) for pattern in cfg.filter_filenames_patterns
+    )
 
     records = []
 
@@ -187,6 +199,9 @@ def socrata_cleaning(cfg: OrQAConfig):
         cfg.crawled_datasets_path.walk(), desc="Directories"
     ):
         for filename in tqdm(filenames, desc="Datasets"):
+            if any(pattern.search(filename) for pattern in filter_filenames_patterns):
+                continue
+
             path = dirpath / filename
 
             try:
@@ -252,9 +267,19 @@ def socrata_cleaning(cfg: OrQAConfig):
 
 def ods_cleaning(cfg: OrQAConfig):
     filter_columns = {
+        # Identifiers
+        "objectid",
+
+        # Geometric/Spatial columns
         "geo_point_2d",
-        "geo_shape"
-    }
+        "geo_shape",
+        "geom",
+        "geom_x_y"
+    } | set(cfg.filter_columns)
+
+    filter_filenames_patterns = tuple(
+        re.compile(pattern) for pattern in cfg.filter_filenames_patterns
+    )
 
     records = []
 
@@ -278,6 +303,9 @@ def ods_cleaning(cfg: OrQAConfig):
         cfg.crawled_datasets_path.walk(), desc="Directories"
     ):
         for filename in tqdm(filenames, desc="Datasets"):
+            if any(pattern.search(filename) for pattern in filter_filenames_patterns):
+                continue
+
             path = dirpath / filename
 
             try:

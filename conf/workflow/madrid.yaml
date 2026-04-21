@@ -9,6 +9,15 @@ pandas:
       nrows: 10_000
 
 
+polars:
+  read:
+    csv:
+      separator: ";"
+  write:
+    csv:
+      separator: ","
+
+
 
 blend:
   xash_size: 128
@@ -47,7 +56,6 @@ blend:
       - "2"
       - "no"
       - "yes"
-      - "ny"
 
 tasks:
   crawling:
@@ -56,13 +64,12 @@ tasks:
     batch_fetch_metadata: 10
     accept_zip: True
     download_format: csv 
-    engine: pandas
-    max_resource_size: 20MB
-    max_workers: 4
+    max_resource_size: 100MB
+    max_workers: 8
     verbose: True
 
   indexing:
-    max_process_workers: 2
+    max_process_workers: 4
     verbose: True
 
   candidates_discovery:

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from conf import OrQAConfig
 
 import argparse
 import importlib
@@ -167,10 +168,12 @@ def resolve_data_path(spec: TargetSpec) -> Path:
     return Path(data_dir) / spec.relative_data_path
 
 
-def load_cfg(spec: TargetSpec):
+def load_cfg(spec: TargetSpec) -> OrQAConfig:
     from dotenv import load_dotenv
 
-    load_dotenv(_PROJECT_ROOT / ".env")
+    dotenv_path = _PROJECT_ROOT / ".env"
+    print(f"Loading .env file from {dotenv_path}")
+    load_dotenv(dotenv_path)
 
     if not spec.workflow_path.exists():
         raise FileNotFoundError(f"Workflow config not found: {spec.workflow_path}")
@@ -226,6 +229,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         cfg = load_cfg(spec)
+
+        print(f" LOADED PATHS ".center(100, "="))
+        print(f"Root data directory: {cfg.data_path}")
+        print(f"Prompts folder: {cfg.prompts_path}")
+        print(f"LLM configurations folder: {cfg.llm_config_path}")
+        print(f"Crawled datasets folder: {cfg.crawled_datasets_path}")
+        print(f"Processed datasets folder: {cfg.datasets_path}")
+
         run_steps(cfg, spec, args.steps)
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         parser.exit(status=1, message=f"{exc}\n")

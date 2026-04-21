@@ -69,6 +69,10 @@ tasks:
     max_workers: 4
     verbose: True
 
+  cleaning:
+    filter_filenames_patterns: 
+      - "^varco.*"
+
   indexing:
     max_process_workers: 2
     verbose: True

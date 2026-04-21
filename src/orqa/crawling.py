@@ -195,7 +195,6 @@ def crawl_paris(cfg: OrQAConfig):
     download_destination.mkdir(parents=True, exist_ok=True)
 
     client = Paris(headers=headers, connection_kw=connection_pool_kw)
-    print(cfg.crawling.max_datasets)
     download_cfg = ODSDownloadConfig(
         download_destination,
         max_datasets=cfg.crawling.max_datasets,

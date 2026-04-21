@@ -225,7 +225,7 @@ class StatementGeneration:
 
 @dataclass
 class OrQAConfig:
-    source: Literal["ckan", "socrata"]
+    source: Literal["ckan", "socrata", "ods"]
     seed: int
     crawling: Crawling
     indexing: Indexing
@@ -267,10 +267,11 @@ class OrQAConfig:
 
     logging_path: Path = field(init=False)
 
-    tmp_path: Path = field(init=False)
-
     # The format with which datasets are stored locally
     datasets_format: str
+
+    filter_filenames_patterns: tuple[str, ...] = ()
+    filter_columns: tuple[str, ...] = ()
 
     statistics_path: Path = field(init=False)
 
@@ -280,17 +281,14 @@ class OrQAConfig:
         )
 
         self.datasets_path = self.data_path / "datasets" / self.crawling.download_format
-        print(self.data_path)
         self.metadata_path = self.data_path / "metadata"
         self.original_metadata_filepath = self.metadata_path / "metadata.json"
         self.normalized_metadata_filepath = self.metadata_path / "normalized_metadata.json"
 
         self.logging_path = self.data_path / "log"
-        self.tmp_path = self.data_path / "tmp"
-        self.prompts_path = Path(os.getenv("ORQA_CONF")) / "prompts"
-        self.llm_config_path =  Path(os.getenv("ORQA_CONF")) / "llm"
+        self.prompts_path = Path(os.environ["ORQA_CONF"]) / "prompts"
+        self.llm_config_path =  Path(os.environ["ORQA_CONF"]) / "llm"
         self.statistics_path = self.data_path / "statistics"
-        print(self.prompts_path)
         assert self.prompts_path.exists()
         self.pandas_opts = PandasOpts()
         self.polars_opts = PolarsOpts()
@@ -418,6 +416,23 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         single_table_query_count=single_table_query_count,
     )
 
+    cleaning_task = parsed["tasks"].get("cleaning", {})
+    filter_filenames_patterns = cleaning_task.get("filter_filenames_patterns", ())
+    if filter_filenames_patterns in (None, "..."):
+        filter_filenames_patterns = ()
+    elif isinstance(filter_filenames_patterns, str):
+        filter_filenames_patterns = (filter_filenames_patterns,)
+    else:
+        filter_filenames_patterns = tuple(filter_filenames_patterns)
+
+    filter_columns = cleaning_task.get("filter_columns", ())
+    if filter_columns in (None, "..."):
+        filter_columns = ()
+    elif isinstance(filter_columns, str):
+        filter_columns = (filter_columns,)
+    else:
+        filter_columns = tuple(filter_columns)
+
     orqa_cfg = OrQAConfig(
         source=source,
         seed=seed,
@@ -426,6 +441,8 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         indexing=indexing,
         candidates_discovery=candidates_discovery,
         statement_generation=statement_generation,
+        filter_filenames_patterns=filter_filenames_patterns,
+        filter_columns=filter_columns,
         data_path=data_path,
         datasets_format=crawling.download_format,
     )

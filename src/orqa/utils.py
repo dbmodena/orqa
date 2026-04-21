@@ -229,12 +229,6 @@ def load_dataset_info(
     """
     df = pl_read_dataset(dataset_path, polars_opts)
 
-    df = remove_null_columns(df)
-    df = remove_null_rows(df, [])
-
-    # Get first N columns (or all if fewer)
-    df = df.select(df.columns[:limit_to_n_columns])
-
     # Build detailed column information string
     column_typings = {}
     coldetails = ""

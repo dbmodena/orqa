@@ -16,9 +16,14 @@ import faulthandler
 import json
 import os
 import random
-#import resource
 import time
+import ctypes
 from pathlib import Path
+
+try:
+    import resource
+except ImportError:
+    resource = None
 
 import dotenv
 import polars as pl
@@ -41,22 +46,49 @@ COMPLETION_CALLS_TIMEOUT = 1
 PRINT_PAD = 120
 
 
-# make the API key for LLM available
-dotenv.load_dotenv(Path(__file__).parent.parent.joinpath(".env"))
-
-
 # NOTE: this implementation of BLEND is currently based on DuckDB, and
 # in some cases it needs to fetch a lot of data. We try to limit the memory
 # usage in order to avoid a machine complete block (maybe works maybe not,
 # no time for complete tests)
 def memory_limit_half():
     """Limit max memory usage to half."""
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    if resource is None:
+        raise OSError("resource module is not available on this platform")
+
+    _, hard = resource.getrlimit(resource.RLIMIT_AS)
     # Convert KiB to bytes, and divide in two to half
     resource.setrlimit(resource.RLIMIT_AS, (int(get_memory() * 1024 / 2), hard))
 
 
 def get_memory():
+    if os.name == "nt":
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            raise OSError("Could not read available physical memory on Windows")
+        return status.ullAvailPhys // 1024
+
+    if not os.path.exists("/proc/meminfo"):
+        try:
+            return (os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")) // 1024
+        except (AttributeError, OSError, ValueError) as e:
+            raise FileNotFoundError(
+                "/proc/meminfo is not available on this platform"
+            ) from e
+
     with open("/proc/meminfo", "r") as mem:
         free_memory = 0
         for i in mem:
@@ -79,7 +111,7 @@ def sample_seed_datasets(
     sample = random.sample(datasets, n_datasets_to_sample)
 
     # remove the filetype extension from each sample filename
-    sample = [(remove_file_extension(f), datasets_path.joinpath(f)) for f in sample]
+    sample = [(remove_file_extension(f), datasets_path / f) for f in sample]
 
     sample = [
         (
@@ -173,7 +205,7 @@ def execute_tasks(
         except TimeoutError as e:
             print(f"Timeout on Union for {query_id}: {e}")
         except (RuntimeError, MemoryError) as e:
-            print(f"Timeout on Union for {query_id}: {e}")
+            print(f"RuntimeError or MemoryError on Union for {query_id}: {e}")
 
     for task in tqdm(join_tasks, desc="Join tasks", position=1, leave=False):
         columns = task["columns"]
@@ -195,7 +227,7 @@ def execute_tasks(
             except TimeoutError as e:
                 print(f"Timeout on Join for {query_id}: {e}")
             except (RuntimeError, MemoryError) as e:
-                print(f"Timeout on Join for {query_id}: {e}")
+                print(f"RuntimeError or MemoryError on Join for {query_id}: {e}")
         else:
             try:
                 top_res = _execute_multi_join_search(index, df.select(columns), top_k)
@@ -213,7 +245,7 @@ def execute_tasks(
             except TimeoutError as e:
                 print(f"Timeout on Multi-Join for {query_id}: {e}")
             except (RuntimeError, MemoryError) as e:
-                print(f"Timeout on Multi-Join for {query_id}: {e}")
+                print(f"RuntimeError or MemoryError on Multi-Join for {query_id}: {e}")
 
     for task in tqdm(
         join_correlation_tasks, desc="Join-Correlation tasks", position=1, leave=False
@@ -281,12 +313,28 @@ def execute_tasks(
         except TimeoutError as e:
             print(f"Timeout on Join-Correlation for {query_id}: {e}")
         except (RuntimeError, MemoryError) as e:
-            print(f"Timeout on Join-Correlation for {query_id}: {e}")
+            print(f"RuntimeError or MemoryError on Join-Correlation for {query_id}: {e}")
 
     return candidates
+
+
 def pipeline(cfg: OrQAConfig):
-    memory_limit_half()
-    faulthandler.enable()
+    if resource is None or not os.path.exists("/proc/meminfo"):
+        print(
+            "Skipping memory limit setup because the required OS utilities are "
+            "not available on this platform."
+        )
+    else:
+        try:
+            memory_limit_half()
+        except (AttributeError, FileNotFoundError, OSError, ValueError) as e:
+            print(f"Skipping memory limit setup: {e}")
+
+    if hasattr(faulthandler, "enable"):
+        try:
+            faulthandler.enable()
+        except (AttributeError, OSError, RuntimeError) as e:
+            print(f"Could not enable faulthandler: {e}")
 
     time_stat_records = []
     seed_datasets = get_seed_datasets(cfg)
@@ -307,7 +355,7 @@ def pipeline(cfg: OrQAConfig):
     # it is just a wrapper of a LLM client, without any
     # needs of tool-calling or memory or other properties
     print("Loading LLM-agent")
-    litellm_config_path = cfg.llm_config_path.joinpath("litellm.yaml")
+    litellm_config_path = cfg.llm_config_path / "litellm.yaml"
     agent = CandidatesDiscoveryAgent(litellm_config_path)
 
     tokens_budget = 1_000_000
@@ -334,7 +382,6 @@ def pipeline(cfg: OrQAConfig):
     # Place the candidates inside q. Once we have analyzed all the
     # initial seeds, switch to the candidates.
     q = set()
-    print([s[0] for s in seed_datasets])
 
     while seed_datasets or q:
         # first pop the seeds, then switch to the candidates

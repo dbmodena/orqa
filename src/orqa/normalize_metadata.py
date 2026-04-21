@@ -42,7 +42,7 @@ def normalize_metadata_records(records: list[dict], source: str) -> list[dict]:
     """Normalize a list of raw metadata records into a flat unified schema."""
     normalized_records: list[dict] = []
     source_normalized = _normalize_source(source)
-
+    print(f"{source_normalized=}")
     for record in records:
         if source_normalized == "ckan":
             normalized_records.extend(_normalize_ckan_record(record))
@@ -50,6 +50,8 @@ def normalize_metadata_records(records: list[dict], source: str) -> list[dict]:
             item = _normalize_ods_record(record)
             if item is not None:
                 normalized_records.append(item)
+            else:
+                print("Item is None!")
         elif source_normalized == "socrata":
             item = _normalize_socrata_record(record)
             if item is not None:

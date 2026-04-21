@@ -1,5 +1,5 @@
 seed: 42
-source: ckan
+source: socrata
 
 pandas:
   read:

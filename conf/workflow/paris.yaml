@@ -1,5 +1,5 @@
 seed: 42
-source: ckan
+source: ods
 
 pandas:
   read:
@@ -7,6 +7,15 @@ pandas:
       nrows: 10_000
     json:
       nrows: 10_000
+
+
+polars:
+  read:
+    csv:
+      separator: ";"
+  write:
+    csv:
+      separator: ","
 
 
 
@@ -47,7 +56,6 @@ blend:
       - "2"
       - "no"
       - "yes"
-      - "ny"
 
 tasks:
   crawling:
@@ -62,7 +70,7 @@ tasks:
     verbose: True
 
   indexing:
-    max_process_workers: 2
+    max_process_workers: 4
     verbose: True
 
   candidates_discovery:
@@ -77,6 +85,7 @@ tasks:
     overlap_ratio_threshold: 50
     sm_macro_avg_threshold: 0.5
     sm_micro_avg_threshold: 0.5
+    
   query_generation:
     kind: "SQL"
     max_cols: 10
