@@ -8,7 +8,7 @@ from typing import AsyncGenerator
 import pandas as pd
 
 from .agent.agent import StatementGenerationAgent, SingleTableStatementGenerationAgent
-from .utils import load_datasets_metadata, load_dataset_info, save_json, load_json
+from .utils import load_datasets_metadata,load_normalized_datasets_metadata, load_dataset_info, save_json, load_json
 from conf import OrQAConfig
 from dataclasses import dataclass, field
 
@@ -234,7 +234,7 @@ def create_statements(
     candidates_path: Path,
     output_path: Path,
     kind: str,
-    max_cols: int = 15,
+    max_cols: int = 8,
     datasets_metadata: dict | None = None,
     extension: str = "csv",
     bad_tokens: list | None = None,
@@ -261,7 +261,7 @@ def create_statements(
         #numeric_failed = ['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '34', '37', '38', '40', '42', '44', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57', '58', '59', '60', '61', '62', '63', '64', '65', '66', '67', '68', '69', '70', '71', '72', '73', '74', '75', '76', '77', '79', '80', '81', '82', '83', '84', '85', '86', '87', '88', '89', '90', '92', '93', '94', '95', '96', '97', '98', '99']
         agent = SingleTableStatementGenerationAgent(config_path, kind, bad_tokens)
         for st_idx, csv_path in enumerate(sampled):
-            if kind == "SQL": 
+            if True: 
                 continue
             #if f"st_{st_idx}" not in st_failed:
             #    continue
@@ -308,7 +308,7 @@ def create_statements(
     for idx, match in enumerate(all_matches):
         #if idx not in numeric_failed:
         #    continue
-        if kind == "SQL" and idx < 50: 
+        if kind == "SQL" or idx < 50: #
                 continue
         sys.stdout.write(
             f"\r[{idx+1}/{total}]  ✅ Successes: {successes}   ❌ Failures: {failures}   "
@@ -328,11 +328,13 @@ def create_statements(
         model           = content["model"].split("/")[-1]
         generation_time = content["time_elapsed"]
 
+
         if result.get("queries"): successes += 1
         else:                     failures  += 1
 
         results.setdefault(model, {}).setdefault(kind, {})[str(idx)] = {
             "status":          status,
+            "proposed_columns":content["proposed_columns"],
             "data":            result,
             "tokens":          content["token_usage"],
             "tables":          aliases,
@@ -377,8 +379,7 @@ async def stream_generate_statements(
     try:
         metadata = await loop.run_in_executor(
             None,
-            load_datasets_metadata,
-            cfg.metadata_path / "metadata.json",
+            load_normalized_datasets_metadata,cfg.metadata_path.joinpath("metadata.json"),
             None,
             cfg.source,
         )
@@ -523,11 +524,8 @@ from orqa.candidates_generation import generate_random_walks
 
 
 def generate_statements(cfg: OrQAConfig) -> None:
-    metadata = load_datasets_metadata(
-        cfg.metadata_path.joinpath("metadata.json"),
-        None,
-        source=cfg.source,
-    )
+    metadata = load_normalized_datasets_metadata(cfg.normalized_metadata_filepath)
+    #print(metadata)
     for lang in ["SQL","PANDAS"]:
         create_statements(
             cfg.llm_config_path.joinpath("litellm.yaml"),

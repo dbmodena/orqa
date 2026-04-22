@@ -102,7 +102,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 {"role": "system", "content": "You are an expert Data Engineer"},
                 {"role": "user", "content": initial_message},
             ]
-
+        print(prompt)
         last_content = ""
         last_error = None
         # Keyed by incremental int so duplicate LLM ids don't stomp each other

@@ -261,6 +261,13 @@ class Judgment(BaseModel):
             "(3–4 sentences, insights only). Empty string if approved is false."
         )
     )
+    suggestions: str = Field(
+        ...,
+        description=(
+            "If approved: say that there are none since the query is fine."
+            "If rejected: provide suggestions to improve the query to resolve the problems."
+        )
+    )
 
 
 class Judgments(BaseModel):

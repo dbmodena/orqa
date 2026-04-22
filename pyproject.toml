@@ -29,6 +29,7 @@ dependencies = [
     "uvicorn>=0.42.0",
     "valentine>=0.4.1",
     "wrapt-timeout-decorator>=1.5.1",
+    "tabulate"
 ]
 
 [tool.uv.sources]

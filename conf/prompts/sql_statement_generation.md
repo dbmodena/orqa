@@ -1,69 +1,37 @@
 ## SQLGeneration
-Generate DuckDB SQL queries with business-focused natural language questions over the following tables:
-### Lookup aliases
-{aliases}
-Make sure to use only the aliases in the queries in the following.
+Generate 3 DuckDB SQL queries (easy → medium → hard) with business-focused natural language questions designed to benchmark a text-to-query engine. Questions must be written as if by a non-technical user with no knowledge of the schema, table names, or column names.
 
-### Data Context
-You will be provided with:
-- Alias of the dataset: Alias of the dataset name in order to create the queries.
-- Dataset name: Name of the dataset
-- Schema: Table structures, column names, data types, and relationships
-- Metadata: Each table might have additional metadata that can assist in the question generation
-- Match Definitions: Explicit DataFrame relationships specifying mandatory operations with merge keys, join types, and correlation logic
+### Inputs
+- **Aliases** — use only these in queries: `{aliases}`
+- **Tables** — schema, columns, types, metadata: `{table}`
+- **Mandatory operations** — every query must combine tables using: `{matches}`
 
-### Critical Rules
-- Operation type is NON-NEGOTIABLE - must match the specified type exactly
-- All tables must be used
-- Only use explicitly defined matches - no inferred relationships
-- DuckDB syntax only - ANSI SQL compatible
+### Question rules
+✓ Use business terms (customers, revenue, churn)
+✓ Be outcome-focused and self-contained
+✓ Use concrete, domain-specific terms that anchor the question to this dataset — a question that could apply unchanged to a hospital or financial database is invalid
+✗ Never mention table/column names or SQL operations
 
-### Join Rules
-When joining tables on string-type keys, ALWAYS apply `LOWER()` to the key columns on BOTH sides of the join condition:
-```sql
-ON LOWER(t1.key_col) = LOWER(t2.key_col)
-```
-This prevents silent mismatches caused by inconsistent casing in string keys.
+### Query rules
+- Operation type is NON-NEGOTIABLE — match the specified type exactly.
+- All tables must be used and genuinely necessary (see Table Usage below).
+- Only use explicitly defined match relationships — no inferred joins.
+- DuckDB/ANSI SQL syntax only.
+- When joining on string keys, always apply `LOWER()` on both sides: `ON LOWER(t1.key) = LOWER(t2.key)`.
 
-### Natural Language Questions
-✓ Business terms (customers, revenue)  
-✓ Outcome-focused (insights, trends)  
-✗ No table/column names  
-✗ No SQL operations mentioned
+### Table usage
+A table is justified only if its columns appear in SELECT, WHERE, GROUP BY, or aggregations — not merely in a JOIN key. Using a table solely to restrict rows via a join is **not** justified unless the question explicitly requires cross-table validation (e.g. "find records appearing in both sources"). Each table entry must list only the minimal columns actually used.
 
-### Table Usage Rules
-Every table referenced must be **genuinely necessary** to answer the question:
-- A table is justified only if its columns appear in the SELECT output, WHERE filters, or aggregation logic — not merely in a JOIN condition.
-- Using a table solely to restrict rows via a JOIN is **not** a justified use, unless the question explicitly requires cross-table validation (e.g. "find records that exist in both datasets").
-- Ask yourself: *if this table were removed, would the question still be fully answerable?* If yes, redesign the query so every table contributes meaningfully, or remove it.
-- Each table entry must list only the minimal column subset actually used to answer the question.
+### Difficulty levels
+| Level | Definition |
+|---|---|
+| Easy | Single-table SELECT, basic WHERE, optional ORDER BY/LIMIT, ≤1 aggregate, no subqueries |
+| Medium | Multi-table JOIN, GROUP BY + HAVING, multiple aggregates, nested filters, or one non-correlated subquery / UNION / INTERSECT / EXCEPT |
+| Hard | Correlated or multi-level subqueries, window functions, complex set ops, CASE, CTEs (incl. recursive), or combinations of several advanced features |
 
-### Generate
-3 queries of incremental difficulty (easy, medium and hard) where:
-- Each implements the mandatory operation type
-- Each uses all provided tables
-- Each follows match definitions exactly
-- Each has semantically aligned NL question
-- Each has a difficulty value that can be "easy", "medium" or "hard"
-- Each has a **motivation**: a concise business justification (2–3 sentences) explaining *why* this question is analytically valuable, *why each table is necessary and what unique columns it contributes*, and what decision or insight it supports
-- Each table entry includes only the minimal column subset actually used to answer the question
-- All conform to Pydantic schema
-
-### Motivation Guidelines
-The motivation must:
-- Be written in business language, not technical terms
-- Explain the analytical purpose (e.g., identifying churn risk, optimizing revenue, benchmarking performance)
-- Justify why each dataset is required and what **specific columns** it uniquely contributes to answering the question — not just that it "provides additional information"
-- Be distinct across the three queries — avoid repeating the same business rationale
-
-### SQL difficulty levels
-- Easy: single-table `SELECT`, basic `WHERE`, optional `ORDER BY`/`LIMIT`, ≤1 aggregate, no subqueries.  
-- Medium: multi-table `JOIN`, `GROUP BY`+`HAVING`, multiple aggregates, nested filters, one non-correlated subquery or `UNION`/`INTERSECT`/`EXCEPT`.  
-- Hard: correlated or multi-level subqueries, window functions, complex set ops, `CASE`, CTEs (incl. recursive), or combinations of several advanced features.
-
-### Tables involved in the queries
-Realize the queries and their natural language counterparts using the following tables. 
-{table}  
-### Mandatory operations
-Every query MUST combine the tables with the following operations:
-{matches}
+### Per-query output (conform to Pydantic schema)
+- `difficulty`: easy / medium / hard
+- `question`: natural language question
+- `query`: DuckDB SQL
+- `motivation`: 2–3 sentences in business language explaining (1) the analytical value, (2) what specific columns each table uniquely contributes, (3) why this join/union strategy is correct. Must be distinct across the three queries.
+- `tables`: list of `alias, columns_used[]` couples  — minimal subset only

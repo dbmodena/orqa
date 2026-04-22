@@ -58,15 +58,6 @@ class CandidatesDiscoveryAgent:
                 column_typings=column_typings,
             )
 
-            #print("=" * 60)
-            #print("TASKS PROPOSAL RESULTS")
-            #print("=" * 60)
-            #print(prompt_str)
-            #print("=" * 60)
-            #print(result)
-            #print("=" * 60)
-            #print(tokens)
-
             return {
                 "dataset": dataset_info["dataset_name"],
                 "tasks": result,
@@ -130,7 +121,7 @@ class JudgementResponseAgent:
         for er in rejected:
             qid = str(er["id"])
             self._rejection_counts[qid] = self._rejection_counts.get(qid, 0) + 1
-            feedback = judgments_by_id.get(qid, {}).get("feedback", "no feedback")
+            feedback = judgments_by_id.get(qid, {}).get("feedback", "no feedback") + "\n" + judgments_by_id.get(qid, {}).get("suggestion", "") 
             self._accumulated_feedback.setdefault(qid, []).append(feedback)
  
         # queries rejected more than twice are considered stuck — stop retrying them
@@ -205,7 +196,7 @@ class JudgementResponseAgent:
         result, tokens = self._client.complete(prompt_str, max_tokens=self.max_tokens)
         return {"result": result, "token_usage": tokens}
  
- 
+
 class StatementGenerationAgent:
     def __init__(self, config_path: Path, kind: str, bad_tokens: list, max_judge_iterations: int = 3):
         self.config_path = config_path
@@ -225,14 +216,20 @@ class StatementGenerationAgent:
         match,
         involved_cols,
         metadatas,
-        max_cols: int = 20,
+        max_cols: int = 10,
         sample_size: int = 5,
     ) -> dict | None:
         columns = 0
+        columns_by_table = []
         try:
             tables = []
             base_prompt = ""
- 
+
+            # FIX: reset accumulated descriptions so repeated calls to generate_statements
+            # on the same agent instance don't keep appending stale table descriptions,
+            # which was causing token usage to grow unboundedly across invocations.
+            self.prompt.reset()
+
             for idx, dataset_path in enumerate(dataset_paths):
                 df, dataset_info = utils.prepare_dataset(
                     dataset_path,
@@ -242,6 +239,7 @@ class StatementGenerationAgent:
                     self.bad_tokens,
                 )
                 columns += len(df.columns)
+                columns_by_table.append({"table_alias":f"Table_{idx}","columns_provided":df.columns.tolist()})
                 tables.append(df)
                 base_prompt = self.prompt.update(
                     dataset_info["dataset_name"],
@@ -332,6 +330,7 @@ class StatementGenerationAgent:
  
                 # merge judge feedback and execution failure feedback for next iteration
                 feedback_messages = (evaluation["feedback_messages"] or []) + execution_failure_feedback
+
             # build final approved queries enriched with judge response and feedback
             approved_query_ids = {str(er["id"]) for er in all_approved_executed}
             approved_queries = [
@@ -346,9 +345,10 @@ class StatementGenerationAgent:
             ]
  
             return {
-                "result": {"queries": approved_queries},
+                "result": { "queries": approved_queries},
                 "token_usage": all_tokens,
                 "errors": all_errors,
+                "proposed_columns":columns_by_table,
                 "model": last_model,
                 "time_elapsed": total_time,
                 "avg_cols": avg_cols,
@@ -378,7 +378,7 @@ class SingleTableStatementGenerationAgent:
         alias: dict,
         kind: str,
         metadata: dict,
-        max_cols: int = 20,
+        max_cols: int = 10,
         sample_size: int = 5,
     ) -> dict | None:
         try:
@@ -513,10 +513,8 @@ class SingleTableStatementGenerationAgent:
             raise e
 
 
-
-
 class GenerateResponseAgent:
-    def __init__(self, config_path: Path,max_tokens:int=2000):
+    def __init__(self, config_path: Path, max_tokens: int = 2000):
         self.config_path = config_path
         self.prompt = ResponseGenerationPrompt()
         self._client = LLMClient(self.config_path)
@@ -528,20 +526,13 @@ class GenerateResponseAgent:
         data
     ) -> dict | None:
         try:
-            prompt_str=""
-            prompt_str = self.prompt.update(
-                    question,
-                    data
-                )
-            result, tokens = self._client.complete(prompt_str,max_tokens=self.max_tokens)
+            prompt_str = self.prompt.update(question, data)
+            result, tokens = self._client.complete(prompt_str, max_tokens=self.max_tokens)
             return {
-                    "result": result,
-                    "token_usage": tokens,
-                }
+                "result": result,
+                "token_usage": tokens,
+            }
         except FileNotFoundError as e:
             print(f"Error: '{e}'")
         except Exception as e:
-            #print(f"\n❌ Analysis failed: {e}")
             raise e
-        
-

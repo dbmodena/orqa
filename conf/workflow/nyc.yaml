@@ -70,7 +70,7 @@ tasks:
       - "^coordinates$"
       - "(brooklyn|manhattan|queens|bronx)_cooperatives_comparable_properties_address"
       - "(brooklyn|manhattan|queens|bronx)_condominium_property_address"
-      - "comparable_rental_\d_address"
+      - "comparable_rental_\\d_address"
       
 
   indexing:

@@ -31,7 +31,7 @@ provider_params:
     oci_tenancy: os.environ/OCI_TENANCY
     oci_key_file: os.environ/OCI_KEY_FILE
     oci_compartment_id: os.environ/OCI_COMPARTMENT_ID
-    max_tokens: 4000
+    #max_tokens: 4096
     timeout: 300
 
 # Common parameters (applied to all models)

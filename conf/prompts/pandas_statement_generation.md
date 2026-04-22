@@ -1,81 +1,44 @@
 ## PandasCodeGeneration
-Generate python Pandas queries with business-focused natural language questions.
-### Data Context
-You will be provided with:
-- Alias of the dataset: Alias of the dataset name in order to create the queries.
-- Dataset name: Name of the dataset
-- Schema: Table structures, column names, data types, and relationships
-- Metadata: Each table might have additional metadata that can assist in the question generation
-- Match Definitions: Explicit DataFrame relationships specifying mandatory operations with merge keys, join types, and correlation logic
+Generate 3 Python Pandas queries (easy → medium → hard) with business-focused natural language questions designed to benchmark a text-to-query engine. Questions must be written as if by a non-technical user with no knowledge of the schema, DataFrame names, or column names.
 
-### Critical Rules
-All DataFrames are PRE-LOADED and AVAILABLE:
-- DataFrames exist with their designated aliases
-- Start operations directly on existing DataFrames
-- NEVER create DataFrames with `pd.DataFrame()`, `pd.read_csv()`, or similar
-- NEVER reassign DataFrame variables (e.g., `Table_1 = ...`)
-- ONLY reference the exact DataFrame aliases provided
-- Operation type is NON-NEGOTIABLE - must match the specified type exactly
-- All DataFrames must be used
-- Only use explicitly defined matches - no inferred relationships
-- Create correct Python and Pandas code only
-- Prefer method chaining for clarity and efficiency
+### Inputs
+- **Aliases** — use only these in queries: `{aliases}`
+- **Tables** — schema, columns, types, metadata: `{table}`
+- **Mandatory operations** — every query must combine DataFrames using: `{matches}`
 
-### Merge/Join Rules
-When merging or joining DataFrames, ALWAYS apply `.str.lower()` to string-type merge keys on BOTH sides before joining:
-```python
-df1.merge(df2, left_on="key_col_1".str.lower(), right_on="key_col_2".str.lower(), ...)
-# or, if mutating is needed before chaining:
-df1.assign(key=df1["key_col"].str.lower()).merge(
-    df2.assign(key=df2["key_col"].str.lower()),
-    on="key", ...
-)
-```
-This prevents silent mismatches caused by inconsistent casing in string keys.
+### Question rules
+✓ Use business terms (customers, revenue, churn)
+✓ Be outcome-focused and self-contained
+✓ Use concrete, domain-specific terms that anchor the question to this dataset — a question that could apply unchanged to a hospital or financial database is invalid
+✗ Never mention DataFrame/column names or Pandas/Python operations
 
-### Natural Language Questions
-✓ Business terms (customers, revenue)  
-✓ Outcome-focused (insights, trends)  
-✗ No table/column names  
-✗ No Pandas or Python operations mentioned
+### Query rules
+- All DataFrames are **pre-loaded** with their designated aliases — start operations directly on them.
+- Operation type is NON-NEGOTIABLE — match the specified type exactly.
+- All DataFrames must be used and genuinely necessary (see Table Usage below).
+- Only use explicitly defined match relationships — no inferred merges.
+- Never use `pd.DataFrame()`, `pd.read_csv()`, or reassign DataFrame variables.
+- Prefer method chaining. Correct Python/Pandas only.
+- When merging on string keys, apply `.str.lower()` on both sides before joining:
+  ```python
+  df1.assign(key=df1["k"].str.lower()).merge(
+      df2.assign(key=df2["k"].str.lower()), on="key", ...
+  )
+  ```
 
-### Table Usage Rules
-Every table listed must be **genuinely necessary** to answer the question:
-- A table is justified only if its columns appear in the SELECT output, WHERE filters, or aggregation logic — not merely in a merge/join key.
-- Using a table solely to restrict rows via a merge condition is **not** a justified use, unless the question explicitly requires cross-table validation (e.g. "find records that exist in both datasets").
-- Ask yourself: *if this table were removed, would the question still be fully answerable?* If yes, redesign the query so every table contributes meaningfully, or remove it.
-- Each table entry must list only the minimal column subset actually used to answer the question.
+### Table usage
+A DataFrame is justified only if its columns appear in output, filters, or aggregations — not merely in a merge key. Using a DataFrame solely to restrict rows via a merge is **not** justified unless the question explicitly requires cross-table validation (e.g. "find records appearing in both sources"). Each table entry must list only the minimal columns actually used.
 
-### Generate
-3 queries of incremental difficulty (easy, medium and hard) where:
-- Each implements the mandatory operation type
-- Each uses all provided tables
-- Each follows match definitions exactly
-- Each has semantically aligned NL question
-- Each has a difficulty value that can be "easy", "medium" or "hard"
-- Each has a **motivation**: a concise justification (2–3 sentences) explaining *why* this question is analytically valuable, *why each table is necessary and what unique columns it contributes*, and *why the specified join/union strategy is the correct way to combine them*
-- Each table entry includes only the minimal column subset actually used to answer the question
-- All conform to Pydantic schema
+### Difficulty levels
+| Level | Definition |
+|---|---|
+| Easy | Single DataFrame filtering, column selection, simple `sort_values`/`head`, ≤1 aggregation |
+| Medium | `merge`/`join` of multiple DataFrames, `groupby` with multiple aggregations, compound boolean filters, or reshaping (`pivot`/`melt`) |
+| Hard | Multi-step pipelines with several merges + groupby, window-style ops (`rolling`/`expanding`/`rank`), complex `apply`/custom functions, hierarchical indexes, or advanced reshaping combined |
 
-### Motivation Guidelines
-The motivation must:
-- Be written in business language, not technical terms
-- Explain the analytical purpose (e.g., identifying churn risk, optimizing revenue, benchmarking performance)
-- Justify why each dataset is required and what **specific columns** it uniquely contributes to answering the question — not just that it "provides additional information"
-- Justify why the tables are combined in the specified way (join vs union, which keys, what the combination unlocks)
-- Be distinct across the three queries — avoid repeating the same business rationale
-
-### Pandas query difficulty levels:
-- Easy: single DataFrame filtering, column selection, simple `sort_values`/`head`, ≤1 aggregation (`sum/mean/count`).  
-- Medium: `merge`/`join` of multiple DataFrames, `groupby` with multiple aggregations, compound boolean filters, reshaping (`pivot`/`melt`) or one intermediate step.  
-- Hard: multi-step pipelines with several merges + groupby, window-style ops (`rolling`/`expanding`/`rank`), complex `apply`/custom functions, hierarchical indexes, or advanced reshaping combined together.
-
-### Tables involved in the queries
-Realize the queries and their natural language counterparts using the following tables. 
-{table}  
-### Mandatory operations
-Every query MUST combine the tables with the following operations:
-{matches}
-### Lookup aliases
-Make sure to use only the aliases in the queries in the following:
-{aliases}
+### Per-query output (conform to Pydantic schema)
+- `difficulty`: easy / medium / hard
+- `question`: natural language question
+- `query`: Python/Pandas code
+- `motivation`: 2–3 sentences in business language explaining (1) the analytical value, (2) what specific columns each DataFrame uniquely contributes, (3) why this merge/join strategy is correct. Must be distinct across the three queries.
+- `tables`: list of `alias, columns_used[]` couples  — minimal subset only

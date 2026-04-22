@@ -155,14 +155,16 @@ class CandidatesDiscoveryPrompt(Prompt):
         return self._update(query_dataset_description=query_dataset_description)
 
 
-
-
-
 class PandasStatementGenerationPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("pandas_statement_generation.md")
+
     def __init__(self):
         super().__init__()
-        self._datasets_descriptions = ""  
+        self._datasets_descriptions = ""
+
+    def reset(self):
+        """Reset accumulated dataset descriptions. Must be called before each new generate_statements run."""
+        self._datasets_descriptions = ""
 
     def update(
         self,
@@ -173,7 +175,7 @@ class PandasStatementGenerationPrompt(Prompt):
         column_details: dict,
         sample_data,
         aliases,
-        matches
+        matches,
     ) -> str:
         query_dataset_prompt = DatasetDescription()
         query_dataset_description = query_dataset_prompt.update(
@@ -185,14 +187,19 @@ class PandasStatementGenerationPrompt(Prompt):
             sample_data,
         )
         self._datasets_descriptions += f"\n{query_dataset_description}"
-        return self._update(table=self._datasets_descriptions,matches=matches,aliases=aliases)
+        return self._update(table=self._datasets_descriptions, matches=matches, aliases=aliases)
 
 
 class SQLStatementGenerationPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("sql_statement_generation.md")
+
     def __init__(self):
         super().__init__()
-        self._datasets_descriptions = ""  
+        self._datasets_descriptions = ""
+
+    def reset(self):
+        """Reset accumulated dataset descriptions. Must be called before each new generate_statements run."""
+        self._datasets_descriptions = ""
 
     def update(
         self,
@@ -203,7 +210,7 @@ class SQLStatementGenerationPrompt(Prompt):
         column_details: dict,
         sample_data,
         aliases,
-        matches
+        matches,
     ) -> str:
         query_dataset_prompt = DatasetDescription()
         query_dataset_description = query_dataset_prompt.update(
@@ -215,47 +222,37 @@ class SQLStatementGenerationPrompt(Prompt):
             sample_data,
         )
         self._datasets_descriptions += f"\n{query_dataset_description}"
-        return self._update(table=self._datasets_descriptions,matches=matches,aliases=aliases)
-    
+        return self._update(table=self._datasets_descriptions, matches=matches, aliases=aliases)
 
 
 class JudgementResponseGenerationPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("judge.md")
+
     def __init__(self):
         super().__init__()
 
-    def update(
-        self,
-        data
-    ) -> str:
+    def update(self, data) -> str:
         return self._update(data=data)
 
 
 class SingleTableJudgementResponseGenerationPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("single_table_judge.md")
+
     def __init__(self):
         super().__init__()
 
-    def update(
-        self,
-        data
-    ) -> str:
+    def update(self, data) -> str:
         return self._update(data=data)
 
-    
 
 class ResponseGenerationPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("response_generation.md")
+
     def __init__(self):
         super().__init__()
 
-    def update(
-        self,
-        question,
-        data
-    ) -> str:
-        return self._update(data=data,question=question)
-
+    def update(self, question, data) -> str:
+        return self._update(data=data, question=question)
 
 
 class SingleTablePandasPrompt(Prompt):
@@ -306,4 +303,3 @@ class SingleTableSQLPrompt(Prompt):
             sample_data,
         )
         return self._update(table=query_dataset_description, alias=alias)
-

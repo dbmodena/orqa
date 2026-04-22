@@ -279,9 +279,9 @@ def prepare_dataset(
     bad_tokens: list = []
 ) -> tuple[dict, dict]:
 
-    df = pd_read_dataset(dataset_path,opts={"csv": {"na_values": bad_tokens, "low_memory":False},"parquet": {"na_values": bad_tokens, "low_memory":False}})
+    df = pd_read_dataset(dataset_path, opts={"csv": {"na_values": bad_tokens, "low_memory": False}, "parquet": {"na_values": bad_tokens, "low_memory": False}})
     df = df.dropna()
-    # Normalize column names to handle case/whitespace mismatches
+
     col_map = {c.strip().lower(): c for c in df.columns}
     resolved_cols = [
         col_map[c.strip().lower()]
@@ -289,27 +289,50 @@ def prepare_dataset(
         if c.strip().lower() in col_map
     ]
 
-    # Remove rows containing any bad token across all columns
-    #if bad_tokens:
-    #    mask = ~df.apply(
-    #        lambda col: col.astype(str).isin([str(t) for t in bad_tokens])
-    #    ).any(axis=1)
-    #    df = df[mask]
+    remaining_budget = max(0, limit_to_n_columns - len(resolved_cols))
+    other_cols = [c for c in df.columns if c not in resolved_cols]
+    selected_cols = resolved_cols + other_cols[:remaining_budget]
+    df = df[selected_cols]
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
-        if len(df.columns) > limit_to_n_columns:
-            other_cols = [c for c in df.columns if c not in resolved_cols]
-            df = df[resolved_cols + other_cols[: limit_to_n_columns - len(resolved_cols)]]
-        df.to_csv(tmp.name, index=False)
-        tmp_path = tmp.name
-
-    try:
-        dataset_info, _ = load_dataset_info(Path(tmp_path), {}, limit_to_n_columns, sample_size, 0)
-    finally:
-        os.unlink(tmp_path)
+    dataset_info, column_typings = extract_dataset_info(df, sample_size=sample_size)
     dataset_info["dataset_name"] = dataset_path.stem
+    dataset_info["id"] = dataset_path.stem
+
     return df, dataset_info
 
+def extract_dataset_info(
+    df: pd.DataFrame,
+    sample_size: int = 5,
+    seed: int = 0,
+) -> tuple[dict, dict]:
+    """
+    Extract dataset info from an already-filtered pandas DataFrame.
+    Returns a dict ready to be unpacked as kwargs for load_prompt, and column typings.
+    """
+    # Build detailed column information string
+    column_typings = {}
+    coldetails = ""
+    for col in df.columns:
+        null_count = df[col].isna().sum()
+        n_unique = df[col].nunique()
+        dtype = df[col].dtype
+        coldetails += f"\n- {col} {dtype}: {null_count} nulls, {n_unique} unique values."
+        column_typings[col] = pd.api.types.is_numeric_dtype(df[col])
+
+    sample = df.sample(min(sample_size, len(df)), random_state=seed)
+    sample_md = sample.to_markdown(index=False)
+
+    info = {
+        "id": "dataframe",
+        "dataset_name": "dataframe",
+        "num_rows": len(df),
+        "num_columns": len(df.columns),
+        "columns_details": coldetails,
+        "sample_data": sample_md,
+        "columns": df.columns.tolist(),
+    }
+
+    return info, column_typings
 #def remove_bad_tokens(df,bad_tokens):
 #    if bad_tokens:
 #        mask = ~df.apply(
