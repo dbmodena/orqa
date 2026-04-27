@@ -1,0 +1,203 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+ Licensed to the Apache Software Foundation (ASF) under one or more
+ contributor license agreements.  See the NOTICE file distributed with
+ this work for additional information regarding copyright ownership.
+ The ASF licenses this file to You under the Apache License, Version 2.0
+ (the "License"); you may not use this file except in compliance with
+ the License.  You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+<!-- Paris normalized metadata schema for OrQA. -->
+<schema name="orqa-paris" version="1.6">
+
+<types>
+    <fieldType name="string" class="solr.StrField" sortMissingLast="true" omitNorms="true"/>
+    <fieldType name="boolean" class="solr.BoolField" sortMissingLast="true" omitNorms="true"/>
+    <fieldtype name="binary" class="solr.BinaryField"/>
+    <fieldType name="int" class="solr.IntPointField" omitNorms="true" positionIncrementGap="0"/>
+    <fieldType name="float" class="solr.FloatPointField" omitNorms="true" positionIncrementGap="0"/>
+    <fieldType name="long" class="solr.LongPointField" omitNorms="true" positionIncrementGap="0"/>
+    <fieldType name="double" class="solr.DoublePointField" omitNorms="true" positionIncrementGap="0"/>
+    <fieldType name="pint" class="solr.IntPointField" omitNorms="true" positionIncrementGap="0"/>
+    <fieldType name="pfloat" class="solr.FloatPointField" omitNorms="true" positionIncrementGap="0"/>
+    <fieldType name="plong" class="solr.LongPointField" omitNorms="true" positionIncrementGap="0"/>
+    <fieldType name="pdouble" class="solr.DoublePointField" omitNorms="true" positionIncrementGap="0"/>
+    <fieldType name="date" class="solr.DatePointField" omitNorms="true" positionIncrementGap="0"/>
+    <fieldType name="pdate" class="solr.DatePointField" omitNorms="true" positionIncrementGap="0"/>
+
+    <fieldType name="pdates" class="solr.DatePointField" positionIncrementGap="0" multiValued="true"/>
+    <fieldType name="booleans" class="solr.BoolField" sortMissingLast="true" multiValued="true"/>
+    <fieldType name="pints" class="solr.IntPointField" positionIncrementGap="0" multiValued="true"/>
+    <fieldType name="pfloats" class="solr.FloatPointField" positionIncrementGap="0" multiValued="true"/>
+    <fieldType name="plongs" class="solr.LongPointField" positionIncrementGap="0" multiValued="true"/>
+    <fieldType name="pdoubles" class="solr.DoublePointField" positionIncrementGap="0" multiValued="true"/>
+
+    <fieldType name="text" class="solr.TextField" positionIncrementGap="100">
+        <analyzer type="index">
+            <tokenizer class="solr.WhitespaceTokenizerFactory"/>
+            <filter class="solr.WordDelimiterGraphFilterFactory" generateWordParts="1" generateNumberParts="1" catenateWords="1" catenateNumbers="1" catenateAll="0" splitOnCaseChange="1"/>
+            <filter class="solr.FlattenGraphFilterFactory"/> <!-- required on index analyzers after graph filters -->
+            <filter class="solr.LowerCaseFilterFactory"/>
+            <filter class="solr.SnowballPorterFilterFactory" language="English" protected="protwords.txt"/>
+            <filter class="solr.ASCIIFoldingFilterFactory"/>
+        </analyzer>
+        <analyzer type="query">
+            <tokenizer class="solr.WhitespaceTokenizerFactory"/>
+            <filter class="solr.SynonymGraphFilterFactory" synonyms="synonyms.txt" ignoreCase="true" expand="true"/>
+            <filter class="solr.WordDelimiterGraphFilterFactory" generateWordParts="1" generateNumberParts="1" catenateWords="0" catenateNumbers="0" catenateAll="0" splitOnCaseChange="1"/>
+            <filter class="solr.LowerCaseFilterFactory"/>
+            <filter class="solr.SnowballPorterFilterFactory" language="English" protected="protwords.txt"/>
+            <filter class="solr.ASCIIFoldingFilterFactory"/>
+        </analyzer>
+    </fieldType>
+
+
+    <!-- A general unstemmed text field - good if one does not know the language of the field -->
+    <fieldType name="text_general" class="solr.TextField" positionIncrementGap="100">
+        <analyzer type="index">
+            <tokenizer class="solr.WhitespaceTokenizerFactory"/>
+            <filter class="solr.WordDelimiterGraphFilterFactory" generateWordParts="1" generateNumberParts="1" catenateWords="1" catenateNumbers="1" catenateAll="0" splitOnCaseChange="0"/>
+            <filter class="solr.FlattenGraphFilterFactory"/> <!-- required on index analyzers after graph filters -->
+            <filter class="solr.LowerCaseFilterFactory"/>
+        </analyzer>
+        <analyzer type="query">
+          <tokenizer class="solr.WhitespaceTokenizerFactory"/>
+          <filter class="solr.SynonymGraphFilterFactory" synonyms="synonyms.txt" ignoreCase="true" expand="true"/>
+          <filter class="solr.WordDelimiterGraphFilterFactory" generateWordParts="1" generateNumberParts="1" catenateWords="0" catenateNumbers="0" catenateAll="0" splitOnCaseChange="0"/>
+          <filter class="solr.LowerCaseFilterFactory"/>
+      </analyzer>
+  </fieldType>
+
+  <fieldType name="text_ngram" class="solr.TextField" positionIncrementGap="100">
+    <analyzer type="index">
+      <tokenizer class="solr.NGramTokenizerFactory" minGramSize="2" maxGramSize="10"/>
+      <filter class="solr.LowerCaseFilterFactory"/>
+    </analyzer>
+    <analyzer type="query">
+      <tokenizer class="solr.WhitespaceTokenizerFactory"/>
+      <filter class="solr.LowerCaseFilterFactory"/>
+    </analyzer>
+  </fieldType>
+
+  <fieldType name="location" class="solr.LatLonPointSpatialField" docValues="true"/>
+
+  <!-- IMPORTANT: Extra OrQA field to store nested structures :IMPORTANT -->
+  <!-- See https://solr.apache.org/guide/solr/latest/indexing-guide/indexing-nested-documents.html#schema-configuration -->
+  <fieldType name="_nest_path_" class="solr.NestPathField" />
+  <!-- END: Extra OrQA fields :END -->
+</types>
+
+
+<fields>
+  <!-- <field name="index_id" type="string" indexed="true" stored="true" required="true" /> -->
+  
+  <!-- IMPORTANT: Extra OrQA field to store nested structures :IMPORTANT -->
+  <field name="_root_" type="string" indexed="true" stored="false" docValues="false" />
+  <field name="_nest_path_" type="_nest_path_" />
+  <!-- END: Extra OrQA fields :END -->
+
+  <!-- Normalized metadata fields from normalized_metadata.json -->
+  <field name="dataset_id" type="string" indexed="true" stored="true" required="true" />
+  <field name="resource_id" type="string" indexed="true" stored="true" required="true" />
+  <field name="source" type="string" indexed="true" stored="true" />
+  <field name="title" type="text" indexed="true" stored="true" />
+  <field name="title_ngram" type="text_ngram" indexed="true" stored="false" />
+  <field name="description" type="text" indexed="true" stored="true" />
+  <field name="publisher" type="text_general" indexed="true" stored="true" />
+  <field name="tags" type="text_general" indexed="true" stored="true" multiValued="true" />
+  <field name="created_at" type="date" indexed="true" stored="true" multiValued="false" />
+  <field name="modified_at" type="date" indexed="true" stored="true" multiValued="false" />
+  <field name="dataset_url" type="string" indexed="true" stored="true" omitNorms="true" />
+  <field name="download_url" type="string" indexed="true" stored="true" omitNorms="true" />
+  <field name="format" type="string" indexed="true" stored="true" />
+
+  <!-- Column metadata. Dot names match Solr's nested JSON path style; underscore
+       names are kept as tolerant aliases for flattened import pipelines. -->
+  <field name="columns.name" type="text_general" indexed="true" stored="true" multiValued="true" />
+  <field name="columns.label" type="text_general" indexed="true" stored="true" multiValued="true" />
+  <field name="columns.description" type="text_general" indexed="true" stored="true" multiValued="true" />
+  <field name="columns.type" type="string" indexed="true" stored="true" multiValued="true" />
+  <field name="columns_name" type="text_general" indexed="true" stored="true" multiValued="true" />
+  <field name="columns_label" type="text_general" indexed="true" stored="true" multiValued="true" />
+  <field name="columns_description" type="text_general" indexed="true" stored="true" multiValued="true" />
+  <field name="columns_type" type="string" indexed="true" stored="true" multiValued="true" />
+
+  
+  <!-- catchall field, containing all other searchable text fields (implemented
+        via copyField further on in this schema  -->
+  <field name="text" type="text" indexed="true" stored="false" multiValued="true"/>
+  <field name="urls" type="text" indexed="true" stored="false" multiValued="true"/>
+
+  <field name="depends_on" type="text" indexed="true" stored="false" multiValued="true"/>
+  <field name="dependency_of" type="text" indexed="true" stored="false" multiValued="true"/>
+  <field name="derives_from" type="text" indexed="true" stored="false" multiValued="true"/>
+  <field name="has_derivation" type="text" indexed="true" stored="false" multiValued="true"/>
+  <field name="links_to" type="text" indexed="true" stored="false" multiValued="true"/>
+  <field name="linked_from" type="text" indexed="true" stored="false" multiValued="true"/>
+  <field name="child_of" type="text" indexed="true" stored="false" multiValued="true"/>
+  <field name="parent_of" type="text" indexed="true" stored="false" multiValued="true"/>
+  <field name="views_total" type="int" indexed="true" stored="false"/>
+  <field name="views_recent" type="int" indexed="true" stored="false"/>
+  <field name="resources_accessed_total" type="int" indexed="true" stored="false"/>
+  <field name="resources_accessed_recent" type="int" indexed="true" stored="false"/>
+
+  <field name="metadata_created" type="date" indexed="true" stored="true" multiValued="false"/>
+  <field name="metadata_modified" type="date" indexed="true" stored="true" multiValued="false"/>
+
+  <field name="indexed_ts" type="date" indexed="true" stored="true" default="NOW" multiValued="false"/>
+
+  <!-- Copy the title field into titleString, and treat as a string
+        (rather than text type).  This allows us to sort on the titleString -->
+  <field name="title_string" type="string" indexed="true" stored="false" />
+
+  <field name="data_dict" type="string" indexed="false" stored="true" />
+  <field name="validated_data_dict" type="string" indexed="false" stored="true" />
+
+  <field name="_version_" type="string" indexed="true" stored="true"/>
+
+  <dynamicField name="*_date" type="date" indexed="true" stored="true" multiValued="false"/>
+
+  <dynamicField name="extras_*" type="text" indexed="true" stored="true" multiValued="false"/>
+  <dynamicField name="res_extras_*" type="text" indexed="true" stored="true" multiValued="true"/>
+  <dynamicField name="vocab_*" type="string" indexed="true" stored="true" multiValued="true"/>
+  <dynamicField name="columns.*" type="text_general" indexed="true" stored="true" multiValued="true"/>
+  <dynamicField name="*" type="string" indexed="true"  stored="true" multiValued="true"/>
+</fields>
+
+<uniqueKey>resource_id</uniqueKey>
+
+<!-- IMPORTANT: Extra OrQA config :IMPORTANT -->
+<df>text</df>
+<solrQueryParser q.op="AND"/>
+<!-- END: Extra OrQA config :END -->
+
+<copyField source="title" dest="title_ngram"/>
+<copyField source="dataset_url" dest="urls"/>
+<copyField source="download_url" dest="urls"/>
+<copyField source="dataset_id" dest="text"/>
+<copyField source="resource_id" dest="text"/>
+<copyField source="source" dest="text"/>
+<copyField source="title" dest="text"/>
+<copyField source="description" dest="text"/>
+<copyField source="publisher" dest="text"/>
+<copyField source="tags" dest="text"/>
+<copyField source="format" dest="text"/>
+<copyField source="columns.name" dest="text"/>
+<copyField source="columns.label" dest="text"/>
+<copyField source="columns.description" dest="text"/>
+<copyField source="columns.type" dest="text"/>
+<copyField source="columns_name" dest="text"/>
+<copyField source="columns_label" dest="text"/>
+<copyField source="columns_description" dest="text"/>
+<copyField source="columns_type" dest="text"/>
+
+</schema>
