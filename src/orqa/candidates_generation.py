@@ -318,6 +318,89 @@ def execute_tasks(
     return candidates
 
 
+def is_resumable(cfg: OrQAConfig) -> bool:
+    """Check if there are intermediate result files to resume from."""
+    p = cfg.candidates_discovery.tasks_results_path
+    return p.exists() and p.stat().st_size > 0
+
+
+def load_recovery_state(
+    cfg: OrQAConfig,
+) -> tuple[
+    matches_graph.DatasetMatchesGraph,
+    set,   # visited (resource_ids already fully processed)
+    set,   # recovered_q (candidate tuples discovered but not yet processed)
+    int,   # tokens_spent
+    int,   # datasets_done (for n_datasets_limit accounting)
+]:
+    """
+    Rebuilds pipeline state from the intermediate files:
+      - tasks_results   → which Q datasets were executed, which R datasets were found
+      - proposed_tasks  → how many tokens were spent (only for executed datasets)
+
+    Datasets present in proposed_tasks but absent from tasks_results are considered
+    NOT done: their cached proposal is ignored and the agent will re-propose them.
+    """
+    tasks_results_path  = cfg.candidates_discovery.tasks_results_path
+    proposed_tasks_path = cfg.candidates_discovery.proposed_tasks_path
+
+    # ── 1. Load task results ────────────────────────────────────────────────
+    all_candidates: list[dict] = []
+    executed_q_ids: set[str]   = set()
+
+    if tasks_results_path.exists():
+        with open(tasks_results_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                c = json.loads(line)
+                all_candidates.append(c)
+                executed_q_ids.add(c["Q"])
+
+    # ── 2. Count tokens only for datasets that were actually executed ───────
+    #    (proposed-but-not-executed entries are intentionally excluded so their
+    #     budget is not pre-consumed; they will be re-proposed fresh)
+    tokens_spent = 0
+    if proposed_tasks_path.exists():
+        with open(proposed_tasks_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                if entry["dataset"] in executed_q_ids:
+                    tokens_spent += entry["token_usage"]["total_tokens"]
+
+    # ── 3. Rebuild graph from scratch (don't trust the possibly-corrupt file) 
+    G = matches_graph.DatasetMatchesGraph()
+    if all_candidates:
+        print("Rebuilding graph from task results...")
+        G.add(
+            all_candidates,
+            cfg.datasets_path,
+            cfg.polars_opts.read,
+            "coma",
+            {"use_instances": False},
+            verbose=False,
+        )
+        G.save(cfg.candidates_discovery.matches_graph_path)
+        print(f"Graph rebuilt: {len(executed_q_ids)} Q-nodes, {len(all_candidates)} edges.")
+
+    # ── 4. Rebuild the candidate queue ─────────────────────────────────────
+    #    R datasets that were discovered but never used as a query yet
+    all_r_ids     = {c["R"] for c in all_candidates}
+    unvisited_r   = all_r_ids - executed_q_ids
+
+    recovered_q: set[tuple] = set()
+    for r_id in unvisited_r:
+        filepath = cfg.datasets_path / f"{r_id}.{cfg.datasets_format}"
+        parts    = r_id.split(SEP) if SEP in r_id else ("", r_id)
+        recovered_q.add((r_id, filepath, *parts))
+
+    return G, executed_q_ids, recovered_q, tokens_spent, len(executed_q_ids)
+
+
 def pipeline(cfg: OrQAConfig):
     if resource is None or not os.path.exists("/proc/meminfo"):
         print(
@@ -359,7 +442,7 @@ def pipeline(cfg: OrQAConfig):
     agent = CandidatesDiscoveryAgent(litellm_config_path)
 
     tokens_budget = 1_000_000
-    n_datasets_limit = 1000
+    n_datasets_limit = 100#1000
 
     _format = cfg.datasets_format
 
@@ -372,6 +455,24 @@ def pipeline(cfg: OrQAConfig):
     )
 
     top_k = cfg.candidates_discovery.top_k_results_per_task
+
+
+    # ── State initialisation (fresh or resumed) ────────────────────────────
+
+    G       = matches_graph.DatasetMatchesGraph()
+    visited = set()
+    q       = set()
+
+    #if is_resumable(cfg):                                               # ← NEW
+    #    print("Resuming from intermediate state...")                    # ← NEW
+    #    G, visited, q, tokens_spent, datasets_done = load_recovery_state(cfg)   # ← NEW 
+    #    tokens_budget    -= tokens_spent                                # ← NEW
+    #    n_datasets_limit -= datasets_done                               # ← NEW
+    #    print(                                                          # ← NEW
+    #        f"  visited={len(visited)}, queued={len(q)}, "             # ← NEW
+    #        f"budget left={tokens_budget}, datasets left={n_datasets_limit}" # ← NEW
+    #    )                                                               # ← NEW
+    # ───────────────────────────────────────────────────────────────────────
 
     # instantiate the matches graph
     G = matches_graph.DatasetMatchesGraph()
@@ -477,6 +578,7 @@ def pipeline(cfg: OrQAConfig):
             print("\n" + " DONE ".center(PRINT_PAD, "="))
             a_t = time.time()
             G.save(cfg.candidates_discovery.matches_graph_path)
+
             save_list_to_jsonlines(
                 cfg.candidates_discovery.tasks_results_path, candidates
             )
@@ -492,6 +594,7 @@ def pipeline(cfg: OrQAConfig):
             save_time_statistics(
                 time_stat_records, cfg.statistics_path / "generation_time_stats.csv"
             )
+            visited.add(resource_id) 
         except OSError as e:
             print(f"SegFault (?): {e}")
 
@@ -500,7 +603,7 @@ def pipeline(cfg: OrQAConfig):
 
 def save_time_statistics(records: list, path: Path):
     if path.exists():
-        with open(path, "a") as file:
+        with open(path, "a",encoding="utf-8") as file:
             pl.DataFrame(records).write_csv(
                 file, include_header=False, float_precision=3
             )

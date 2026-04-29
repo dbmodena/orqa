@@ -52,6 +52,7 @@ Follow the provided JSON schema exactly.
   If rejected — quote the exact vague terms or unjustified operations and name the criterion.
 - `approved`: true only if both checks pass and no criterion is triggered.
 - `response`: 3–4 sentence insight. Empty string if not approved.
+- `translated_response`: translated response into the detected target language.
 
 Queries:
 {data}

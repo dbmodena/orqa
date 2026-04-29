@@ -3,8 +3,9 @@
 model: "oci/meta.llama-3.3-70b-instruct"
 # Fallback models (tried in order if primary fails)
 fallback_models:
-   - "ollama_chat/llama3.1:8b"
-#   - "groq/llama-3.3-70b-versatile"
+  - "groq/llama-3.3-70b-versatile"
+# - "ollama_chat/llama3.1:8b"
+#    - "groq/llama-3.3-70b-versatile"
 #   - "groq/llama-3.1-8b-instant"
 #  - "together_ai/togethercomputer/Llama-2-7B-32K-Instruct"
 

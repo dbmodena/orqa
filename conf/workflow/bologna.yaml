@@ -12,7 +12,9 @@ pandas:
 polars:
   read:
     csv:
-      separator: ";"
+      separator: ","
+      encoding: "utf-8"
+      
   write:
     csv:
       separator: ","

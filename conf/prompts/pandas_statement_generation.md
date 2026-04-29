@@ -2,9 +2,16 @@
 Generate 3 Python Pandas queries (easy → medium → hard) with business-focused natural language questions designed to benchmark a text-to-query engine. Questions must be written as if by a non-technical user with no knowledge of the schema, DataFrame names, or column names.
 
 ### Inputs
-- **Aliases** — use only these in queries: `{aliases}`
+- **Aliases** — use only these DataFrame variable names in your code: `{aliases}`
 - **Tables** — schema, columns, types, metadata: `{table}`
-- **Mandatory operations** — every query must combine DataFrames using: `{matches}`
+- **Mandatory join operations** — every query MUST combine DataFrames by following the steps below **exactly**:
+
+```
+{matches}
+```
+
+### Rename-first rule (NON-NEGOTIABLE)
+When Step 0 lists `.rename()` calls, you MUST emit them at the top of your query — before any merge, filter, or aggregation. Use the renamed column names everywhere in the rest of the code. Never reference the original column names after renaming.
 
 ### Question rules
 ✓ Use business terms (customers, revenue, churn)
@@ -14,17 +21,13 @@ Generate 3 Python Pandas queries (easy → medium → hard) with business-focuse
 
 ### Query rules
 - All DataFrames are **pre-loaded** with their designated aliases — start operations directly on them.
-- Operation type is NON-NEGOTIABLE — match the specified type exactly.
+- The join order, join type (INNER, LEFT, etc.), key columns, and case-normalisation requirement shown in **Mandatory join operations** are NON-NEGOTIABLE.
+- Chained merges must follow the listed step order — do not reorder or collapse steps.
+- When a join is marked `Case-insensitive keys: YES`, you MUST apply `.str.lower()` on both sides before joining, using the pattern shown. Omitting this is a hard error.
+- Never use `pd.DataFrame()`, `pd.read_csv()`, or reassign the original DataFrame variables (renaming into a new variable is fine and required when Step 0 is present).
 - All DataFrames must be used and genuinely necessary (see Table Usage below).
 - Only use explicitly defined match relationships — no inferred merges.
-- Never use `pd.DataFrame()`, `pd.read_csv()`, or reassign DataFrame variables.
 - Prefer method chaining. Correct Python/Pandas only.
-- When merging on string keys, apply `.str.lower()` on both sides before joining:
-  ```python
-  df1.assign(key=df1["k"].str.lower()).merge(
-      df2.assign(key=df2["k"].str.lower()), on="key", ...
-  )
-  ```
 
 ### Table usage
 A DataFrame is justified only if its columns appear in output, filters, or aggregations — not merely in a merge key. Using a DataFrame solely to restrict rows via a merge is **not** justified unless the question explicitly requires cross-table validation (e.g. "find records appearing in both sources"). Each table entry must list only the minimal columns actually used.
@@ -41,4 +44,6 @@ A DataFrame is justified only if its columns appear in output, filters, or aggre
 - `question`: natural language question
 - `query`: Python/Pandas code
 - `motivation`: 2–3 sentences in business language explaining (1) the analytical value, (2) what specific columns each DataFrame uniquely contributes, (3) why this merge/join strategy is correct. Must be distinct across the three queries.
-- `tables`: list of `alias, columns_used[]` couples  — minimal subset only
+- `tables`: list of `alias, columns_used[]` couples — minimal subset only
+- `translated_question`: translated question into the detected target language.
+- `detected_language`: detected language from the dataset.

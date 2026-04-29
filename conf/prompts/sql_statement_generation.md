@@ -35,3 +35,5 @@ A table is justified only if its columns appear in SELECT, WHERE, GROUP BY, or a
 - `query`: DuckDB SQL
 - `motivation`: 2–3 sentences in business language explaining (1) the analytical value, (2) what specific columns each table uniquely contributes, (3) why this join/union strategy is correct. Must be distinct across the three queries.
 - `tables`: list of `alias, columns_used[]` couples  — minimal subset only
+- `translated_question`: translated question into the detected target language.
+- `detected_language`: detected language from the dataset.

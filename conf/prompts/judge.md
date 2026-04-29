@@ -51,7 +51,11 @@ Follow the provided JSON schema exactly.
 - `feedback`: If approved — why the result is meaningful, every table necessary, complexity justified. If rejected — quote exact vague terms / unjustified tables / operations and name the criterion.
 - `approved`: true only if all checks pass and no criterion is triggered.
 - `response`: 3–4 sentence business insight. Empty string if not approved.
-- `suggestion`: One sentence fix. Empty string if approved.
+- `translated_response`: translated response into the detected target language.
+- `suggestion`: Empty string if approved. If rejected, one sentence per violated criterion, each prefixed with either **[FIX QUESTION]** or **[FIX QUERY]** to indicate where the change must be made.
+  - Use **[FIX QUESTION]** when the criterion is caused by how the question is written (`vocabulary_mismatch`, `too_broad`, `unclear_result`, `trivial`).
+  - Use **[FIX QUERY]** when the criterion is caused by how the query is implemented (`partial_implementation`, `over_engineering`, `unjustified_table`, `disjointed_query`, `silent_filter_bias`).
+  - Use **[FIX QUESTION & QUERY]** only when both artifacts must change together to resolve the criterion.
 
 Queries:
 {data}

@@ -172,7 +172,18 @@ class Query(BaseModel):
             "NOT the operations or technical implementation details."
         )
     )
-
+    translated_question:str = Field(
+        ...,
+        description=(
+            "A natural language question that the code answers translated in the detected language."
+        )
+    )
+    detected_language : str = Field(
+        ...,
+        description=(
+            "Detected language from the provided dataset. "
+        )
+    )
     code: str = Field(
         ...,
         description=(
@@ -259,6 +270,12 @@ class Judgment(BaseModel):
         description=(
             "Concise business-facing interpretation of the query result "
             "(3–4 sentences, insights only). Empty string if approved is false."
+        )
+    )
+    translated_response: str = Field(
+        ...,
+        description=(
+            "The response translated into the target language"
         )
     )
     suggestions: str = Field(

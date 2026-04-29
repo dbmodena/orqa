@@ -18,31 +18,38 @@ OVERLAP_RATIO_THRESHOLD = 0.5
 ROUND = 3
 
 
+def _get_metrics(edge_data: dict) -> dict:
+    """Supports both nested {'metrics': {...}} and flat edge attribute formats."""
+    return edge_data.get("metrics", edge_data)
+
+
 def overlap_ratio_only_predicate(edge_data: dict, overlap_threshold: float) -> bool:
     try:
-        return edge_data['metrics']["overlap_ratio"] >= overlap_threshold
+        return _get_metrics(edge_data)["overlap_ratio"] >= overlap_threshold
     except Exception:
         return False
 
+
 def macro_avg_predicate(edge_data: dict, overlap_threshold: float, macro_threshold: float) -> bool:
     try:
+        m = _get_metrics(edge_data)
         return (
-            edge_data['metrics']["overlap_ratio"] >= overlap_threshold
-            and edge_data['metrics']["sm_macro_avg"] >= macro_threshold
-            #and edge_data["sm_macro_avg"] >= edge_data["sm_micro_avg"]
+            m["overlap_ratio"] >= overlap_threshold
+            and m["sm_macro_avg"] >= macro_threshold
         )
     except Exception:
-            return False
+        return False
+
 
 def micro_avg_predicate(edge_data: dict, overlap_threshold: float, micro_threshold: float) -> bool:
     try:
+        m = _get_metrics(edge_data)
         return (
-            edge_data['metrics']["overlap_ratio"] >= overlap_threshold
-            and edge_data['metrics']["sm_micro_avg"] >= micro_threshold
-            #and edge_data["sm_micro_avg"] >= edge_data["sm_macro_avg"]
+            m["overlap_ratio"] >= overlap_threshold
+            and m["sm_micro_avg"] >= micro_threshold
         )
     except Exception:
-            return False
+        return False
 def compute_overlap_metrics(
     left_table: list[list[Any]],
     right_table: list[list[Any]],
@@ -129,7 +136,9 @@ def process_edge(
             q_columns = entry["q_columns"]
             r_columns = entry["r_columns"]
 
-            r_columns = [R.columns[idx] for idx in r_columns]
+            #r_columns = [R.columns[idx] for idx in r_columns]
+            #if r_columns and isinstance(r_columns[0], int):
+            #    r_columns = [R.columns[idx] for idx in r_columns]
         case "JC":
             q_key = entry["q_key"]
             _q_target = entry["q_target"]
@@ -204,7 +213,6 @@ def process_edge(
         r_columns = [c2 for (_, c2) in matches.keys()]
     if task == "JC":
         r_columns = [r_key, r_target]
-
     return (
         entry_idx,
         q_node,
@@ -258,13 +266,13 @@ class DatasetMatchesGraph:
                 desc="Adding edges to the graph",
                 total=len(blend_matches),
             ):
+                entry_idx = task = r_columns = None #fix
                 try:
                     result = future.result(60)
                     if result:
                         entry_idx, q_node, r_node, task, r_columns, metrics, matches = (
                             result
                         )
-
                         if task != "JC":
                             blend_matches[entry_idx]["r_columns"] = r_columns
                         else:
@@ -275,7 +283,7 @@ class DatasetMatchesGraph:
                         blend_matches[entry_idx]["metrics"] = metrics
                         self._G.add_edge(q_node, r_node, task=task, **metrics)
                 except Exception as e:
-                    print(f"Error within main process: {e}")
+                    print(f"Error within main process: {e} {entry_idx} {task} {r_columns}")
 
     def expand_one_hop(
         self,

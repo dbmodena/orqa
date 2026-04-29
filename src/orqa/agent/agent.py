@@ -121,7 +121,11 @@ class JudgementResponseAgent:
         for er in rejected:
             qid = str(er["id"])
             self._rejection_counts[qid] = self._rejection_counts.get(qid, 0) + 1
-            feedback = judgments_by_id.get(qid, {}).get("feedback", "no feedback") + "\n" + judgments_by_id.get(qid, {}).get("suggestion", "") 
+            judgment = judgments_by_id.get(qid, {})
+            feedback = (
+                f"Feedback: {judgment.get('feedback', 'no feedback')}\n"
+                f"Suggestions: {judgment.get('suggestions', 'none')}"
+            )
             self._accumulated_feedback.setdefault(qid, []).append(feedback)
  
         # queries rejected more than twice are considered stuck — stop retrying them
@@ -162,6 +166,8 @@ class JudgementResponseAgent:
                     "id": qid,
                     "code": query.get("code", ""),
                     "question": query.get("question", ""),
+                    "translated_question": query.get("translated_question", ""),
+                    "detected_language":query.get("detected_language", ""),
                     "dataframe": df_result,
                     "tables": tables,
                 })
@@ -267,6 +273,7 @@ class StatementGenerationAgent:
             feedback_messages = None
             pending_queries: list = []
             expected_ids: set[str] = set()
+            original_ids: set[str] = set()
  
             for iteration in range(self.max_judge_iterations):
                 start = time.perf_counter()
@@ -290,12 +297,13 @@ class StatementGenerationAgent:
                     print("⚠️  No queries returned by the statement client — stopping.")
                     break
  
-                # validate returned IDs haven't shifted on correction iterations
                 returned_ids = {str(q.get("id")) for q in pending_queries}
+                if iteration == 0:
+                    original_ids = returned_ids
                 if iteration > 0 and not returned_ids.issubset(expected_ids):
-                    rogue = returned_ids - expected_ids
-                    print(f"⚠️  Unexpected IDs returned on iteration {iteration + 1}: {rogue} — stopping.")
-                    break
+                    rogue = returned_ids - original_ids
+                    if rogue:
+                        print(f"⚠️  Unexpected IDs on iteration {iteration + 1}: {rogue} — will remap if approved.")
                 expected_ids = returned_ids
  
                 evaluation = judge.evaluate(pending_queries)
@@ -333,16 +341,23 @@ class StatementGenerationAgent:
 
             # build final approved queries enriched with judge response and feedback
             approved_query_ids = {str(er["id"]) for er in all_approved_executed}
-            approved_queries = [
-                {
-                    **q,
-                    "response": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("response", ""),
-                    "judge_feedback": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("feedback", ""),
-                    "keyword_count":utils.count_keywords(q.get("code"),kind)
-                }
-                for q in pending_queries
-                if str(q.get("id")) in approved_query_ids
-            ]
+            next_id = max((int(i) for i in original_ids if str(i).lstrip("-").isdigit()), default=0) + 1
+            approved_queries = []
+            for q in pending_queries:
+                qid = str(q.get("id"))
+                if qid not in approved_query_ids:
+                    continue
+                q_copy = dict(q)
+                if qid not in original_ids:
+                    q_copy["id"] = next_id
+                    next_id += 1
+                approved_queries.append({
+                    **q_copy,
+                    "response": judge.all_judgments_by_id.get(qid, {}).get("response", ""),
+                    "translated_response": judge.all_judgments_by_id.get(qid, {}).get("translated_response", ""),
+                    "judge_feedback": judge.all_judgments_by_id.get(qid, {}).get("feedback", ""),
+                    "keyword_count": utils.count_keywords(q_copy.get("code"), kind),
+                })
  
             return {
                 "result": { "queries": approved_queries},
@@ -416,6 +431,7 @@ class SingleTableStatementGenerationAgent:
             feedback_messages = None
             pending_queries: list = []
             expected_ids: set[str] = set()
+            original_ids: set[str] = set()
 
             for iteration in range(self.max_judge_iterations):
                 start = time.perf_counter()
@@ -440,10 +456,12 @@ class SingleTableStatementGenerationAgent:
 
                 # validate returned IDs haven't shifted on correction iterations
                 returned_ids = {str(q.get("id")) for q in pending_queries}
+                if iteration == 0:
+                    original_ids = returned_ids
                 if iteration > 0 and not returned_ids.issubset(expected_ids):
-                    rogue = returned_ids - expected_ids
-                    print(f"⚠️  Unexpected IDs returned on iteration {iteration + 1}: {rogue} — stopping.")
-                    break
+                    rogue = returned_ids - original_ids
+                    if rogue:
+                        print(f"⚠️  Unexpected IDs on iteration {iteration + 1}: {rogue} — will remap if approved.")
                 expected_ids = returned_ids
 
                 evaluation = judge.evaluate(pending_queries)
@@ -482,19 +500,26 @@ class SingleTableStatementGenerationAgent:
             # build final approved queries enriched with judge response and feedback
             approved_query_ids = {str(er["id"]) for er in all_approved_executed}
             expected_alias = list(alias.keys())[0]
+            next_id = max((int(i) for i in original_ids if str(i).lstrip("-").isdigit()), default=0) + 1
             approved_queries = []
             for q in pending_queries:
-                if str(q.get("id")) not in approved_query_ids:
+                qid = str(q.get("id"))
+                if qid not in approved_query_ids:
                     continue
+                q_copy = dict(q)
+                if qid not in original_ids:
+                    q_copy["id"] = next_id
+                    next_id += 1
                 # Enforce exactly one Table entry referencing the single dataset alias (Req 8.2)
-                tables = q.get("tables", [])
+                tables = q_copy.get("tables", [])
                 if len(tables) != 1 or tables[0].get("name") != expected_alias:
-                    q["tables"] = [{"name": expected_alias, "reason": tables[0].get("reason", "") if tables else "", "columns_involved": tables[0].get("columns_involved", []) if tables else []}]
+                    q_copy["tables"] = [{"name": expected_alias, "reason": tables[0].get("reason", "") if tables else "", "columns_involved": tables[0].get("columns_involved", []) if tables else []}]
                 approved_queries.append({
-                    **q,
-                    "response": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("response", ""),
-                    "judge_feedback": judge.all_judgments_by_id.get(str(q.get("id")), {}).get("feedback", ""),
-                    "keyword_count": utils.count_keywords(q.get("code"), kind),
+                    **q_copy,
+                    "response": judge.all_judgments_by_id.get(qid, {}).get("response", ""),
+                    "translated_response": judge.all_judgments_by_id.get(qid, {}).get("translated_response", ""),
+                    "judge_feedback": judge.all_judgments_by_id.get(qid, {}).get("feedback", ""),
+                    "keyword_count": utils.count_keywords(q_copy.get("code"), kind),
                 })
 
             return {

@@ -157,7 +157,11 @@ class QueryValidator(ABC):
                 actual_query["code"] = query_code
                 result_data = self._execute_query(query_code, dataframes, ordered_names)
 
-                if self._is_empty_result(result_data):
+                # FIX: empty-result rejection is now gated through _empty_result_is_error(),
+                # which subclasses can override. For multi-table queries, sample data may
+                # have no overlapping keys, so a logically correct merge will return 0 rows —
+                # rejecting it here generates spurious correction cycles and token waste.
+                if self._is_empty_result(result_data) and self._empty_result_is_error(ordered_names):
                     raise ValueError(self._build_empty_result_feedback())
                 if not self._check_table_usage(query_code):
                     raise ValueError(self._build_unused_tables_feedback())
@@ -202,6 +206,15 @@ class QueryValidator(ABC):
     @abstractmethod
     def _get_language_name(self) -> str:
         pass
+
+    def _empty_result_is_error(self, ordered_names: list) -> bool:
+        """
+        Controls whether an empty execution result is treated as a hard validation error.
+        Default: always reject empty results.
+        Subclasses can override to be more lenient — e.g. skip rejection for multi-table
+        queries where sample data may have no overlapping keys.
+        """
+        return True
 
     # ------------------------------------------------------------------
     # Shared helpers

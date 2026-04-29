@@ -16,32 +16,42 @@ UNAUTHORIZED_COMMANDS = [
 ]
 
 PANDAS_CARTESIAN_PATTERNS = [
+    # 1. Explicit cross merge — always a cartesian product.
     (
         r'\.merge\s*\([^)]*how\s*=\s*[\'"]cross[\'"]\s*[^)]*\)',
         "Explicit cross merge (how='cross')"
     ),
-    (
-        r'\.merge\s*\(\s*\w+\s*\)',
-        "merge() called with no join keys — may produce cross product"
-    ),
+    # 2. Dummy constant key — assigning an integer literal to a _-prefixed column before merge
+    #    produces a full cartesian product.  Legitimate key normalisation uses expressions,
+    #    not bare integers: .assign(_key=df['col'].str.lower()) is fine.
     (
         r'\.assign\s*\(\s*_\w+\s*=\s*\d+\s*\)',
-        "Dummy key merge: assigning a constant integer to a _-prefixed key produces a Cartesian product. Use a real shared column instead."
+        "Dummy key merge: assigning a constant integer to a _-prefixed key produces a Cartesian "
+        "product. Use a real shared column instead."
     ),
+    # 3. pd.merge() with two bare table-name arguments and no keyword join keys.
+    #    pd.merge(df1, df2) with no on=/left_on=/right_on= will use ALL common columns as keys
+    #    which is almost never intentional and can silently produce wrong results.
+    #    NOTE: pd.merge(df1, df2, on='key') does NOT match because the third token breaks \w+\s*\).
     (
-        r'\bpd\.merge\s*\([^)]*\)',
-        "pd.merge() — verify join keys are explicitly specified"
+        r'\bpd\.merge\s*\(\s*\w+\s*,\s*\w+\s*\)',
+        "pd.merge() called with two bare table names and no explicit join key — "
+        "add on=, left_on=, or right_on=."
     ),
+    # 4. Stale Series reference as left_on/right_on.
+    #    After a chained merge the original DataFrame's index is no longer aligned, so
+    #    Table_X['col'] passed as left_on/right_on silently misaligns rows.
+    #    The previous pattern used [^)]* which cannot handle nested parens (e.g. suffixes=('_a','_b'))
+    #    and was therefore both fragile and prone to false positives on valid chained merges.
+    #    This simpler pattern catches the actual anti-pattern directly wherever it appears.
     (
-        r'\.join\s*\(\s*\w+\s*(?:,\s*how\s*=\s*[\'"](?:left|right|outer|inner)[\'"])?\s*\)',
-        "join() called without explicit 'on' key"
-    ),
-    (
-        r'\.merge\s*\([^)]*\)[^;]*\.merge\s*\([^)]*(?:left_on|right_on)\s*=\s*\w+\[',
-        "Stale Series as left_on/right_on in chained merge — Table_X['col'] misaligns after first merge.\n"
+        r'(?:left_on|right_on)\s*=\s*[A-Za-z_]\w*\s*\[',
+        "Stale Series as left_on/right_on — passing Table_X['col'] misaligns rows after a prior merge.\n"
         "  ✓ Table_A.assign(_key=Table_A['col'].str.lower()).merge(Table_B.assign(_key=...), on='_key')\n"
         "  ✗ .merge(Table_C, left_on=Table_A['col'].str.lower())"
     ),
+    # REMOVED — bare single-arg .merge(df): .merge(other) is valid pandas and uses shared columns.
+    # REMOVED — .join() without on=: index-based joins (.join(other)) are perfectly valid pandas.
 ]
 
 PANDAS_DANGEROUS_OPS = {
@@ -128,6 +138,21 @@ class PandasValidator(QueryValidator):
 
     MAX_RESULT_ROWS = 5_000_000
 
+    def _empty_result_is_error(self, ordered_names: list) -> bool:
+        """
+        FIX: For multi-table queries, sample data frequently has no overlapping join keys,
+        so a logically correct merge or concat will return 0 rows on the sample subset.
+        Rejecting these as errors forces the LLM into spurious correction cycles that burn
+        tokens without fixing anything real.
+
+        Strategy:
+          - Single-table: always reject empty — a filter/transform on one table that returns
+            nothing is almost certainly wrong.
+          - Multi-table: allow empty — the query structure is validated (connectivity, table
+            usage, field coverage) but we do not penalise zero rows from sample-data key mismatches.
+        """
+        return len(ordered_names) == 1
+
     def _run_query(self, query: str, dataframes: list, table_names: list) -> Any:
         restore = _patch_pandas(max_rows=self.MAX_RESULT_ROWS, max_mb=self.mem_limit_mb)
         try:
@@ -174,11 +199,14 @@ class PandasValidator(QueryValidator):
                     raise ValueError(
                         "Last statement produced no DataFrame.\n"
                         "End with a bare variable name, not an assignment (e.g. 'result_df' not 'result_df = ...').\n"
-                        f"Available tables: {', '.join(self.table_names)}"
+                        f"Available tables: {', '.join(table_names)}"
                     )
 
-            if self._is_empty_result(result):
-                raise ValueError(self._build_empty_result_feedback(query=query))
+            # FIX: empty-result check removed from _exec.
+            # validate_queries() in the base class is the single authoritative place for
+            # this check, and it now gates the rejection through _empty_result_is_error()
+            # so multi-table queries are not penalised for sample-data key mismatches.
+            # Having the check here too caused double-firing and also bypassed the gate.
 
             return result
 
@@ -307,7 +335,6 @@ class PandasValidator(QueryValidator):
     # Pre-processing
     # ------------------------------------------------------------------
     def _preprocess_query(self, query: str) -> str:
-        print(f"intial query:{query}")
         warnings = self._check_pandas_cartesian(query)
         if warnings:
             raise ValueError(
@@ -328,7 +355,6 @@ class PandasValidator(QueryValidator):
 
         cleaned = self._clean_pandas(query)
         self._check_stripped_query(query, cleaned)
-        print(f"cleaned query:{cleaned}")
         return cleaned
 
     def _check_stripped_query(self, original: str, cleaned: str) -> None:
