@@ -1,5 +1,4 @@
 import asyncio
-import concurrent.futures
 import json
 import math
 import random
@@ -596,25 +595,20 @@ def create_statements(
 
         start = __import__("time").perf_counter()
 
-        # ── Call generate_statements with a token-scaled timeout ─────────────
-        # Budget: 30 s per 5 000 tokens (ceiling), e.g. 10 k → 60 s.
-        timeout = _compute_timeout(max_cols)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(
-                cross_agent.generate_statements,
-                dataset_paths, aliases, kind,
-                formatted_match,
-                involved_cols, metadatas,
-                max_cols,
-                5,          # sample_size
-            )
-            try:
-                content = future.result(timeout=timeout)
-            except concurrent.futures.TimeoutError:
-                print(f"[{idx}] generate_statements timed out after {timeout}s (max_cols={max_cols}) — skipping.")
-                continue
+        content = cross_agent.generate_statements(
+            dataset_paths, aliases, kind,
+            formatted_match,
+            involved_cols, metadatas,
+            max_cols, sample_size=5,
+        )
 
         generation_time = __import__("time").perf_counter() - start
+
+        # ── Rate-limit cooldown: 30 s per 5 000 tokens actually consumed ──────
+        actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
+        cooldown = _compute_timeout(actual_tokens)
+        print(f"[{idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
+        __import__("time").sleep(cooldown)
 
         result = content["result"]
         model  = content["model"].split("/")[-1]
@@ -715,28 +709,7 @@ async def stream_generate_statements(
             return content, aliases
 
         try:
-            # ── Token-scaled timeout on the cross-table agent call ────────────
-            # Budget: 30 s per 5 000 tokens (ceiling).
-            timeout = _compute_timeout(cfg.statement_generation.max_cols)
-            content, aliases = await asyncio.wait_for(
-                loop.run_in_executor(None, _process_cross),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError:
-            timeout = _compute_timeout(cfg.statement_generation.max_cols)
-            print(f"[{idx}] generate_statements timed out after {timeout}s (max_cols={cfg.statement_generation.max_cols}) — skipping.")
-            failures += 1
-            yield {
-                "type":        "progress",
-                "idx":         idx + 1,
-                "total":       total,
-                "successes":   successes,
-                "failures":    failures,
-                "status":      "timeout",
-                "aliases":     [],
-                "query_count": 0,
-            }
-            continue
+            content, aliases = await loop.run_in_executor(None, _process_cross)
         except Exception as exc:
             yield {"type": "error", "message": str(exc)}
             return
@@ -759,6 +732,12 @@ async def stream_generate_statements(
         }
 
         await loop.run_in_executor(None, save_json, results, output_file)
+
+        # ── Rate-limit cooldown: 30 s per 5 000 tokens actually consumed ──────
+        actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
+        cooldown = _compute_timeout(actual_tokens)
+        print(f"[{idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
+        await asyncio.sleep(cooldown)
 
         yield {
             "type":        "progress",
@@ -797,28 +776,7 @@ async def stream_generate_statements(
                 return content
 
             try:
-                # ── Token-scaled timeout on the single-table agent call ───────
-                # Budget: 30 s per 5 000 tokens (ceiling).
-                timeout = _compute_timeout(cfg.statement_generation.max_cols)
-                content = await asyncio.wait_for(
-                    loop.run_in_executor(None, _process_single),
-                    timeout=timeout,
-                )
-            except asyncio.TimeoutError:
-                timeout = _compute_timeout(cfg.statement_generation.max_cols)
-                print(f"[st_{st_idx}] generate_statements timed out after {timeout}s (max_cols={cfg.statement_generation.max_cols}) — skipping.")
-                failures += 1
-                yield {
-                    "type":        "progress",
-                    "idx":         total + st_idx + 1,
-                    "total":       total + st_total,
-                    "successes":   successes,
-                    "failures":    failures,
-                    "status":      "timeout",
-                    "aliases":     list(aliases.values()),
-                    "query_count": 0,
-                }
-                continue
+                content = await loop.run_in_executor(None, _process_single)
             except Exception as exc:
                 yield {"type": "error", "message": str(exc)}
                 return
@@ -841,6 +799,12 @@ async def stream_generate_statements(
             }
 
             await loop.run_in_executor(None, save_json, results, output_file)
+
+            # ── Rate-limit cooldown: 30 s per 5 000 tokens actually consumed ──
+            actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
+            cooldown = _compute_timeout(actual_tokens)
+            print(f"[st_{st_idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
+            await asyncio.sleep(cooldown)
 
             yield {
                 "type":        "progress",
