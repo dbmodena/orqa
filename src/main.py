@@ -17,8 +17,7 @@ STEP_CHOICES = (
     "normalize-metadata",
     "index",
     "candidates-discovery",
-    "generate-statements",
-    "generate-response",
+    "generate-statements"
 )
 
 
@@ -215,7 +214,6 @@ def _step_callable_path(step: str, spec: TargetSpec) -> str:
         "index": "orqa.indexing:create_blend_index",
         "candidates-discovery": "orqa.candidates_generation:candidates_discovery",
         "generate-statements": "orqa.statement_generation:generate_statements",
-        "generate-response": "orqa.statement_judge:generate_response",
     }
     return step_paths[step]
 
