@@ -186,10 +186,15 @@ class StatementGeneration:
     # max number of tokens per natural languange response
     max_response_tokens: int
 
+    # detected languages
+    detected_languages:list 
+
     # Enable single-table query generation alongside cross-table generation
     enable_single_table: bool = False
     # Number of queries to generate per single table (None = fall back to cross-table count)
     single_table_query_count: Optional[int] = None
+
+    
 
     def __post_init__(self):
         # Validate enable_single_table is a bool, coerce common truthy/falsy values
@@ -405,7 +410,9 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     single_table_query_count = parsed["tasks"]["query_generation"].get(
         "single_table_query_count", None
     )
-
+    detected_languages  = parsed["tasks"]["query_generation"].get(
+        "languages", ["English"]
+    )
     statement_generation = StatementGeneration(
         kind=kind,
         max_cols=max_cols,
@@ -413,8 +420,10 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         queries_path=queries_path,
         bad_tokens=bad_tokens,
         max_response_tokens=max_response_tokens,
+        detected_languages=detected_languages,
         enable_single_table=enable_single_table,
         single_table_query_count=single_table_query_count,
+
     )
 
     cleaning_task = parsed["tasks"].get("cleaning", {})

@@ -13,11 +13,7 @@ from .utils import load_datasets_metadata,load_normalized_datasets_metadata, loa
 from conf import OrQAConfig
 from dataclasses import dataclass, field
 
-# Timeout budget: 30 seconds per every 5 000 tokens expected.
-# e.g.  5 000 tokens →  30 s
-#       10 000 tokens →  60 s
-#       25 000 tokens → 150 s
-_TIMEOUT_SECONDS_PER_5K_TOKENS: int = 30
+_TIMEOUT_SECONDS_PER_5K_TOKENS: int = 5
 _TOKENS_PER_BUCKET: int = 5_000
 
 
@@ -43,6 +39,38 @@ def load_tasks(tasks_file: Path) -> dict:
 
 # ── Match builders ────────────────────────────────────────────────────────────
 
+def _is_string_column(df: pd.DataFrame, col: str) -> bool:
+    """Return True only when the column exists and holds object/string dtype."""
+    if col not in df.columns:
+        return False
+    return pd.api.types.is_string_dtype(df[col]) or pd.api.types.is_object_dtype(df[col])
+
+
+def _resolve_case_insensitive(
+    task_spec: dict,
+    dfs: dict[str, pd.DataFrame],
+    left_alias: str,
+    right_alias: str,
+) -> bool:
+    """
+    Return True only when case_insensitive was requested AND every join key
+    involved is actually a string column.  Numeric / date keys must never get
+    .str.lower() / LOWER().
+    """
+    if not task_spec.get("case_insensitive", False):
+        return False
+    left_on  = task_spec.get("q_columns", [])
+    right_on = task_spec.get("r_columns", [])
+    df_l = dfs.get(left_alias)
+    df_r = dfs.get(right_alias)
+    if df_l is None or df_r is None:
+        return False   # can't verify → be conservative
+    return (
+        all(_is_string_column(df_l, c) for c in left_on)
+        and all(_is_string_column(df_r, c) for c in right_on)
+    )
+
+
 def _make_union_match(task_spec, df_q, df_r, alias_q, alias_r):
     q_columns = task_spec.get("q_columns", [])
     r_columns = task_spec.get("r_columns", [])
@@ -57,18 +85,23 @@ def _make_union_match(task_spec, df_q, df_r, alias_q, alias_r):
             "left_cols": q_columns,
             "right_cols": r_columns,
         },
-        # kept for backward compatibility
         "pandas_expr": f"concat([{alias_q}[{q_columns}], {alias_r}[{r_columns}]], ignore_index=True)",
         "columns": {k: list(v) for k, v in involved.items()},
     }
 
 
-def _make_join_match(task_spec, df_r, alias_q, alias_r):
+def _make_join_match(task_spec, df_r, alias_q, alias_r, df_q=None):
     q_keys = task_spec.get("q_columns", [])
     r_keys = task_spec.get("r_columns", [])
     involved = {alias_q: set(q_keys), alias_r: set(r_keys)}
     conditions = " AND ".join(
         f"{alias_q}.{q_keys[i]} = {alias_r}.{r_keys[i]}" for i in range(len(q_keys))
+    )
+    ci = _resolve_case_insensitive(
+        task_spec,
+        {alias_q: df_q, alias_r: df_r} if df_q is not None else {alias_r: df_r},
+        alias_q,
+        alias_r,
     )
     return {
         "description": f"JOIN: {alias_q} ⋈ {alias_r} ON {conditions}",
@@ -79,10 +112,9 @@ def _make_join_match(task_spec, df_r, alias_q, alias_r):
             "right": alias_r,
             "left_on": q_keys,
             "right_on": r_keys,
-            "case_insensitive": True,
+            "case_insensitive": ci,
             "relationship": task_spec.get("relationship", ""),
         },
-        # kept for backward compatibility
         "pandas_expr": (
             f"merge(left={alias_q}, right={alias_r}, "
             f"left_on={q_keys}, right_on={r_keys}, "
@@ -98,11 +130,19 @@ def _make_join_correlation_match(task_spec, df_q, df_r, alias_q, alias_r):
     q_target = task_spec["q_target"]
     r_target = task_spec["r_target"]
     involved = {alias_q: {q_key, q_target}, alias_r: {r_key, r_target}}
+    ci = _resolve_case_insensitive(
+        {"case_insensitive": task_spec.get("case_insensitive", False),
+         "q_columns": [q_key], "r_columns": [r_key]},
+        {alias_q: df_q, alias_r: df_r},
+        alias_q,
+        alias_r,
+    )
     return {
         "description": (
             f"JOIN-CORRELATION: merge {alias_q} ⋈ {alias_r} "
-            f"ON LOWER({alias_q}.{q_key}) = LOWER({alias_r}.{r_key}), "
-            f"then correlate {alias_q}.{q_target} with {alias_r}.{r_target}"
+            f"ON {alias_q}.{q_key} = {alias_r}.{r_key}"
+            + (" [case-insensitive]" if ci else "")
+            + f", then correlate {alias_q}.{q_target} with {alias_r}.{r_target}"
         ),
         "match_spec": {
             "type": "merge_correlation",
@@ -111,11 +151,10 @@ def _make_join_correlation_match(task_spec, df_q, df_r, alias_q, alias_r):
             "right": alias_r,
             "left_on": [q_key],
             "right_on": [r_key],
-            "case_insensitive": True,
+            "case_insensitive": ci,
             "relationship": task_spec.get("relationship", ""),
             "correlation_cols": {alias_q: q_target, alias_r: r_target},
         },
-        # kept for backward compatibility
         "pandas_expr": (
             f"{alias_q}.merge({alias_r}, "
             f"left_on={alias_q}['{q_key}'].str.lower(), "
@@ -128,300 +167,236 @@ def _make_join_correlation_match(task_spec, df_q, df_r, alias_q, alias_r):
 
 
 def make_match(task_spec, df_q, df_r, alias_q, alias_r):
-    task    = task_spec["task"]
-    builder = _MATCH_BUILDERS.get(task)
-    if builder is None:
-        return None
+    task = task_spec["task"]
+    if task == "U":
+        return _make_union_match(task_spec, df_q, df_r, alias_q, alias_r)
     if task == "J":
-        return builder(task_spec, df_r, alias_q, alias_r)
-    return builder(task_spec, df_q, df_r, alias_q, alias_r)
-
-
-_MATCH_BUILDERS = {
-    "U":  _make_union_match,
-    "J":  _make_join_match,
-    "JC": _make_join_correlation_match,
-}
+        return _make_join_match(task_spec, df_r, alias_q, alias_r, df_q=df_q)
+    if task == "JC":
+        return _make_join_correlation_match(task_spec, df_q, df_r, alias_q, alias_r)
+    return None
 
 
 # ── Match formatting ──────────────────────────────────────────────────────────
 
-def _build_rename_map(match_specs: list[dict]) -> dict[str, dict[str, str]]:
+def _format_matches_sql(match_specs: list[dict]) -> str:
     """
-    Compute a per-table column rename map for the entire chain upfront.
-
-    For every merge/merge_correlation spec, any column that appears as a join
-    key in MORE than one table (i.e. a name collision across tables) is renamed
-    to ``<original_name>_<alias>`` on its table before the chain starts.  Key
-    columns that are unique across all tables are left as-is.
-
-    Returns:
-        { alias: { original_col: renamed_col, ... }, ... }
-        Tables with no collisions map to an empty dict.
+    Compact SQL-oriented description: one line per operation.
+    No pandas patterns, no rename maps, no chain boilerplate.
+    LOWER() note is included inline only when case_insensitive=True.
     """
-    # Collect every key column per table across all merge specs
-    table_keys: dict[str, set[str]] = {}
+    lines = []
     for spec in match_specs:
         mtype = spec.get("type")
-        if mtype not in ("merge", "merge_correlation"):
-            continue
-        for alias, keys in (
-            (spec["left"],  spec["left_on"]),
-            (spec["right"], spec["right_on"]),
-        ):
-            table_keys.setdefault(alias, set()).update(keys)
 
-    # Find column names that appear in more than one table
-    from collections import Counter
-    col_counts: Counter = Counter()
-    for keys in table_keys.values():
-        col_counts.update(keys)
-    colliding = {col for col, count in col_counts.items() if count > 1}
+        if mtype in ("merge", "merge_correlation"):
+            left, right = spec["left"], spec["right"]
+            left_on     = spec.get("left_on",  [])
+            right_on    = spec.get("right_on", [])
+            ci          = spec.get("case_insensitive", False)
 
-    # Also flag non-key columns that share a name across any two tables
-    # (these cause the _x/_y suffix problem even for payload columns)
-    all_table_cols: dict[str, set[str]] = {}
-    for spec in match_specs:
-        mtype = spec.get("type")
-        if mtype not in ("merge", "merge_correlation"):
-            continue
-        for alias in (spec["left"], spec["right"]):
-            if alias not in all_table_cols:
-                all_table_cols[alias] = set(table_keys.get(alias, set()))
-    payload_counts: Counter = Counter()
-    for cols in all_table_cols.values():
-        payload_counts.update(cols)
-    colliding |= {col for col, count in payload_counts.items() if count > 1}
-
-    # Build rename map: only rename columns that actually collide
-    rename_map: dict[str, dict[str, str]] = {}
-    for alias, cols in all_table_cols.items():
-        renames = {}
-        suffix = alias.lower().replace(" ", "_")
-        for col in cols:
-            if col in colliding:
-                renames[col] = f"{col}_{suffix}"
-        rename_map[alias] = renames
-
-    return rename_map
-
-
-def format_matches_for_prompt(match_specs: list[dict]) -> str:
-    """
-    Render a list of match_spec dicts into a clear, LLM-friendly instruction
-    block using the **rename-first** pattern.
-
-    Strategy
-    --------
-    For chained merges (Table_0 → Table_1 → Table_2 → …) pandas produces
-    ``_x``/``_y`` suffixes whenever two tables share a column name.  By the
-    third table these compound in unpredictable ways.
-
-    The fix is to rename every ambiguous column *before* the chain starts,
-    giving each column a globally unique name of the form ``<col>_<alias>``.
-    The prompt instructs the LLM to:
-
-      1. Emit one ``.rename()`` call per table (skipped when no collisions).
-      2. Build the chain using the renamed key names — no suffixes needed.
-
-    The rename map is computed once by ``_build_rename_map`` and shared across
-    all steps so the LLM sees a fully consistent namespace.
-
-    Non-merge operations (UNION) are rendered independently and appended after
-    the merge chain block.
-    """
-    if not match_specs:
-        return "(no join operations defined)"
-
-    # ── Separate merge chain from standalone ops (union, etc.) ────────────────
-    merge_specs  = [s for s in match_specs if s.get("type") in ("merge", "merge_correlation")]
-    other_specs  = [s for s in match_specs if s.get("type") not in ("merge", "merge_correlation")]
-
-    sections: list[str] = []
-
-    # ── Merge chain block ─────────────────────────────────────────────────────
-    if merge_specs:
-        rename_map = _build_rename_map(merge_specs)
-        is_chain   = len(merge_specs) > 1
-
-        header_lines = [
-            "MERGE CHAIN" if is_chain else "MERGE",
-            "=" * (12 if is_chain else 5),
-        ]
-        if is_chain:
-            order = " → ".join(
-                dict.fromkeys(
-                    alias
-                    for spec in merge_specs
-                    for alias in (spec["left"], spec["right"])
-                )
-            )
-            header_lines.append(f"Join order : {order}")
-
-        # ── Step 0: rename instructions ───────────────────────────────────────
-        tables_needing_rename = {
-            alias: renames
-            for alias, renames in rename_map.items()
-            if renames
-        }
-        if tables_needing_rename:
-            rename_lines = ["Step 0 — rename ambiguous columns before joining:"]
-            for alias, renames in tables_needing_rename.items():
-                rename_expr = "{" + ", ".join(f'"{old}": "{new}"' for old, new in sorted(renames.items())) + "}"
-                rename_lines.append(f"  {alias} = {alias}.rename(columns={rename_expr})")
-            rename_lines.append(
-                "  (Use the renamed column names in ALL subsequent steps — "
-                "never the originals.)"
-            )
-            header_lines.append("")
-            header_lines.extend(rename_lines)
-        else:
-            header_lines.append(
-                "No column name collisions detected — no renaming required."
-            )
-
-        sections.append("\n".join(header_lines))
-
-        # ── One block per merge step ──────────────────────────────────────────
-        for step_idx, spec in enumerate(merge_specs, 1):
-            mtype = spec.get("type")
-            left  = spec["left"]
-            right = spec["right"]
-            how   = spec.get("how", "inner").upper()
-            ci    = spec.get("case_insensitive", False)
-            rel   = spec.get("relationship", "")
-
-            # Resolve key names through the rename map
-            left_on  = [rename_map.get(left,  {}).get(k, k) for k in spec["left_on"]]
-            right_on = [rename_map.get(right, {}).get(k, k) for k in spec["right_on"]]
-
-            step_label = (
-                f"Step {step_idx} of {len(merge_specs)}"
-                if is_chain else "Operation"
-            )
-            left_src = "result of previous step" if (is_chain and step_idx > 1) else left
-
-            key_pairs = ", ".join(
+            pairs = "  AND  ".join(
                 f"{left}.{lk} = {right}.{rk}"
                 for lk, rk in zip(left_on, right_on)
             )
-
-            # ── pandas pattern ────────────────────────────────────────────────
-            left_ref = "result" if (is_chain and step_idx > 1) else left
+            ci_note = "  [case-insensitive — wrap keys in LOWER()]" if ci else ""
 
             if mtype == "merge_correlation":
-                corr_cols = spec.get("correlation_cols", {})
-                lk_orig   = spec["left_on"][0]
-                rk_orig   = spec["right_on"][0]
-                lk        = rename_map.get(left,  {}).get(lk_orig, lk_orig)
-                rk        = rename_map.get(right, {}).get(rk_orig, rk_orig)
-                l_target_orig = corr_cols.get(left,  "?")
-                r_target_orig = corr_cols.get(right, "?")
-                l_target  = rename_map.get(left,  {}).get(l_target_orig, l_target_orig)
-                r_target  = rename_map.get(right, {}).get(r_target_orig, r_target_orig)
+                corr = spec.get("correlation_cols", {})
+                l_t  = corr.get(left,  "?")
+                r_t  = corr.get(right, "?")
+                lines.append(
+                    f"JOIN  {pairs}{ci_note}\n"
+                    f"  → correlate {left}.{l_t} with {right}.{r_t} after joining"
+                )
+            else:
+                rel     = spec.get("relationship", "")
+                rel_note = f"  [{rel}]" if rel else ""
+                lines.append(f"JOIN  {pairs}{ci_note}{rel_note}")
 
-                if ci:
-                    pattern = (
-                        f"{left_ref}.assign(_key={left_ref}['{lk}'].str.lower())\n"
-                        f"    .merge(\n"
-                        f"        {right}.assign(_key={right}['{rk}'].str.lower()),\n"
-                        f"        on='_key',\n"
-                        f"        how='{how.lower()}'\n"
-                        f"    )\n"
-                        f"    [['{l_target}', '{r_target}']]\n"
-                        f"    .corr()"
-                    )
-                else:
-                    pattern = (
-                        f"{left_ref}.merge(\n"
-                        f"    {right},\n"
-                        f"    left_on=['{lk}'],\n"
-                        f"    right_on=['{rk}'],\n"
-                        f"    how='{how.lower()}'\n"
-                        f")\n"
-                        f"[['{l_target}', '{r_target}']].corr()"
-                    )
-
-                extra = f"   Correlation  : {l_target} (from {left}) vs {r_target} (from {right})"
-
-            else:  # plain merge
-                if ci:
-                    if len(left_on) == 1:
-                        pattern = (
-                            f"{left_ref}.assign(_key={left_ref}['{left_on[0]}'].str.lower())\n"
-                            f"    .merge(\n"
-                            f"        {right}.assign(_key={right}['{right_on[0]}'].str.lower()),\n"
-                            f"        on='_key',\n"
-                            f"        how='{how.lower()}'\n"
-                            f"    )"
-                        )
-                    else:
-                        lk_expr = "{" + ", ".join(f"'_key_{j}': {left_ref}['{k}'].str.lower()" for j, k in enumerate(left_on)) + "}"
-                        rk_expr = "{" + ", ".join(f"'_key_{j}': {right}['{k}'].str.lower()" for j, k in enumerate(right_on)) + "}"
-                        on_keys = [f"_key_{j}" for j in range(len(left_on))]
-                        pattern = (
-                            f"{left_ref}.assign(**{lk_expr})\n"
-                            f"    .merge(\n"
-                            f"        {right}.assign(**{rk_expr}),\n"
-                            f"        on={on_keys},\n"
-                            f"        how='{how.lower()}'\n"
-                            f"    )"
-                        )
-                else:
-                    pattern = (
-                        f"{left_ref}.merge(\n"
-                        f"    {right},\n"
-                        f"    left_on={left_on},\n"
-                        f"    right_on={right_on},\n"
-                        f"    how='{how.lower()}'\n"
-                        f")"
-                    )
-                extra = ""
-
-            block_lines = [
-                f"── {step_label} ──",
-                f"   Left        : {left_src}",
-                f"   Right       : {right}",
-                f"   Condition   : {key_pairs}",
-                f"   Join type   : {how}",
-                f"   Cardinality : {rel if rel else 'unspecified'}",
-                f"   Case-insensitive keys : "
-                + ("YES — apply .str.lower() on both sides" if ci else "no"),
-            ]
-            if extra:
-                block_lines.append(extra)
-            block_lines.append("   Pattern:")
-            block_lines.extend(f"     {line}" for line in pattern.splitlines())
-
-            sections.append("\n".join(block_lines))
-
-    # ── Non-merge operations ──────────────────────────────────────────────────
-    for i, spec in enumerate(other_specs, 1):
-        mtype = spec.get("type")
-        if mtype == "union":
-            left       = spec["left"]
-            right      = spec["right"]
+        elif mtype == "union":
+            left      = spec["left"]
+            right     = spec["right"]
             left_cols  = spec.get("left_cols",  [])
             right_cols = spec.get("right_cols", [])
-            pattern = (
-                f"pd.concat(\n"
-                f"    [{left}[{left_cols}], {right}[{right_cols}]],\n"
-                f"    ignore_index=True\n"
-                f")"
+            lines.append(
+                f"UNION  {left}{left_cols} ∪ {right}{right_cols}"
+                "  (align columns by position)"
             )
-            block = (
-                f"UNION {i}\n"
-                f"   Left table  : {left}   columns: {left_cols}\n"
-                f"   Right table : {right}  columns: {right_cols}\n"
-                f"   Note        : column names and order must align between both sides\n"
-                f"   Pattern:\n"
-                + "\n".join(f"     {line}" for line in pattern.splitlines())
-            )
-            sections.append(block)
         else:
-            sections.append(f"UNKNOWN operation type '{mtype}' — skipped")
+            lines.append(f"# unknown operation type '{mtype}' — skipped")
+
+    return "\n".join(lines)
+
+
+def _sample_col(df: pd.DataFrame, col: str, n: int = 3) -> list:
+    """Return up to n distinct non-null sample values from a column."""
+    if col not in df.columns:
+        return []
+    vals = df[col].dropna().unique()
+    return [v.item() if hasattr(v, "item") else v for v in vals[:n]]
+
+
+def _format_matches_pandas(
+    match_specs: list[dict],
+    dfs: dict[str, pd.DataFrame] | None = None,
+    involved_cols: dict[str, list[str]] | None = None,
+    sample_n: int = 3,
+) -> str:
+    """
+    Schema-first declarative prompt block for PANDAS generation.
+
+    Tells the LLM *what* to join and *what data looks like* — not how pandas
+    works.  The LLM already knows pandas; it just needs intent + shape.
+
+    Output sections
+    ---------------
+    1. Links      — one line per join/union showing which columns connect tables
+    2. Schema     — columns available per table, join keys marked with *,
+                    correlation targets marked with ~
+    3. Samples    — 3 representative values per relevant column (skipped when
+                    no dataframes are supplied)
+
+    Args:
+        match_specs:   list of match_spec dicts from make_match()
+        dfs:           {alias: DataFrame} — when provided, sample values are
+                       included; pass None to omit the Samples section
+        involved_cols: {alias: [col, ...]} — non-key columns the LLM may use;
+                       when None, all columns in the df are listed
+        sample_n:      number of sample values per column
+    """
+    if not match_specs:
+        return "(no operations defined)"
+
+    dfs           = dfs or {}
+    involved_cols = involved_cols or {}
+
+    # ── Collect per-table metadata in one pass ────────────────────────────────
+    # key_cols[alias]  → set of join-key column names
+    # corr_cols[alias] → set of correlation-target column names
+    key_cols:  dict[str, set[str]] = {}
+    corr_cols: dict[str, set[str]] = {}
+    links: list[str] = []
+
+    for spec in match_specs:
+        mtype = spec.get("type")
+        left, right = spec.get("left", "?"), spec.get("right", "?")
+
+        if mtype in ("merge", "merge_correlation"):
+            left_on  = spec.get("left_on",  [])
+            right_on = spec.get("right_on", [])
+            ci       = spec.get("case_insensitive", False)
+            how      = spec.get("how", "inner").upper()
+
+            key_cols.setdefault(left,  set()).update(left_on)
+            key_cols.setdefault(right, set()).update(right_on)
+
+            pairs    = ", ".join(f"{lk}={rk}" for lk, rk in zip(left_on, right_on))
+            ci_note  = " [ci]" if ci else ""
+            how_note = f" [{how}]" if how != "INNER" else ""
+            link     = f"{left} → {right}  on {pairs}{ci_note}{how_note}"
+
+            if mtype == "merge_correlation":
+                cc = spec.get("correlation_cols", {})
+                lt, rt = cc.get(left, "?"), cc.get(right, "?")
+                corr_cols.setdefault(left,  set()).add(lt)
+                corr_cols.setdefault(right, set()).add(rt)
+                link += f"  correlate {lt}~{rt}"
+
+            links.append(link)
+
+        elif mtype == "union":
+            lc = spec.get("left_cols",  [])
+            rc = spec.get("right_cols", [])
+            links.append(f"{left} ∪ {right}  columns {lc} → {rc}")
+
+    # ── Section 1: Links ──────────────────────────────────────────────────────
+    sections = ["Links:\n" + "\n".join(f"  {l}" for l in links)]
+
+    # ── Section 2: Schema ─────────────────────────────────────────────────────
+    # Gather all aliases mentioned across all specs (preserving order)
+    seen: dict[str, None] = {}
+    for spec in match_specs:
+        for alias in (spec.get("left"), spec.get("right")):
+            if alias:
+                seen[alias] = None
+    all_aliases = list(seen)
+
+    schema_lines = ["Schema  (* = join key, ~ = correlation target):"]
+    for alias in all_aliases:
+        df = dfs.get(alias)
+        # Columns to show: involved_cols when provided, else all df columns
+        if involved_cols.get(alias):
+            cols = involved_cols[alias]
+        elif df is not None:
+            cols = list(df.columns)
+        else:
+            # Fall back to whatever we know from the specs
+            cols = list(
+                key_cols.get(alias, set()) | corr_cols.get(alias, set())
+            )
+
+        annotated = []
+        for c in cols:
+            marker = ""
+            if c in key_cols.get(alias, set()):
+                marker = "*"
+            elif c in corr_cols.get(alias, set()):
+                marker = "~"
+            annotated.append(f"{marker}{c}" if marker else c)
+
+        schema_lines.append(f"  {alias}: {', '.join(annotated)}")
+
+    sections.append("\n".join(schema_lines))
+
+    # ── Section 3: Samples (only when dataframes are available) ──────────────
+    if dfs:
+        sample_lines = [f"Samples (up to {sample_n} distinct values):"]
+        for alias in all_aliases:
+            df = dfs.get(alias)
+            if df is None:
+                continue
+            # Only sample columns that are relevant (keys, corr targets, involved)
+            relevant = (
+                key_cols.get(alias, set())
+                | corr_cols.get(alias, set())
+                | set(involved_cols.get(alias, []))
+            )
+            for col in relevant:
+                vals = _sample_col(df, col, sample_n)
+                if vals:
+                    sample_lines.append(f"  {alias}.{col}: {vals}")
+
+        if len(sample_lines) > 1:   # at least one column had values
+            sections.append("\n".join(sample_lines))
 
     return "\n\n".join(sections)
+
+
+def format_matches_for_prompt(
+    match_specs: list[dict],
+    kind: str = "PANDAS",
+    dfs: dict | None = None,
+    involved_cols: dict | None = None,
+    sample_n: int = 3,
+) -> str:
+    """
+    Return a compact, LLM-readable description of the match operations.
+
+    Args:
+        match_specs:   list of match_spec dicts produced by make_match().
+        kind:          "SQL" or "PANDAS" — controls which formatter is used.
+        dfs:           {alias: DataFrame} — PANDAS only; enables sample values
+                       section.  Pass None to omit samples.
+        involved_cols: {alias: [col, ...]} — PANDAS only; restricts the schema
+                       section to columns the LLM should actually use.
+        sample_n:      number of sample values per column in the Samples block.
+    """
+    if not match_specs:
+        return "(no join operations defined)"
+    if kind.upper() == "SQL":
+        return _format_matches_sql(match_specs)
+    return _format_matches_pandas(match_specs, dfs=dfs, involved_cols=involved_cols, sample_n=sample_n)
 
 
 # ── Match processing ──────────────────────────────────────────────────────────
@@ -433,12 +408,12 @@ def process_path(path: dict, tasks: dict, csv_folder: Path) -> dict | None:
     all_columns = {f"Table_{i}": set() for i in range(len(datasets))}
     path_matches     = []
     path_pandas      = []
-    path_match_specs = []   # ← NEW: structured specs for prompt formatting
+    path_match_specs = []
 
     for i in range(len(datasets) - 1):
         pair_matches = []
         pair_pandas  = []
-        pair_specs   = []   # ← NEW
+        pair_specs   = []
 
         df_i  = pd.read_csv(csv_folder / f"{datasets[i]}.csv",     low_memory=False)
         df_i1 = pd.read_csv(csv_folder / f"{datasets[i+1]}.csv",   low_memory=False)
@@ -460,7 +435,7 @@ def process_path(path: dict, tasks: dict, csv_folder: Path) -> dict | None:
             if result:
                 pair_matches.append(result["description"])
                 pair_pandas.append(result["pandas_expr"])
-                pair_specs.append(result["match_spec"])   # ← NEW
+                pair_specs.append(result["match_spec"])
                 for alias, cols in result["columns"].items():
                     all_columns[alias].update(cols)
 
@@ -470,13 +445,13 @@ def process_path(path: dict, tasks: dict, csv_folder: Path) -> dict | None:
 
         path_matches.extend(pair_matches)
         path_pandas.extend(pair_pandas)
-        path_match_specs.extend(pair_specs)   # ← NEW
+        path_match_specs.extend(pair_specs)
 
     return {
         "aliases":          aliases,
         "SQL_matches":      path_matches,
         "PANDAS_matches":   path_pandas,
-        "match_specs":      path_match_specs,   # ← NEW: used by format_matches_for_prompt
+        "match_specs":      path_match_specs,
         "columns_by_table": {k: list(v) for k, v in all_columns.items()},
     }
 
@@ -510,34 +485,37 @@ def process_all_candidates(
 def _build_match_inputs(
     match: dict, csv_folder: Path, datasets_metadata: dict, extension: str
 ) -> tuple[list[Path], dict, list[dict], dict]:
-    """Unpack a match record into agent inputs."""
+    """
+    Unpack a match record into agent inputs.
+
+    Returns
+    -------
+    dataset_paths, aliases, metadatas, involved_cols, dfs
+
+    ``dfs`` is a {alias: DataFrame} mapping loaded here so the pandas
+    formatter can pull sample values without a second CSV read.
+    """
     dataset_paths, metadatas = [], []
     aliases       = {}
     involved_cols = {}
+    dfs           = {}
     for alias, dataset in match["aliases"].items():
-        dataset_paths.append(csv_folder / f"{dataset}.{extension}")
+        path = csv_folder / f"{dataset}.{extension}"
+        dataset_paths.append(path)
         aliases[alias]        = dataset
         metadatas.append(datasets_metadata.get(dataset))
         involved_cols[alias]  = match["columns_by_table"].get(alias, [])
-    return dataset_paths, aliases, metadatas, involved_cols
+        try:
+            dfs[alias] = pd.read_csv(path, low_memory=False)
+        except Exception:
+            pass   # formatter degrades gracefully without the df
+    return dataset_paths, aliases, metadatas, involved_cols, dfs
 
 def _is_single_table_candidate(match: dict) -> bool:
-    """Check if a candidate has a single dataset and no cross-table match definitions.
-
-    A single-table candidate is identified by:
-    - Having exactly one entry in the ``aliases`` mapping
-    - Having no SQL or Pandas cross-table match definitions
-
-    Args:
-        match: A candidate record loaded from the matches/candidates JSON.
-
-    Returns:
-        True if the candidate is a single-table candidate, False otherwise.
-    """
+    """Check if a candidate has a single dataset and no cross-table match definitions."""
     aliases = match.get("aliases", {})
     if len(aliases) != 1:
         return False
-
     has_sql    = bool(match.get("SQL_matches"))
     has_pandas = bool(match.get("PANDAS_matches"))
     return not has_sql and not has_pandas
@@ -553,6 +531,24 @@ def _sample_single_table_datasets(
     return random.sample(all_files, min(count, len(all_files)))
 
 
+def _get_formatted_match(
+    match: dict,
+    kind: str,
+    dfs: dict | None = None,
+    involved_cols: dict | None = None,
+) -> str:
+    """
+    Return a formatted match string for the given kind (SQL or PANDAS).
+    Uses structured match_specs when available; falls back to legacy string lists.
+    ``dfs`` and ``involved_cols`` are forwarded to the PANDAS formatter only.
+    """
+    if "match_specs" in match and match["match_specs"]:
+        return format_matches_for_prompt(
+            match["match_specs"], kind=kind, dfs=dfs, involved_cols=involved_cols
+        )
+    return "\n".join(match.get(f"{kind}_matches", []))
+
+
 def create_statements(
     config_path: Path,
     csv_folder: Path,
@@ -564,6 +560,7 @@ def create_statements(
     bad_tokens: list | None = None,
     enable_single_table: bool = False,
     single_table_query_count: int = 0,
+    languages: list= ["English"]
 ) -> list[dict]:
     bad_tokens = bad_tokens or []
 
@@ -573,25 +570,19 @@ def create_statements(
     all_matches: list = load_json(candidates_file)
     results = load_json(output_file) if output_file.exists() else {}
 
-    cross_agent = StatementGenerationAgent(config_path, kind, bad_tokens)
+    cross_agent = StatementGenerationAgent(config_path, kind, bad_tokens, languages=languages)
 
     for idx, match in enumerate(all_matches):
+        if kind == " SQL" and idx in [0,2,6,8,11,13,14,18,20,21,22,23,24,25,26,28,29,33,35,36]:
+            continue
         if _is_single_table_candidate(match):
             continue
 
-        dataset_paths, aliases, metadatas, involved_cols = _build_match_inputs(
+        dataset_paths, aliases, metadatas, involved_cols, dfs = _build_match_inputs(
             match, csv_folder, datasets_metadata, "csv"
         )
 
-        # ── Format matches for prompt ─────────────────────────────────────────
-        # Use the structured match_specs when available (new records produced by
-        # process_path); fall back to the legacy PANDAS_matches string list for
-        # records that pre-date this change.
-        if "match_specs" in match and match["match_specs"]:
-            formatted_match = format_matches_for_prompt(match["match_specs"])
-        else:
-            # Legacy fallback: join the raw expression strings
-            formatted_match = "\n".join(match.get(f"{kind}_matches", []))
+        formatted_match = _get_formatted_match(match, kind, dfs=dfs, involved_cols=involved_cols)
 
         start = __import__("time").perf_counter()
 
@@ -599,12 +590,11 @@ def create_statements(
             dataset_paths, aliases, kind,
             formatted_match,
             involved_cols, metadatas,
-            max_cols, sample_size=5,
+            max_cols, sample_size=5
         )
 
         generation_time = __import__("time").perf_counter() - start
 
-        # ── Rate-limit cooldown: 30 s per 5 000 tokens actually consumed ──────
         actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
         cooldown = _compute_timeout(actual_tokens)
         print(f"[{idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
@@ -626,10 +616,8 @@ def create_statements(
         save_json(results, output_file)
         sys.stdout.flush()
 
-    
     print(f"\nResults saved to {output_file}")
     return results
-
 
 
 # ── Async streaming generation (used by web_app.py) ──────────────────────────
@@ -656,11 +644,10 @@ async def stream_generate_statements(
     """
     loop = asyncio.get_event_loop()
 
-    # ── load metadata (blocking, run in executor) ─────────────────────────────
     try:
         metadata = await loop.run_in_executor(
             None,
-            load_normalized_datasets_metadata,cfg.metadata_path.joinpath("metadata.json"),
+            load_normalized_datasets_metadata, cfg.metadata_path.joinpath("metadata.json"),
             None,
             cfg.source,
         )
@@ -676,7 +663,7 @@ async def stream_generate_statements(
     total       = len(all_matches)
     successes = failures = 0
 
-    enable_single_table = cfg.statement_generation.enable_single_table
+    enable_single_table      = cfg.statement_generation.enable_single_table
     single_table_query_count = cfg.statement_generation.single_table_query_count
 
     # ── Cross-table generation ────────────────────────────────────────────────
@@ -690,16 +677,10 @@ async def stream_generate_statements(
             continue
 
         def _process_cross(match=match):
-            dataset_paths, aliases, metadatas, involved_cols = _build_match_inputs(
+            dataset_paths, aliases, metadatas, involved_cols, dfs = _build_match_inputs(
                 match, cfg.datasets_path, metadata, "csv"
             )
-
-            # ── Format matches for prompt ─────────────────────────────────────
-            if "match_specs" in match and match["match_specs"]:
-                formatted_match = format_matches_for_prompt(match["match_specs"])
-            else:
-                formatted_match = "\n".join(match.get(f"{kind}_matches", []))
-
+            formatted_match = _get_formatted_match(match, kind, dfs=dfs, involved_cols=involved_cols)
             content = cross_agent.generate_statements(
                 dataset_paths, aliases, kind,
                 formatted_match,
@@ -733,7 +714,6 @@ async def stream_generate_statements(
 
         await loop.run_in_executor(None, save_json, results, output_file)
 
-        # ── Rate-limit cooldown: 30 s per 5 000 tokens actually consumed ──────
         actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
         cooldown = _compute_timeout(actual_tokens)
         print(f"[{idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
@@ -800,7 +780,6 @@ async def stream_generate_statements(
 
             await loop.run_in_executor(None, save_json, results, output_file)
 
-            # ── Rate-limit cooldown: 30 s per 5 000 tokens actually consumed ──
             actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
             cooldown = _compute_timeout(actual_tokens)
             print(f"[st_{st_idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
@@ -825,10 +804,15 @@ from orqa.candidates_generation import generate_random_walks
 
 
 def generate_statements(cfg: OrQAConfig) -> None:
-    generate_random_walks(cfg)
-    process_all_candidates(cfg.candidates_discovery.candidates_path, cfg.candidates_discovery.tasks_results_path,cfg.datasets_path, cfg.statement_generation.query_candidates_path)
+    #generate_random_walks(cfg)
+    #process_all_candidates(
+    #    cfg.candidates_discovery.candidates_path,
+    #    cfg.candidates_discovery.tasks_results_path,
+    #    cfg.datasets_path,
+    #    cfg.statement_generation.query_candidates_path,
+    #)
     metadata = load_normalized_datasets_metadata(cfg.normalized_metadata_filepath)
-    for lang in ["SQL","PANDAS"]:
+    for lang in ["SQL", "PANDAS"]:
         create_statements(
             cfg.llm_config_path.joinpath("litellm.yaml"),
             cfg.datasets_path,
@@ -840,4 +824,5 @@ def generate_statements(cfg: OrQAConfig) -> None:
             bad_tokens=cfg.statement_generation.bad_tokens,
             enable_single_table=cfg.statement_generation.enable_single_table,
             single_table_query_count=cfg.statement_generation.single_table_query_count,
+            languages=cfg.statement_generation.detected_languages
         )

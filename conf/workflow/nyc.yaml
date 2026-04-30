@@ -98,3 +98,4 @@ tasks:
     max_pool_time: 60
     enable_single_table: "yes"
     single_table_query_count: 100
+    languages: ["English"]

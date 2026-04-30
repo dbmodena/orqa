@@ -128,7 +128,23 @@ class DatasetDescription(Prompt):
                 "sample_data": sample_data,
             }
         )
+class LightDatasetDescription(Prompt):
+    _prompt_path = PROMPT_PATH.joinpath("light_dataset_description.md")
 
+    def update(
+        self,
+        dataset_name: str,
+        columns: dict,
+        sample_data,matches
+    ) -> str:
+        return self._update(
+            **{
+                "dataset_name": dataset_name,
+                "columns": columns,
+                "matches":matches
+                #"sample_data": sample_data,
+            }
+        )
 
 class CandidatesDiscoveryPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("propose_discovery_tasks.md")
@@ -161,11 +177,27 @@ class PandasStatementGenerationPrompt(Prompt):
     def __init__(self):
         super().__init__()
         self._datasets_descriptions = ""
+        self._light_datasets_descriptions = ""
+        self._secondary_datasets_descriptions = ""
 
     def reset(self):
         """Reset accumulated dataset descriptions. Must be called before each new generate_statements run."""
         self._datasets_descriptions = ""
+        self._secondary_datasets_descriptions = ""
+        self._light_datasets_descriptions = ""
 
+    @property
+    def datasets_descriptions(self) -> str:
+        """Expose accumulated table schemas for use by StatementValidator."""
+        return self._datasets_descriptions
+    @property
+    def light_datasets_descriptions(self) -> str:
+        """Expose accumulated table schemas for use by StatementValidator."""
+        return self._light_datasets_descriptions
+    @property
+    def secondary_datasets_descriptions(self) -> str:
+        """Expose accumulated table schemas for use by StatementValidator."""
+        return self._secondary_datasets_descriptions
     def update(
         self,
         dataset_name: str,
@@ -175,9 +207,10 @@ class PandasStatementGenerationPrompt(Prompt):
         column_details: dict,
         sample_data,
         aliases,
-        matches,
+        matches,languages,columns,alias
     ) -> str:
         query_dataset_prompt = DatasetDescription()
+        light_query_dataset_prompt = LightDatasetDescription()
         query_dataset_description = query_dataset_prompt.update(
             dataset_name,
             num_rows,
@@ -186,9 +219,28 @@ class PandasStatementGenerationPrompt(Prompt):
             column_details,
             sample_data,
         )
-        self._datasets_descriptions += f"\n{query_dataset_description}"
-        return self._update(table=self._datasets_descriptions, matches=matches, aliases=aliases)
+        light_dataset_description = light_query_dataset_prompt.update(
+            alias,
+            columns,
+            sample_data,matches
+        )
+        secondary_query_dataset_prompt = DatasetDescription()
+        secondary_query_dataset_description = secondary_query_dataset_prompt.update(
+            alias,
+            num_rows,
+            num_columns,
+            dataset_metadata,
+            column_details,
+            sample_data,
+        )
 
+
+
+        self._datasets_descriptions += f"\n{query_dataset_description}"
+        self._secondary_datasets_descriptions += f"\n{secondary_query_dataset_description}"
+        self._light_datasets_descriptions += f"\n{light_dataset_description}"
+        #self.light_query_dataset_descriptions=
+        return self._update(table=self._datasets_descriptions, matches=matches, languages=languages, aliases=aliases)
 
 class SQLStatementGenerationPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("sql_statement_generation.md")
@@ -196,11 +248,27 @@ class SQLStatementGenerationPrompt(Prompt):
     def __init__(self):
         super().__init__()
         self._datasets_descriptions = ""
+        self._light_datasets_descriptions = ""
+        self._secondary_datasets_descriptions = ""
 
     def reset(self):
         """Reset accumulated dataset descriptions. Must be called before each new generate_statements run."""
         self._datasets_descriptions = ""
+        self._secondary_datasets_descriptions = ""
+        self._light_datasets_descriptions = ""
 
+    @property
+    def datasets_descriptions(self) -> str:
+        """Expose accumulated table schemas for use by StatementValidator."""
+        return self._datasets_descriptions
+    @property
+    def light_datasets_descriptions(self) -> str:
+        """Expose accumulated table schemas for use by StatementValidator."""
+        return self._light_datasets_descriptions
+    @property
+    def secondary_datasets_descriptions(self) -> str:
+        """Expose accumulated table schemas for use by StatementValidator."""
+        return self._secondary_datasets_descriptions
     def update(
         self,
         dataset_name: str,
@@ -210,9 +278,10 @@ class SQLStatementGenerationPrompt(Prompt):
         column_details: dict,
         sample_data,
         aliases,
-        matches,
+        matches,languages,columns,alias
     ) -> str:
         query_dataset_prompt = DatasetDescription()
+        light_query_dataset_prompt = LightDatasetDescription()
         query_dataset_description = query_dataset_prompt.update(
             dataset_name,
             num_rows,
@@ -221,8 +290,28 @@ class SQLStatementGenerationPrompt(Prompt):
             column_details,
             sample_data,
         )
+        light_dataset_description = light_query_dataset_prompt.update(
+            alias,
+            columns,
+            sample_data,matches
+        )
+        secondary_query_dataset_prompt = DatasetDescription()
+        secondary_query_dataset_description = secondary_query_dataset_prompt.update(
+            alias,
+            num_rows,
+            num_columns,
+            dataset_metadata,
+            column_details,
+            sample_data,
+        )
+
+
+
         self._datasets_descriptions += f"\n{query_dataset_description}"
-        return self._update(table=self._datasets_descriptions, matches=matches, aliases=aliases)
+        self._secondary_datasets_descriptions += f"\n{secondary_query_dataset_description}"
+        self._light_datasets_descriptions += f"\n{light_dataset_description}"
+        #self.light_query_dataset_descriptions=
+        return self._update(table=self._datasets_descriptions, matches=matches, languages=languages, aliases=aliases)
 
 
 class JudgementResponseGenerationPrompt(Prompt):
@@ -258,6 +347,30 @@ class ResponseGenerationPrompt(Prompt):
 class SingleTablePandasPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("single_table_pandas_statement_generation.md")
 
+    def __init__(self):
+        super().__init__()
+        self._datasets_descriptions = ""
+        self._light_datasets_descriptions = ""
+        self._secondary_datasets_descriptions = ""
+
+    def reset(self):
+        """Reset accumulated dataset descriptions. Must be called before each new generate_statements run."""
+        self._datasets_descriptions = ""
+        self._secondary_datasets_descriptions = ""
+        self._light_datasets_descriptions = ""
+
+    @property
+    def datasets_descriptions(self) -> str:
+        """Expose accumulated table schemas for use by StatementValidator."""
+        return self._datasets_descriptions
+    @property
+    def light_datasets_descriptions(self) -> str:
+        """Expose accumulated table schemas for use by StatementValidator."""
+        return self._light_datasets_descriptions
+    @property
+    def secondary_datasets_descriptions(self) -> str:
+        """Expose accumulated table schemas for use by StatementValidator."""
+        return self._secondary_datasets_descriptions
     def update(
         self,
         dataset_name: str,
@@ -266,9 +379,11 @@ class SingleTablePandasPrompt(Prompt):
         dataset_metadata: dict,
         column_details: dict,
         sample_data,
-        alias: str,
+        aliases,
+        matches,languages,columns,alias
     ) -> str:
         query_dataset_prompt = DatasetDescription()
+        light_query_dataset_prompt = LightDatasetDescription()
         query_dataset_description = query_dataset_prompt.update(
             dataset_name,
             num_rows,
@@ -277,12 +392,57 @@ class SingleTablePandasPrompt(Prompt):
             column_details,
             sample_data,
         )
-        return self._update(table=query_dataset_description, alias=alias)
+        light_dataset_description = light_query_dataset_prompt.update(
+            alias,
+            columns,
+            sample_data,matches
+        )
+        secondary_query_dataset_prompt = DatasetDescription()
+        secondary_query_dataset_description = secondary_query_dataset_prompt.update(
+            alias,
+            num_rows,
+            num_columns,
+            dataset_metadata,
+            column_details,
+            sample_data,
+        )
+
+
+
+        self._datasets_descriptions += f"\n{query_dataset_description}"
+        self._secondary_datasets_descriptions += f"\n{secondary_query_dataset_description}"
+        self._light_datasets_descriptions += f"\n{light_dataset_description}"
+        #self.light_query_dataset_descriptions=
+        return self._update(table=self._datasets_descriptions, matches=matches, languages=languages, aliases=aliases)
 
 
 class SingleTableSQLPrompt(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("single_table_sql_statement_generation.md")
 
+    def __init__(self):
+        super().__init__()
+        self._datasets_descriptions = ""
+        self._light_datasets_descriptions = ""
+        self._secondary_datasets_descriptions = ""
+
+    def reset(self):
+        """Reset accumulated dataset descriptions. Must be called before each new generate_statements run."""
+        self._datasets_descriptions = ""
+        self._secondary_datasets_descriptions = ""
+        self._light_datasets_descriptions = ""
+
+    @property
+    def datasets_descriptions(self) -> str:
+        """Expose accumulated table schemas for use by StatementValidator."""
+        return self._datasets_descriptions
+    @property
+    def light_datasets_descriptions(self) -> str:
+        """Expose accumulated table schemas for use by StatementValidator."""
+        return self._light_datasets_descriptions
+    @property
+    def secondary_datasets_descriptions(self) -> str:
+        """Expose accumulated table schemas for use by StatementValidator."""
+        return self._secondary_datasets_descriptions
     def update(
         self,
         dataset_name: str,
@@ -291,9 +451,11 @@ class SingleTableSQLPrompt(Prompt):
         dataset_metadata: dict,
         column_details: dict,
         sample_data,
-        alias: str,
+        aliases,
+        matches,languages,columns,alias
     ) -> str:
         query_dataset_prompt = DatasetDescription()
+        light_query_dataset_prompt = LightDatasetDescription()
         query_dataset_description = query_dataset_prompt.update(
             dataset_name,
             num_rows,
@@ -302,4 +464,79 @@ class SingleTableSQLPrompt(Prompt):
             column_details,
             sample_data,
         )
-        return self._update(table=query_dataset_description, alias=alias)
+        light_dataset_description = light_query_dataset_prompt.update(
+            alias,
+            columns,
+            sample_data,matches
+        )
+        secondary_query_dataset_prompt = DatasetDescription()
+        secondary_query_dataset_description = secondary_query_dataset_prompt.update(
+            alias,
+            num_rows,
+            num_columns,
+            dataset_metadata,
+            column_details,
+            sample_data,
+        )
+
+
+
+        self._datasets_descriptions += f"\n{query_dataset_description}"
+        self._secondary_datasets_descriptions += f"\n{secondary_query_dataset_description}"
+        self._light_datasets_descriptions += f"\n{light_dataset_description}"
+        #self.light_query_dataset_descriptions=
+        return self._update(table=self._datasets_descriptions, matches=matches, languages=languages, aliases=aliases)
+
+
+# ---------------------------------------------------------------------------
+# Validator correction prompts
+# ---------------------------------------------------------------------------
+
+class PandasValidatorCorrectionPrompt(Prompt):
+    """
+    Prompt fed to the LLM when StatementValidator needs to correct Pandas queries
+    that failed static validation and/or were rejected by the judge.
+
+    Template variables:
+        {table_schemas}       — pre-formatted DatasetDescription text for all tables
+        {aliases}             — JSON string of alias → file mappings
+        {queries_with_errors} — formatted block listing each failing query + its errors
+    """
+    _prompt_path = PROMPT_PATH.joinpath("pandas_validator_correction.md")
+
+    def update(
+        self,
+        table_schemas: str,
+        aliases: str,
+        queries_with_errors: str,
+    ) -> str:
+        return self._update(
+            table_schemas=table_schemas,
+            #aliases=aliases,
+            queries_with_errors=queries_with_errors,
+        )
+
+
+class SQLValidatorCorrectionPrompt(Prompt):
+    """
+    Prompt fed to the LLM when StatementValidator needs to correct DuckDB SQL queries
+    that failed static validation and/or were rejected by the judge.
+
+    Template variables:
+        {table_schemas}       — pre-formatted DatasetDescription text for all tables
+        {aliases}             — JSON string of alias → file mappings
+        {queries_with_errors} — formatted block listing each failing query + its errors
+    """
+    _prompt_path = PROMPT_PATH.joinpath("sql_validator_correction.md")
+
+    def update(
+        self,
+        table_schemas: str,
+        aliases: str,
+        queries_with_errors: str,
+    ) -> str:
+        return self._update(
+            table_schemas=table_schemas,
+            #aliases=aliases,
+            queries_with_errors=queries_with_errors,
+        )

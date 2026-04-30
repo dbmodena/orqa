@@ -84,3 +84,4 @@ tasks:
     max_response_tokens: 300
     max_memory_usage: 512
     max_pool_time: 60
+    languages: ["Italian"]

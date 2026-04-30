@@ -2,15 +2,20 @@
 Generate 3 DuckDB SQL queries (easy → medium → hard) with business-focused natural language questions designed to benchmark a text-to-query engine. Questions must be written as if by a non-technical user with no knowledge of the schema, table names, or column names.
 
 ### Inputs
+- **Detected languages** - The following datasets can have the following langauges `{languages}`
 - **Aliases** — use only these in queries: `{aliases}`
 - **Tables** — schema, columns, types, metadata: `{table}`
 - **Mandatory operations** — every query must combine tables using: `{matches}`
 
 ### Question rules
-✓ Use business terms (customers, revenue, churn)
-✓ Be outcome-focused and self-contained
-✓ Use concrete, domain-specific terms that anchor the question to this dataset — a question that could apply unchanged to a hospital or financial database is invalid
-✗ Never mention table/column names or SQL operations
+Each question must read as if asked by a domain expert who understands the business but has no knowledge of the underlying data, schema, tables, or column names.
+
+✓ **Anchor to a topic** — every question must be driven by a single, coherent business concern (e.g. promotion equity, customer churn, inventory turnover). Listing unrelated metrics side by side is not a topic.
+✓ **Anchor to a domain** — the setting must be unambiguous from the question alone (e.g. corporate HR, e-commerce, hospital staffing). A reader must know *where* the data comes from without any schema knowledge.
+✓ **Reflect the query faithfully** — every metric, filter, and grouping in the query must correspond to something explicitly asked in the question, and vice versa.
+✓ **Be outcome-focused** — frame questions around a decision or insight a business user would act on, not around enumerating what data is available.
+✗ Never mention table names, column names, DataFrame names, or any query/SQL operations.
+✗ Never produce a question that could apply unchanged to a different industry or dataset.
 
 ### Query rules
 - Operation type is NON-NEGOTIABLE — match the specified type exactly.

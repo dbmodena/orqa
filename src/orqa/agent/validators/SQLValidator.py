@@ -338,31 +338,23 @@ class SQLValidator(QueryValidator):
     def _build_empty_result_feedback(self) -> str:
         if len(self.table_names) == 1:
             return "\n".join([
-                "The query returned 0 rows.",
-                "This usually means a WHERE condition is too restrictive or matches nothing in the data.",
+                "Query returned 0 rows — filters may be too restrictive.",
                 "Suggestions:",
-                "  1. Relax or widen the filter condition — verify the actual values in the column before filtering.",
-                "  2. String filters: normalise casing on both sides using LOWER():",
-                "       WHERE LOWER(column_name) = 'expected value'",
-                "  3. Numeric columns stored as text: cast before comparing:",
-                "       WHERE TRY_CAST(column_name AS DOUBLE) > threshold",
-                "  4. Date/range filters: verify the range or value actually exists in the data.",
-                "Rewrite the query applying LOWER() or TRY_CAST() where relevant.",
+                "  1. Relax filters; verify actual column values.",
+                "  2. Normalize strings with LOWER(): WHERE LOWER(col) = 'value'",
+                "  3. Cast text numbers: WHERE TRY_CAST(col AS DOUBLE) > x",
+                "  4. Check date/range values exist.",
+                "Rewrite using LOWER() or TRY_CAST() where needed.",
             ])
         return "\n".join([
-            "The query returned 0 rows.",
-            "This usually means a JOIN or WHERE condition matched nothing due to case or type mismatches.",
+            "Query returned 0 rows — JOIN/filters may not match.",
             "Suggestions:",
-            "  1. String join keys: normalize casing on both sides using LOWER():",
-            "       JOIN table2 ON LOWER(table1.key) = LOWER(table2.key)",
-            "  2. Relax join conditions: try a LEFT JOIN instead of the default INNER JOIN",
-            "     to identify which side has no matches before tightening the condition.",
-            "  3. String filters: wrap the column and the literal in LOWER():",
-            "       WHERE LOWER(column_name) = 'expected value'",
-            "  4. Numeric columns stored as text: cast before comparing or aggregating:",
-            "       TRY_CAST(column_name AS DOUBLE)",
-            "  5. Date/range filters: verify that the range or category value actually exists in the data.",
-            "Rewrite the query applying LOWER() or TRY_CAST() where relevant.",
+            "  1. Normalize join keys: LOWER(t1.key) = LOWER(t2.key)",
+            "  2. Use LEFT JOIN to debug missing matches.",
+            "  3. Normalize filters: WHERE LOWER(col) = 'value'",
+            "  4. Cast text numbers: TRY_CAST(col AS DOUBLE)",
+            "  5. Check date/range values exist.",
+            "Rewrite using LOWER() or TRY_CAST() where needed.",
         ])
 
     def _get_language_name(self) -> str:

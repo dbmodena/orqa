@@ -278,7 +278,7 @@ def prepare_dataset(
     sample_size: int = 5,
     bad_tokens: list = []
 ) -> tuple[dict, dict]:
-
+    #involved_cols = [c for c in involved_cols if isinstance(c, str)]
     df = pd_read_dataset(dataset_path, opts={"csv": {"na_values": bad_tokens, "low_memory": False}, "parquet": {"na_values": bad_tokens, "low_memory": False}})
     df = df.dropna()
 

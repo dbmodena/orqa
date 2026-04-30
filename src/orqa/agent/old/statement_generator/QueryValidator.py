@@ -85,6 +85,7 @@ class QueryValidator(ABC):
         """Build feedback message for unused tables."""
         feedback_lines = [
             "Not all tables are being used in the query.",
+            "Adapt the query and/or the question in order to include all of them.",
             f"Missing tables: {', '.join(sorted(self.unused_tables))}\n",
             f"Available tables: {', '.join(self.table_names)}\n"
         ]

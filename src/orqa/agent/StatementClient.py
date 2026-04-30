@@ -29,25 +29,29 @@ import pandas as pd
 from pathlib import Path
 import duckdb
 from .LLMClientStructured import LLMClientStructured
-from .validators.SQLValidator import SQLValidator
-from .validators.PandasValidator import PandasValidator
 import re
-
-
-
 
 
 class LLMClientStatementGenerator(LLMClientStructured):
     """
     LiteLLM client with YAML configuration and structured output support.
+
+    Responsibility: generate the *initial* set of queries from a prompt.
+    Static validation and correction are now handled by LLMStatementValidator
+    (see StatementValidator.py).  This class only retries on JSON / Pydantic
+    parse errors — it does NOT run PandasValidator / SQLValidator internally.
     """
 
     def __init__(self, config_path: Path):
         super().__init__(config_path, "querying")
         self.fallback_response_model = self._load_pydantic_response_model("fallback_querying")
 
+    # ------------------------------------------------------------------
+    # JSON repair utilities
+    # ------------------------------------------------------------------
+
     def _repair_json(self, content: str) -> dict:
-        
+
         if not isinstance(content, str):
             raise json.JSONDecodeError("content is not a string", str(content), 0)
 
@@ -92,13 +96,11 @@ class LLMClientStatementGenerator(LLMClientStructured):
         fixed = re.sub(r',\s*(?=[}\]])', '', content)
 
         # 2. Close any unterminated string at the very end of the document.
-        #    Heuristic: odd number of unescaped double-quotes → append one.
         unescaped_quotes = re.findall(r'(?<!\\)"', fixed)
         if len(unescaped_quotes) % 2 != 0:
             fixed = fixed.rstrip() + '"'
 
         # 3. Count open braces/brackets and close any that were never closed
-        #    (handles truncated LLM output).
         closer_map = {'{': '}', '[': ']'}
         stack: list[str] = []
         in_str = False
@@ -155,9 +157,6 @@ class LLMClientStatementGenerator(LLMClientStructured):
         """
         Scan JSON text and escape any literal control characters that appear
         inside string values (i.e. between unescaped double-quotes).
-        This fixes the common LLM output pattern of:
-            {"code": "df.merge(...)\n.head(5)"}
-        where \n is a real newline, not the two-character escape sequence.
         """
         result = []
         in_string = False
@@ -166,7 +165,6 @@ class LLMClientStatementGenerator(LLMClientStructured):
             ch = content[i]
             if in_string:
                 if ch == '\\':
-                    # Consume the escape sequence as-is (already valid JSON)
                     result.append(ch)
                     i += 1
                     if i < len(content):
@@ -198,41 +196,112 @@ class LLMClientStatementGenerator(LLMClientStructured):
         return self._repair_json(content)
 
     # ------------------------------------------------------------------
+    # Table-alias validation
+    # ------------------------------------------------------------------
+
+    def _find_missing_tables(self, query_code: str, all_aliases: list[str]) -> list[str]:
+        """
+        Return the aliases from *all_aliases* that are NOT referenced in
+        *query_code*.  Matching is word-boundary aware so e.g. "Table_0"
+        inside "Table_00" is not counted as a hit.
+        """
+        return [
+            alias for alias in all_aliases
+            if not re.search(r'(?<!\w)' + re.escape(alias) + r'(?!\w)', query_code)
+        ]
+
+    def _partition_queries(
+        self, queries: list[dict], all_aliases: list[str]
+    ) -> tuple[list[dict], list[dict]]:
+        """
+        Split *queries* into (good, bad) based on whether every alias in
+        *all_aliases* appears in each query's ``code`` field.
+
+        Returns:
+            good: queries that reference all aliases.
+            bad:  queries that are missing one or more aliases.
+        """
+        good, bad = [], []
+        for q in queries:
+            missing = self._find_missing_tables(q.get("code", ""), all_aliases)
+            if missing:
+                bad.append({**q, "_missing_tables": missing})
+            else:
+                good.append(q)
+        return good, bad
+
+    def _build_unused_tables_feedback(
+        self, bad_queries: list[dict], all_aliases: list[str]
+    ) -> str:
+        """Build a feedback message listing each offending query and its missing tables."""
+        lines = [
+            "Some generated queries do not reference all required tables.",
+            "Rewrite ONLY the queries listed below so that every table alias is used.",
+            f"Required aliases: {', '.join(all_aliases)}\n",
+        ]
+        for i, q in enumerate(bad_queries, 1):
+            missing = q.get("_missing_tables", [])
+            # Show a short excerpt of the code so the LLM can identify the query
+            code_preview = q.get("code", "")[:120].replace("\n", " ")
+            lines.append(
+                f"  Query {i} — missing {', '.join(sorted(missing))}:\n"
+                f"    code preview: {code_preview!r}"
+            )
+        lines.append(
+            "\nReturn ONLY the corrected queries (same JSON schema as before)."
+        )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
 
     def complete(
         self,
         prompt: str,
-        dataframes, table_names, typology="SQL", involved_cols=None, feedback:list = None
+        dataframes,
+        table_names,
+        typology: str = "SQL",
+        involved_cols=None,
     ) -> Any:
+        """
+        Generate the initial set of queries from *prompt*, then validate that
+        every query references all table aliases.  Queries that pass are kept;
+        only the failing ones are sent back for correction (up to
+        ``MAX_TABLE_ALIAS_RETRIES`` extra rounds).  After all retries, any
+        still-failing queries are silently dropped and only the good ones are
+        returned.
+        """
+        MAX_TABLE_ALIAS_RETRIES = 3
+
         usage_total = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
         }
-        initial_message = self.reform_prompt_constraint(prompt)
-        count = 0
-        # FIX 2: do NOT bake `messages` into completion_args up-front.
-        # Instead, update completion_args["messages"] right before every
-        # router.completion call so that retry feedback is actually sent.
+        all_errors: list[str] = []
+        all_aliases: list[str] = list(table_names.keys())  # e.g. ["Table_0", "Table_1"]
+
+        # Optionally enrich the prompt with suffix-constraint context
+        enriched_prompt = prompt
+        if involved_cols is not None and typology == "PANDAS":
+            enriched_prompt = self.add_suffix_constraint(
+                prompt, dataframes, list(table_names.keys()), involved_cols
+            )
+
+        initial_message = self.reform_prompt_constraint(enriched_prompt)
+
         messages = [
             {"role": "system", "content": "You are an expert Data Engineer"},
             {"role": "user", "content": initial_message},
         ]
-        if feedback is not None:
-            messages.extend(feedback)
         last_content = ""
-        last_error = None
-        good_queries: dict[str, dict] = {}
-        all_errors = []
 
+        # ── Phase 1: initial generation with JSON/Pydantic retry loop ──────────
         for attempt in range(self.max_retries):
             try:
-                # FIX 2: always build completion_args from the current messages list.
                 completion_args = {
                     "model": self.config["model"],
                     "messages": messages,
                     "temperature": self.temperature,
-                    #"max_tokens": 16000,
                 }
 
                 response = self.router.completion(**completion_args)
@@ -240,132 +309,160 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
                 usage_total["completion_tokens"] += usage.get("completion_tokens", 0)
                 usage_total["total_tokens"] += usage.get("total_tokens", 0)
+
                 content = response["choices"][0]["message"]["content"]
-                # Guard: some models return None for content (e.g. tool-call-only responses)
                 if content is None:
                     raise ValueError(
-                        "LLM returned None content – the model may have emitted a "
+                        "LLM returned None content — the model may have emitted a "
                         "tool-call response instead of a text completion."
                     )
                 last_content = content
-                ##print(last_content)
+
                 cleaned_content = self._clean_json_response(content)
-                try:
-                    # FIX 1 & 3: use the robust repair pipeline
-                    json_data = self._repair_json(cleaned_content)
-                    json_data = self._normalize_response(json_data)
-                    result = self.response_model.model_validate(json_data)
-                    result = result.model_dump()
-                    outcome, errors, accepted_queries, error_messages = self.validate_queries(
-                        dataframes, result, table_names, typology
-                    )
-                    for key, accepted_query in accepted_queries.items():
-                        #accepted_query["keywords"] = self.count_keywords(accepted_query["code"], typology)
-                        accepted_query["id"] = f"{count}"
-                        good_queries[f"{count}"] = accepted_query
-                        count = count + 1
+                json_data = self._repair_json(cleaned_content)
+                json_data = self._normalize_response(json_data)
+                result = self.response_model.model_validate(json_data)
+                result_dict = result.model_dump()
+                result_dict = self.clean_query_set(result_dict, table_names)
 
-                    if not outcome:
-                        # FIX 2: reassign messages and it will be picked up next iteration
-                        messages = [
-                            {"role": "system", "content": "You are an expert Data Engineer."},
-                            {"role": "user", "content": prompt},
-                        ]
-                        messages.extend(errors)
-                        all_errors.extend(error_messages)
-                        pydantic = self.reform_prompt_constraint("")
-                        messages.append({"role": "user", "content": pydantic})
-                        continue
+                # Successfully parsed — break out and move to alias validation
+                break
 
-                    return (
-                        {"queries": list(good_queries.values())},
-                        usage_total,
-                        [e if isinstance(e, str) else str(e) for e in all_errors],
-                        self.config["model"],
-                    )
-
-                except json.JSONDecodeError as e:
-                    last_error = e
-                    all_errors.append(f"Error JSONDecodeError: {e}")
-                    error_msg = self._format_json_error(cleaned_content, e)
-                    if attempt < self.max_retries - 1:
-                        # FIX 2: rebuild messages so the next iteration sends them
-                        messages = [
-                            {"role": "system", "content": "You are an expert Data Engineer, below are listed the instructions for generating and correcting queries."},
-                            {"role": "user", "content": initial_message},
-                            {"role": "system", "content": last_content},
-                        ]
-                        pydantic = self.reform_prompt_constraint("")
-                        messages.append({
-                            "role": "user",
-                            "content": f"You generated a bad formatted output, that gave the following error message:\n{error_msg}\n{pydantic}",
-                        })
-                        time.sleep(self.retry_delay)
-                        #print(last_error)
-                        continue
-
-                except ValidationError as e:
-                    last_error = e
-                    all_errors.append(f"Error ValidationError: {e}")
-                    error_msg = self._format_validation_error(e)
-                    if attempt < self.max_retries - 1:
-                        # FIX 2: rebuild messages
-                        messages = [
-                            {"role": "system", "content": "You are an expert Data Engineer."},
-                            {"role": "user", "content": prompt},
-                            {"role": "system", "content": last_content},
-                        ]
-                        pydantic = self.reform_prompt_constraint("")
-                        messages.append({
-                            "role": "user",
-                            "content": f"Generated queries are not valid, the error message generated:\n{error_msg}\n{pydantic}",
-                        })
-                        #print(last_error)
-                        time.sleep(self.retry_delay)
-                        continue
-
-            except Exception as e:
-                last_error = e
+            except json.JSONDecodeError as e:
+                all_errors.append(f"JSONDecodeError on attempt {attempt + 1}: {e}")
+                error_msg = self._format_json_error(last_content, e)
                 if attempt < self.max_retries - 1:
-                    # FIX 2: rebuild messages
+                    pydantic = self.reform_prompt_constraint("")
                     messages = [
                         {"role": "system", "content": "You are an expert Data Engineer"},
-                        {"role": "user", "content": prompt},
-                        {"role": "system", "content": last_content},
+                        {"role": "user", "content": initial_message},
+                        {"role": "assistant", "content": last_content},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Your output could not be parsed as JSON:\n{error_msg}\n{pydantic}"
+                            ),
+                        },
                     ]
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            f"Generated queries that are not valid, error message generated\n{e}\n"
-                            f"Make a unique JSON compliant to the Pydantic format:\n"
-                            f"{json.dumps(self.response_model.model_json_schema(), indent=2)}"
-                        ),
-                    })
-                    #print(last_error)
                     time.sleep(self.retry_delay)
 
-        return (
-            {"queries": list(good_queries.values())},
-            usage_total,
-            [e if isinstance(e, str) else str(e) for e in all_errors],
-            self.config["model"],
+            except ValidationError as e:
+                all_errors.append(f"ValidationError on attempt {attempt + 1}: {e}")
+                error_msg = self._format_validation_error(e)
+                if attempt < self.max_retries - 1:
+                    pydantic = self.reform_prompt_constraint("")
+                    messages = [
+                        {"role": "system", "content": "You are an expert Data Engineer"},
+                        {"role": "user", "content": enriched_prompt},
+                        {"role": "assistant", "content": last_content},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Your output failed schema validation:\n{error_msg}\n{pydantic}"
+                            ),
+                        },
+                    ]
+                    time.sleep(self.retry_delay)
+
+            except Exception as e:
+                all_errors.append(f"Unexpected error on attempt {attempt + 1}: {e}")
+                if attempt < self.max_retries - 1:
+                    messages = [
+                        {"role": "system", "content": "You are an expert Data Engineer"},
+                        {"role": "user", "content": enriched_prompt},
+                        {"role": "assistant", "content": last_content},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"An error occurred: {e}\n"
+                                f"Return a JSON object matching:\n"
+                                f"{json.dumps(self.response_model.model_json_schema(), indent=2)}"
+                            ),
+                        },
+                    ]
+                    time.sleep(self.retry_delay)
+        else:
+            # All JSON/Pydantic retries exhausted
+            return (
+                {"queries": []},
+                usage_total,
+                all_errors,
+                self.config["model"],
+            )
+
+        # ── Phase 2: table-alias validation with targeted retry loop ───────────
+        good_queries, bad_queries = self._partition_queries(
+            result_dict.get("queries", []), all_aliases
         )
 
+        for alias_attempt in range(MAX_TABLE_ALIAS_RETRIES):
+            if not bad_queries:
+                break  # Nothing left to fix
 
+            feedback = self._build_unused_tables_feedback(bad_queries, all_aliases)
+            # Strip the internal _missing_tables key before sending to LLM
+            bad_queries_clean = [
+                {k: v for k, v in q.items() if k != "_missing_tables"}
+                for q in bad_queries
+            ]
+            all_errors.append(
+                f"Table-alias check (attempt {alias_attempt + 1}): "
+                f"{len(bad_queries)} query/queries missing aliases."
+            )
 
-    def validate_queries(self, dataframes, result, table_names, type):
-        if type == "SQL":
-            return self.validate_sql_queries(dataframes, result, table_names)
-        else:
-            return self.validate_dataframe_queries(dataframes, result, table_names)
+            retry_messages = [
+                {"role": "system", "content": "You are an expert Data Engineer"},
+                {"role": "user", "content": initial_message},
+                {"role": "assistant", "content": json.dumps({"queries": bad_queries_clean})},
+                {"role": "user", "content": feedback},
+            ]
 
-    def validate_dataframe_queries(self, dataframes, result, table_names):
-        validator = PandasValidator(dataframes, list(table_names.keys()), table_names)
-        return validator.validate_queries(result)
+            try:
+                response = self.router.completion(
+                    model=self.config["model"],
+                    messages=retry_messages,
+                    temperature=self.temperature,
+                )
+                usage = response["usage"]
+                usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
+                usage_total["completion_tokens"] += usage.get("completion_tokens", 0)
+                usage_total["total_tokens"] += usage.get("total_tokens", 0)
 
-    def validate_sql_queries(self, dataframes, result, table_names):
-        validator = SQLValidator(dataframes, list(table_names.keys()), table_names)
-        return validator.validate_queries(result)
+                content = response["choices"][0]["message"]["content"]
+                if content is None:
+                    raise ValueError("LLM returned None content during alias-retry.")
+
+                cleaned = self._clean_json_response(content)
+                json_data = self._repair_json(cleaned)
+                json_data = self._normalize_response(json_data)
+                retried = self.response_model.model_validate(json_data)
+                retried_dict = self.clean_query_set(retried.model_dump(), table_names)
+
+                # Re-partition: some may now be fixed, others still broken
+                newly_good, bad_queries = self._partition_queries(
+                    retried_dict.get("queries", []), all_aliases
+                )
+                good_queries.extend(newly_good)
+
+            except (json.JSONDecodeError, ValidationError, Exception) as e:
+                all_errors.append(
+                    f"Table-alias retry {alias_attempt + 1} failed with {type(e).__name__}: {e}"
+                )
+                time.sleep(self.retry_delay)
+
+        # After all alias retries, silently drop any still-failing queries
+        if bad_queries:
+            all_errors.append(
+                f"Dropping {len(bad_queries)} query/queries that still fail alias check "
+                f"after {MAX_TABLE_ALIAS_RETRIES} retries."
+            )
+
+        return (
+            {"queries": good_queries},
+            usage_total,
+            all_errors,
+            self.config["model"],
+        )
 
     def _normalize_response(self, json_data):
         if isinstance(json_data, list):
@@ -397,3 +494,27 @@ class LLMClientStatementGenerator(LLMClientStructured):
             + "All other columns keep their original name — do not add any suffix to them.\n"
         )
         return f"{prompt}\n{constraint}"
+
+    @staticmethod
+    def clean_table_names(query_code: str, aliases: dict) -> str:
+        inverted = {v: k for k, v in aliases.items()}
+
+        result = query_code
+        for table_name, alias in inverted.items():
+            underscore_variant = table_name.replace("-", "_")
+
+            for name_to_replace in {table_name, underscore_variant}:
+                result = re.sub(
+                    r'(?<![.\w])' + re.escape(name_to_replace) + r'(?!\w)',
+                    alias,
+                    result,
+                )
+        return result
+
+    @staticmethod
+    def clean_query_set(query_set: dict, aliases: dict) -> dict:
+        cleaned = {**query_set, "queries": []}
+        for query in query_set.get("queries", []):
+            q = {**query, "code": LLMClientStatementGenerator.clean_table_names(query["code"], aliases)}
+            cleaned["queries"].append(q)
+        return cleaned
