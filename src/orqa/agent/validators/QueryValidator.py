@@ -4,7 +4,6 @@ import difflib
 import json
 import logging
 import re
-import sys
 import multiprocessing as mp
 import pandas as pd
 
@@ -60,184 +59,19 @@ TERM_SUGGESTIONS = {
 logger = logging.getLogger(__name__)
 
 
-def _set_memory_limit_unix(mem_limit_bytes: int) -> None:
-    """Set the process virtual-memory address-space limit on Unix via resource.setrlimit.
-
-    The limit is set as current usage + the configured budget so that only
-    *new* allocations made by the query are constrained (the Python runtime
-    and loaded DataFrames are already in memory).
-
-    Logs a warning and continues without the limit if the call fails for any
-    reason (e.g. unsupported platform, permission error, or the resource module
-    is unavailable on Windows).
-    """
-    try:
-        import resource
-        # Current virtual-memory size (soft limit baseline)
-        try:
-            import os
-            current_usage = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
-            # Better: use actual process RSS via /proc if available
-            try:
-                with open(f'/proc/{os.getpid()}/statm', 'r') as f:
-                    pages = int(f.read().split()[1])  # resident pages
-                    current_usage = pages * os.sysconf('SC_PAGE_SIZE')
-            except (FileNotFoundError, OSError):
-                pass
-        except (ValueError, OSError):
-            current_usage = 256 * 1024 * 1024  # conservative fallback
-
-        effective_limit = current_usage + mem_limit_bytes
-        resource.setrlimit(resource.RLIMIT_AS, (effective_limit, effective_limit))
-    except ImportError:
-        logger.warning(
-            "resource module not available on this platform; "
-            "skipping memory limit enforcement"
-        )
-    except Exception as exc:
-        logger.warning(
-            "Failed to set memory limit via resource.setrlimit: %s. "
-            "Continuing without OS-level memory limit.",
-            exc,
-        )
-
-
-def _set_memory_limit_windows(mem_limit_bytes: int) -> None:
-    """Set process memory limit on Windows using the Job Object API via ctypes.
-
-    Creates a Job Object, configures it with a ProcessMemoryLimit, and assigns
-    the current process to the job.  Logs a warning and continues without the
-    limit if any step fails (e.g. missing API, permission error, or non-Windows
-    platform).
-    """
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        # --- ctypes structure definitions (Windows-only) ---
-        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_int64),
-                ("PerJobUserTimeLimit", ctypes.c_int64),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
-                ("PriorityClass", wintypes.DWORD),
-                ("SchedulingClass", wintypes.DWORD),
-            ]
-
-        class IO_COUNTERS(ctypes.Structure):
-            _fields_ = [
-                ("ReadOperationCount", ctypes.c_uint64),
-                ("WriteOperationCount", ctypes.c_uint64),
-                ("OtherOperationCount", ctypes.c_uint64),
-                ("ReadTransferCount", ctypes.c_uint64),
-                ("WriteTransferCount", ctypes.c_uint64),
-                ("OtherTransferCount", ctypes.c_uint64),
-            ]
-
-        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                ("IoInfo", IO_COUNTERS),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
-        # Constants
-        JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
-        JobObjectExtendedLimitInformation = 9
-
-        kernel32 = ctypes.windll.kernel32
-
-        # 1. Create a Job Object
-        job = kernel32.CreateJobObjectW(None, None)
-        if not job:
-            logger.warning(
-                "CreateJobObjectW returned NULL; "
-                "skipping Windows memory limit enforcement"
-            )
-            return
-
-        # 2. Configure the extended limit information
-        # On Windows the limit is absolute (not incremental).  The child process
-        # already consumes memory for the Python runtime, loaded libraries, and
-        # deserialized DataFrames.  We add the configured budget ON TOP of the
-        # current committed memory so the limit only constrains *new* allocations
-        # made by the query itself.
-        import os
-        try:
-            import psutil
-            current_usage = psutil.Process(os.getpid()).memory_info().rss
-        except Exception:
-            # psutil may not be available; fall back to a conservative 256MB estimate
-            current_usage = 256 * 1024 * 1024
-
-        effective_limit = current_usage + mem_limit_bytes
-
-        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY
-        info.ProcessMemoryLimit = effective_limit
-
-        # 3. Apply the limit to the Job Object
-        success = kernel32.SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            ctypes.byref(info),
-            ctypes.sizeof(info),
-        )
-        if not success:
-            logger.warning(
-                "SetInformationJobObject failed; "
-                "skipping Windows memory limit enforcement"
-            )
-            return
-
-        # 4. Assign the current process to the Job Object
-        process_handle = kernel32.GetCurrentProcess()
-        success = kernel32.AssignProcessToJobObject(job, process_handle)
-        if not success:
-            logger.warning(
-                "AssignProcessToJobObject failed; "
-                "skipping Windows memory limit enforcement"
-            )
-            return
-
-    except Exception as exc:
-        logger.warning(
-            "Failed to set memory limit via Windows Job Object API: %s. "
-            "Continuing without OS-level memory limit.",
-            exc,
-        )
-
-
-def _sandbox_worker(queue: mp.Queue, fn, args: tuple, mem_limit_bytes: int = 0) -> None:
+def _sandbox_worker(queue: mp.Queue, fn, args: tuple) -> None:
     """Execute *fn* inside the sandbox process.
 
-    If *mem_limit_bytes* > 0, the process memory is capped via the appropriate
-    platform mechanism: resource.setrlimit on Unix, or the Windows Job Object
-    API on Windows.  If the platform API is unavailable, a warning is logged
-    and execution continues (the parent-side _check_input_memory pre-check
-    still applies).
+    The parent process enforces a timeout via p.join(timeout=...).
+    No OS-level memory limit is applied.
     """
-    # Enforce memory limit in child process
-    if mem_limit_bytes > 0:
-        if sys.platform == "win32":
-            _set_memory_limit_windows(mem_limit_bytes)
-        else:
-            _set_memory_limit_unix(mem_limit_bytes)
-
     try:
         queue.put(("ok", fn(*args)))
     except MemoryError as e:
         queue.put((
             "error",
             "MemoryError",
-            f"Query exceeded memory limit ({mem_limit_bytes // (1024 * 1024)}MB). "
+            f"Query ran out of memory. "
             "Likely cause: large intermediate result or cartesian product.\n"
             "Fix: pre-filter rows, select only needed columns, or add stricter join conditions."
         ))
@@ -262,7 +96,6 @@ class QueryValidator(ABC):
         self.table_names  = table_names
         self.lookup_dict  = lookup_dict
         self.mem_limit_mb = mem_limit_mb
-        self.mem_limit    = mem_limit_mb * 1024 * 1024
         self.timeout      = timeout
 
         self.validation_errors: list = []
@@ -356,7 +189,7 @@ class QueryValidator(ABC):
         queue = mp.Queue()
         p = mp.Process(
             target=_sandbox_worker,
-            args=(queue, fn, args, self.mem_limit),
+            args=(queue, fn, args),
             daemon=True,
         )
         p.start()
@@ -397,30 +230,10 @@ class QueryValidator(ABC):
         return rest[0]
 
     # ------------------------------------------------------------------
-    # Memory pre-check
-    # ------------------------------------------------------------------
-    def _check_input_memory(self) -> None:
-        total_mb = sum(
-            df.memory_usage(deep=True).sum()
-            for df in self.dataframes
-            if isinstance(df, pd.DataFrame)
-        ) / (1024 ** 2)
-        if total_mb > self.mem_limit_mb:
-            raise MemoryError(
-                f"Input data is {total_mb:.1f}MB, exceeds {self.mem_limit_mb}MB limit.\n"
-                "Pre-filter your data before running this query."
-            )
-
-    # ------------------------------------------------------------------
     # Main validation loop
     # ------------------------------------------------------------------
     def validate_queries(self, result: Dict) -> Tuple[bool, Dict, Dict]:
         all_valid = True
-
-        try:
-            self._check_input_memory()
-        except MemoryError as e:
-            return False, [{"role": "user", "content": f"MemoryError: {e}"}], {}, [str(e)]
 
         # Sanitize table names early so downstream methods receive valid identifiers
         sanitized_names, rewrite_map = self._sanitize_table_names(self.table_names)
