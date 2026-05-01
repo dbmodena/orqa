@@ -424,15 +424,27 @@ class PandasValidator(QueryValidator):
         raw = str(e).strip('"').strip("'")
 
         if isinstance(e, KeyError):
+            # Try to extract the column name and provide suggestions
+            col_name = raw.strip("'").strip('"')
+            available_cols = []
+            for df in self.dataframes:
+                if isinstance(df, pd.DataFrame):
+                    available_cols.extend(str(c) for c in df.columns)
+            available_cols = list(set(available_cols))
+            suggestions = self._suggest_columns(col_name, available_cols)
+            suggestion_msg = ""
+            if suggestions:
+                suggestion_msg = f"\nClosest columns: {', '.join(suggestions[:5])}"
+
             if "not in index" in raw.lower() or "not in index" in msg:
                 return KeyError(
-                    f"{raw}\nColumn not found — may be missing or suffixed after merge.\n"
+                    f"{raw}\nColumn not found — may be missing or suffixed after merge.{suggestion_msg}\n"
                     "Never use Table_X['col'] as left_on/right_on after a prior merge.\n"
                     "  ✓ Table_A.assign(_key=Table_A['col'].str.lower()).merge(..., on='_key')\n"
                     "  ✗ .merge(Table_B, left_on=Table_A['col'].str.lower())"
                 )
             return KeyError(
-                f"{raw}\nColumn not found — check spelling/case, or use suffixed name after merge (_x/_y)."
+                f"{raw}\nColumn not found — check spelling/case, or use suffixed name after merge (_x/_y).{suggestion_msg}"
             )
 
         if isinstance(e, IndexError):
@@ -530,7 +542,7 @@ class PandasValidator(QueryValidator):
             ]):
                 return ValueError(self._build_empty_result_feedback())
 
-            return e
+            return ValueError(f"{raw}\nValue error — check input data types and operation parameters.")
 
         if isinstance(e, TypeError):
             if "unsupported operand" in msg:
@@ -553,7 +565,9 @@ class PandasValidator(QueryValidator):
                 f"Syntax error: {raw}\nSeparate multiple statements with semicolons (;) or newlines."
             )
 
-        return e
+        # Fallback: wrap unknown exception types with type name and ≤200 chars
+        wrapped_msg = self._wrap_unknown_exception(e)
+        return type(e)(f"{wrapped_msg}\nUnexpected error — review the operation and input data.")
 
     # ------------------------------------------------------------------
     # Feedback

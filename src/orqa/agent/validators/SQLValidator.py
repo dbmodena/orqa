@@ -288,6 +288,87 @@ class SQLValidator(QueryValidator):
         )
 
     # ------------------------------------------------------------------
+    # Type mismatch detection
+    # ------------------------------------------------------------------
+    def _detect_type_mismatch(self, error_msg: str) -> str | None:
+        """Detect type mismatch in comparison operations from DuckDB error messages.
+
+        Returns a formatted error message with CAST suggestion if a type mismatch
+        is detected, otherwise returns None.
+        """
+        msg_lower = error_msg.lower()
+
+        # Common DuckDB type mismatch patterns
+        type_mismatch_patterns = [
+            # "No function matches ... VARCHAR = INTEGER" or similar
+            (r"no function matches.*?(\w+)\s*=\s*(\w+)", None),
+            # "Cannot compare values of type X and type Y"
+            (r"cannot compare.*?type\s+(\w+).*?type\s+(\w+)", None),
+            # "Conversion Error: Could not convert string ... to INT"
+            (r"could not convert string.*?to\s+(\w+)", "string"),
+            # "Type mismatch" patterns
+            (r"type mismatch.*?(\w+).*?(\w+)", None),
+            # "Incompatible types" patterns
+            (r"incompatible type.*?(\w+).*?(\w+)", None),
+        ]
+
+        # Check for type keywords indicating mismatch
+        type_keywords = ["varchar", "integer", "int", "bigint", "double", "float",
+                         "numeric", "decimal", "boolean", "date", "timestamp"]
+
+        is_type_mismatch = any(kw in msg_lower for kw in [
+            "type mismatch", "cannot compare", "incompatible type",
+            "no function matches", "could not convert string",
+            "conversion error", "could not convert",
+        ])
+
+        if not is_type_mismatch:
+            return None
+
+        # Try to extract the types involved
+        left_type = None
+        right_type = None
+
+        for pattern, fixed_type in type_mismatch_patterns:
+            match = re.search(pattern, error_msg, re.IGNORECASE)
+            if match:
+                if fixed_type:
+                    left_type = fixed_type
+                    right_type = match.group(1)
+                else:
+                    groups = match.groups()
+                    if len(groups) >= 2:
+                        left_type = groups[0]
+                        right_type = groups[1]
+                break
+
+        # Build CAST suggestion
+        string_types = {"varchar", "text", "string", "char"}
+        numeric_types = {"integer", "int", "bigint", "double", "float", "numeric", "decimal", "int4", "int8"}
+
+        if left_type and right_type:
+            lt = left_type.lower()
+            rt = right_type.lower()
+            if lt in string_types and rt in numeric_types:
+                cast_suggestion = f"CAST(column AS INTEGER) or CAST(column AS DOUBLE)"
+            elif lt in numeric_types and rt in string_types:
+                cast_suggestion = f"CAST(column AS VARCHAR)"
+            elif lt in string_types or rt in string_types:
+                cast_suggestion = f"CAST(column AS VARCHAR)"
+            else:
+                cast_suggestion = f"CAST(column AS {right_type.upper()})"
+        else:
+            # Generic suggestion when we can't determine specific types
+            cast_suggestion = "CAST(column AS VARCHAR) or CAST(column AS INTEGER)"
+
+        return (
+            f"Type mismatch in comparison: {error_msg}\n"
+            f"Hint: Use {cast_suggestion} to align types before comparing.\n"
+            "Example: WHERE CAST(numeric_col AS VARCHAR) = string_value\n"
+            "     or: WHERE numeric_col = TRY_CAST(string_col AS INTEGER)"
+        )
+
+    # ------------------------------------------------------------------
     # Execution — runs inside sandbox process via base _execute_query
     # ------------------------------------------------------------------
     def _run_query(self, query: str, dataframes: list, table_names: list) -> Any:
@@ -316,6 +397,10 @@ class SQLValidator(QueryValidator):
 
         except duckdb.BinderException as e:
             error_msg = str(e)
+            # Detect type mismatch in comparisons (string vs numeric)
+            type_mismatch = self._detect_type_mismatch(error_msg)
+            if type_mismatch:
+                raise ValueError(type_mismatch) from e
             if "not found in FROM clause" in error_msg or "Referenced column" in error_msg:
                 hint = "Only use columns that exist in the schema. Do not infer or guess column names by pattern."
             elif "UNION" in error_msg and "different number" in error_msg:
@@ -328,6 +413,26 @@ class SQLValidator(QueryValidator):
             else:
                 hint = "Check that all referenced columns, tables, and aliases are valid."
             raise ValueError(f"Binder error: {error_msg}\nHint: {hint}") from e
+
+        except duckdb.ConversionException as e:
+            error_msg = str(e)
+            type_mismatch = self._detect_type_mismatch(error_msg)
+            if type_mismatch:
+                raise ValueError(type_mismatch) from e
+            raise ValueError(
+                f"Type conversion error: {error_msg}\n"
+                "Hint: Use TRY_CAST(column AS target_type) to safely convert types."
+            ) from e
+
+        except duckdb.InvalidInputException as e:
+            error_msg = str(e)
+            type_mismatch = self._detect_type_mismatch(error_msg)
+            if type_mismatch:
+                raise ValueError(type_mismatch) from e
+            raise ValueError(
+                f"Invalid input: {error_msg}\n"
+                "Hint: Check column types and operation compatibility."
+            ) from e
 
         finally:
             con.close()

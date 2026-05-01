@@ -9,7 +9,7 @@ from typing import AsyncGenerator
 import pandas as pd
 
 from .agent.agent import StatementGenerationAgent, SingleTableStatementGenerationAgent
-from .utils import load_datasets_metadata,load_normalized_datasets_metadata, load_dataset_info, save_json, load_json
+from .utils import load_datasets_metadata,load_normalized_datasets_metadata, load_dataset_info, save_json, load_json, prepare_dataframe
 from conf import OrQAConfig
 from dataclasses import dataclass, field
 
@@ -506,7 +506,7 @@ def _build_match_inputs(
         metadatas.append(datasets_metadata.get(dataset))
         involved_cols[alias]  = match["columns_by_table"].get(alias, [])
         try:
-            dfs[alias] = pd.read_csv(path, low_memory=False)
+            dfs[alias] = prepare_dataframe(pd.read_csv(path, low_memory=False), alias=alias)
         except Exception:
             pass   # formatter degrades gracefully without the df
     return dataset_paths, aliases, metadatas, involved_cols, dfs

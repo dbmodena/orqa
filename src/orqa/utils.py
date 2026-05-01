@@ -1,6 +1,7 @@
 from typing import Optional, Literal
 import copy
 import json
+import logging
 import re
 from pathlib import Path
 import tempfile
@@ -270,6 +271,31 @@ def pd_read_dataset(dataset_path: Path, opts: dict = {}) -> pd.DataFrame:
             raise ValueError(
                 f"Unknown dataset format for file {dataset_path.absolute()}"
             )
+
+
+def prepare_dataframe(df: pd.DataFrame, alias: str, logger=None) -> pd.DataFrame:
+    """Normalize a DataFrame for pipeline processing.
+
+    - Converts numeric column labels to strings
+    - Logs warning if conversion was needed (with alias and count)
+
+    Returns the normalized DataFrame.
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    # Detect columns that are not already strings
+    non_str_cols = [c for c in df.columns if not isinstance(c, str)]
+    if non_str_cols:
+        logger.warning(
+            "Dataset '%s' has %d numeric column label(s) — converting to str.",
+            alias,
+            len(non_str_cols),
+        )
+
+    df.columns = df.columns.astype(str)
+    return df
+
 
 def prepare_dataset(
     dataset_path: Path,

@@ -29,6 +29,8 @@ import pandas as pd
 from pathlib import Path
 import duckdb
 from .LLMClientStructured import LLMClientStructured
+from .alias_substitution import AliasSubstitution
+from .message_builder import ClientMessageBuilder
 import re
 
 
@@ -289,10 +291,9 @@ class LLMClientStatementGenerator(LLMClientStructured):
 
         initial_message = self.reform_prompt_constraint(enriched_prompt)
 
-        messages = [
-            {"role": "system", "content": "You are an expert Data Engineer"},
-            {"role": "user", "content": initial_message},
-        ]
+        message_builder = ClientMessageBuilder()
+        system_prompt = "You are an expert Data Engineer"
+        messages = message_builder.build(system_prompt, initial_message)
         last_content = ""
 
         # ── Phase 1: initial generation with JSON/Pydantic retry loop ──────────
@@ -333,17 +334,12 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 error_msg = self._format_json_error(last_content, e)
                 if attempt < self.max_retries - 1:
                     pydantic = self.reform_prompt_constraint("")
-                    messages = [
-                        {"role": "system", "content": "You are an expert Data Engineer"},
-                        {"role": "user", "content": initial_message},
-                        {"role": "assistant", "content": last_content},
-                        {
-                            "role": "user",
-                            "content": (
-                                f"Your output could not be parsed as JSON:\n{error_msg}\n{pydantic}"
-                            ),
-                        },
-                    ]
+                    # Rebuild from scratch with error feedback
+                    error_prompt = (
+                        f"{initial_message}\n\n"
+                        f"Your previous output could not be parsed as JSON:\n{error_msg}\n{pydantic}"
+                    )
+                    messages = message_builder.build(system_prompt, error_prompt)
                     time.sleep(self.retry_delay)
 
             except ValidationError as e:
@@ -351,35 +347,25 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 error_msg = self._format_validation_error(e)
                 if attempt < self.max_retries - 1:
                     pydantic = self.reform_prompt_constraint("")
-                    messages = [
-                        {"role": "system", "content": "You are an expert Data Engineer"},
-                        {"role": "user", "content": enriched_prompt},
-                        {"role": "assistant", "content": last_content},
-                        {
-                            "role": "user",
-                            "content": (
-                                f"Your output failed schema validation:\n{error_msg}\n{pydantic}"
-                            ),
-                        },
-                    ]
+                    # Rebuild from scratch with error feedback
+                    error_prompt = (
+                        f"{enriched_prompt}\n\n"
+                        f"Your previous output failed schema validation:\n{error_msg}\n{pydantic}"
+                    )
+                    messages = message_builder.build(system_prompt, error_prompt)
                     time.sleep(self.retry_delay)
 
             except Exception as e:
                 all_errors.append(f"Unexpected error on attempt {attempt + 1}: {e}")
                 if attempt < self.max_retries - 1:
-                    messages = [
-                        {"role": "system", "content": "You are an expert Data Engineer"},
-                        {"role": "user", "content": enriched_prompt},
-                        {"role": "assistant", "content": last_content},
-                        {
-                            "role": "user",
-                            "content": (
-                                f"An error occurred: {e}\n"
-                                f"Return a JSON object matching:\n"
-                                f"{json.dumps(self.response_model.model_json_schema(), indent=2)}"
-                            ),
-                        },
-                    ]
+                    # Rebuild from scratch with error feedback
+                    error_prompt = (
+                        f"{enriched_prompt}\n\n"
+                        f"An error occurred: {e}\n"
+                        f"Return a JSON object matching:\n"
+                        f"{json.dumps(self.response_model.model_json_schema(), indent=2)}"
+                    )
+                    messages = message_builder.build(system_prompt, error_prompt)
                     time.sleep(self.retry_delay)
         else:
             # All JSON/Pydantic retries exhausted
@@ -410,12 +396,12 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 f"{len(bad_queries)} query/queries missing aliases."
             )
 
-            retry_messages = [
-                {"role": "system", "content": "You are an expert Data Engineer"},
-                {"role": "user", "content": initial_message},
-                {"role": "assistant", "content": json.dumps({"queries": bad_queries_clean})},
-                {"role": "user", "content": feedback},
-            ]
+            retry_messages = message_builder.build(
+                system_prompt,
+                f"{initial_message}\n\n"
+                f"Previous output (with issues):\n{json.dumps({'queries': bad_queries_clean})}\n\n"
+                f"{feedback}",
+            )
 
             try:
                 response = self.router.completion(
@@ -497,24 +483,20 @@ class LLMClientStatementGenerator(LLMClientStructured):
 
     @staticmethod
     def clean_table_names(query_code: str, aliases: dict) -> str:
-        inverted = {v: k for k, v in aliases.items()}
-
-        result = query_code
-        for table_name, alias in inverted.items():
-            underscore_variant = table_name.replace("-", "_")
-
-            for name_to_replace in {table_name, underscore_variant}:
-                result = re.sub(
-                    r'(?<![.\w])' + re.escape(name_to_replace) + r'(?!\w)',
-                    alias,
-                    result,
-                )
-        return result
+        """Deprecated: use AliasSubstitution.substitute() instead."""
+        sub = AliasSubstitution(aliases)
+        return sub.substitute(query_code)
 
     @staticmethod
     def clean_query_set(query_set: dict, aliases: dict) -> dict:
+        """Apply alias substitution to all queries in a query set.
+
+        Uses AliasSubstitution to replace original table names with canonical
+        aliases in the code field of each query, as well as question,
+        motivation, and tables[].name fields.
+        """
+        sub = AliasSubstitution(aliases)
         cleaned = {**query_set, "queries": []}
         for query in query_set.get("queries", []):
-            q = {**query, "code": LLMClientStatementGenerator.clean_table_names(query["code"], aliases)}
-            cleaned["queries"].append(q)
+            cleaned["queries"].append(sub.substitute_query(query))
         return cleaned

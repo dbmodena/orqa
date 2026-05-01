@@ -1,9 +1,14 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple, Any
+import difflib
 import json
+import logging
 import re
+import sys
 import multiprocessing as mp
 import pandas as pd
+
+from orqa.utils import prepare_dataframe
 
 TECHNICAL_TERMS = [
     'dataframe', 'dataframes', 'dataset', 'datasets',
@@ -52,9 +57,33 @@ TERM_SUGGESTIONS = {
 }
 
 
-def _sandbox_worker(queue: mp.Queue, fn, args: tuple) -> None:
+def _sandbox_worker(queue: mp.Queue, fn, args: tuple, mem_limit_bytes: int = 0) -> None:
+    """Execute *fn* inside the sandbox process.
+
+    If *mem_limit_bytes* > 0 and the platform supports it (Unix), the process
+    virtual-memory address space is capped via resource.setrlimit.  On Windows
+    the resource module is unavailable so the limit is skipped (the parent-side
+    _check_input_memory pre-check still applies).
+    """
+    # Enforce memory limit in child process
+    if mem_limit_bytes > 0 and sys.platform != "win32":
+        try:
+            import resource
+            resource.setrlimit(resource.RLIMIT_AS, (mem_limit_bytes, mem_limit_bytes))
+        except (ImportError, ValueError, OSError):
+            # If we can't set the limit (e.g. unsupported platform), continue without it
+            pass
+
     try:
         queue.put(("ok", fn(*args)))
+    except MemoryError as e:
+        queue.put((
+            "error",
+            "MemoryError",
+            f"Query exceeded memory limit ({mem_limit_bytes // (1024 * 1024)}MB). "
+            "Likely cause: large intermediate result or cartesian product.\n"
+            "Fix: pre-filter rows, select only needed columns, or add stricter join conditions."
+        ))
     except Exception as e:
         queue.put(("error", type(e).__name__, str(e)))
 
@@ -88,7 +117,11 @@ class QueryValidator(ABC):
     # ------------------------------------------------------------------
     def _run_in_sandbox(self, fn, args: tuple = ()) -> Any:
         queue = mp.Queue()
-        p = mp.Process(target=_sandbox_worker, args=(queue, fn, args), daemon=True)
+        p = mp.Process(
+            target=_sandbox_worker,
+            args=(queue, fn, args, self.mem_limit),
+            daemon=True,
+        )
         p.start()
         p.join(timeout=self.timeout)
 
@@ -96,12 +129,20 @@ class QueryValidator(ABC):
             p.kill()
             p.join()
             raise TimeoutError(
-                f"Query exceeded {self.timeout}s limit — likely a Cartesian product or missing join condition.\n"
-                "Add more specific join/filter conditions."
+                f"Query exceeded {self.timeout}s timeout limit.\n"
+                "Likely causes: cartesian product from missing/incorrect join keys, "
+                "overly relaxed filter producing too many rows, or expensive aggregation.\n"
+                "Fix: add explicit join keys (on=), tighten WHERE/filter conditions, "
+                "or pre-aggregate before joining."
             )
 
         if queue.empty():
-            raise RuntimeError("Sandbox process exited without returning a result.")
+            exit_code = p.exitcode
+            raise RuntimeError(
+                f"Sandbox process exited unexpectedly without returning a result "
+                f"(exit code: {exit_code}).\n"
+                "The query may have caused a segfault or been killed by the OS."
+            )
 
         status, *rest = queue.get()
         if status == "error":
@@ -230,6 +271,8 @@ class QueryValidator(ABC):
         for canonical, file_id in list(self.lookup_dict.items()):
             if "-" in file_id:
                 alias_by_file.setdefault(file_id.replace("-", "_"), canonical)
+
+        _logger = logging.getLogger(__name__)
         dataframes, ordered_names = [], []
         for table in tables:
             raw_name = table["name"]
@@ -237,16 +280,33 @@ class QueryValidator(ABC):
             name = alias_by_file.get(raw_name, raw_name)
             dataframe = df_by_name.get(name)
             if dataframe is None:
+                available_tables = self.table_names
+                suggestions = self._suggest_columns(name, available_tables)
+                suggestion_msg = ""
+                if suggestions:
+                    suggestion_msg = f"\nDid you mean: {', '.join(suggestions)}?"
                 raise KeyError(
-                    f"Table '{name}' not found. Available: {self.table_names}.\n"
+                    f"Table '{name}' not found. Available: {self.table_names}.{suggestion_msg}\n"
                     "Check for a typo or stale table name."
                 )
+            # Safety net: ensure column labels are strings even if the DataFrame
+            # was not loaded through the standard pipeline path.
+            dataframe = prepare_dataframe(dataframe, alias=name, logger=_logger)
             cols = table.get("columns_involved") or []
             if cols:
                 missing = [c for c in cols if c not in dataframe.columns]
                 if missing:
+                    available_cols = list(dataframe.columns)
+                    suggestions_per_col = []
+                    for m in missing:
+                        col_suggestions = self._suggest_columns(m, available_cols)
+                        if col_suggestions:
+                            suggestions_per_col.append(f"  '{m}' → did you mean: {', '.join(col_suggestions[:3])}?")
+                    suggestion_msg = ""
+                    if suggestions_per_col:
+                        suggestion_msg = "\nSuggestions:\n" + "\n".join(suggestions_per_col)
                     raise KeyError(
-                        f"columns_involved has unknown columns in '{name}': {missing}.\n"
+                        f"columns_involved has unknown columns in '{name}': {missing}.{suggestion_msg}\n"
                         "Check for typos or stale references."
                     )
                 dataframes.append(dataframe[[c for c in cols if c in dataframe.columns]])
@@ -357,6 +417,60 @@ class QueryValidator(ABC):
         if specific:
             lines.append("Suggestions: " + " | ".join(specific))
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Column suggestion & error wrapping helpers
+    # ------------------------------------------------------------------
+    MAX_RESULT_ROWS = 5_000_000
+
+    def _check_result_size(self, result) -> None:
+        """Detect results exceeding 5M rows before full materialization.
+
+        Raises MemoryError if the result has more than MAX_RESULT_ROWS rows.
+        """
+        if result is None:
+            return
+        row_count = None
+        if hasattr(result, 'shape'):
+            row_count = result.shape[0]
+        elif hasattr(result, '__len__'):
+            row_count = len(result)
+        if row_count is not None and row_count > self.MAX_RESULT_ROWS:
+            raise MemoryError(
+                f"Query result has {row_count:,} rows, exceeding the {self.MAX_RESULT_ROWS:,} row limit.\n"
+                "Fix: add WHERE/filter conditions, use LIMIT, or aggregate before returning."
+            )
+
+    def _suggest_columns(self, missing_col: str, available: list[str], max_suggestions: int = 10) -> list[str]:
+        """Return up to *max_suggestions* column names from *available* ordered by
+        ascending edit distance from *missing_col*.
+
+        Uses difflib.get_close_matches with a generous cutoff so that even
+        moderately distant matches are surfaced.  The result is further sorted
+        by SequenceMatcher ratio (descending) to guarantee the first element is
+        the closest match.
+        """
+        if not available or not missing_col:
+            return []
+
+        # get_close_matches returns results sorted by similarity (best first)
+        # Use a low cutoff to be generous with suggestions
+        matches = difflib.get_close_matches(
+            missing_col, available, n=max_suggestions, cutoff=0.3
+        )
+        return matches
+
+    @staticmethod
+    def _wrap_unknown_exception(e: Exception) -> str:
+        """Wrap an unknown exception type into a structured error message.
+
+        Includes the exception type name and at most 200 characters of the
+        original message.
+        """
+        type_name = type(e).__name__
+        raw_msg = str(e)
+        truncated = raw_msg[:200] if len(raw_msg) > 200 else raw_msg
+        return f"{type_name}: {truncated}"
 
     def _find_repeated_errors(self, error_texts: list) -> list:
         rules = []
