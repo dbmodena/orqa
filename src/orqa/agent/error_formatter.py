@@ -51,6 +51,87 @@ class ErrorFormatter:
         truncated_words = words[:max_words]
         return " ".join(truncated_words) + "..."
 
+    def format_judge_feedback(
+        self, query_id: int, error: str, suggestion: str = ""
+    ) -> str:
+        """Format a single judge feedback entry with clear labeling.
+
+        Produces a string prefixed with ``[JUDGE FEEDBACK]`` that includes
+        both the error reason and the suggestion text.  The output is
+        truncated to MAX_ERROR_TOKENS.
+
+        Args:
+            query_id: The positional integer ID of the query.
+            error: The judge's rejection reason.
+            suggestion: The judge's suggestion for improvement.
+                        Defaults to empty string if not provided.
+
+        Returns:
+            A formatted, token-limited string clearly labeled as judge feedback.
+        """
+        if suggestion is None:
+            suggestion = ""
+
+        parts = [f"[JUDGE FEEDBACK] Query #{query_id}:"]
+        parts.append(f"  Error: {error}")
+        parts.append(f"  Suggestion: {suggestion}")
+
+        combined = "\n".join(parts)
+        return self.truncate_to_tokens(combined, self.MAX_ERROR_TOKENS)
+
+    def format_static_error(self, query_id: int, error: str) -> str:
+        """Format a single static validation error with clear labeling.
+
+        Produces a string prefixed with ``[STATIC VALIDATION ERROR]`` that
+        includes the error message.  The output is truncated to
+        MAX_ERROR_TOKENS and is guaranteed to never contain the
+        ``[JUDGE FEEDBACK]`` label.
+
+        Args:
+            query_id: The positional integer ID of the query.
+            error: The static validation error message.
+
+        Returns:
+            A formatted, token-limited string clearly labeled as a static
+            validation error.
+        """
+        # Sanitize: ensure the output never contains the judge feedback label
+        sanitized_error = error.replace("[JUDGE FEEDBACK]", "[JUDGE_FEEDBACK]")
+        combined = f"[STATIC VALIDATION ERROR] Query #{query_id}:\n  {sanitized_error}"
+        return self.truncate_to_tokens(combined, self.MAX_ERROR_TOKENS)
+
+    def build_judge_feedback_block(
+        self, queries: list[dict], judge_feedback: list[dict]
+    ) -> str:
+        """Build the complete feedback block for the judge-feedback-first cycle.
+
+        Iterates over judge feedback entries, formats each with
+        ``format_judge_feedback()``, and returns a combined block with a
+        clear section header.
+
+        Args:
+            queries: List of pending query dicts (used for context/ID mapping).
+            judge_feedback: List of feedback entries, each with:
+                - ``"id"`` (int): The query ID this feedback applies to.
+                - ``"error"`` (str): The judge's rejection reason.
+                - ``"suggestion"`` (str, optional): Improvement suggestion.
+                  Defaults to ``""`` if missing.
+
+        Returns:
+            A formatted string block with a section header and all feedback
+            entries clearly labeled as ``[JUDGE FEEDBACK]``.
+        """
+        sections: list[str] = ["--- Judge Feedback ---"]
+
+        for entry in judge_feedback:
+            query_id = entry["id"]
+            error = entry["error"]
+            suggestion = entry.get("suggestion", "")
+            formatted = self.format_judge_feedback(query_id, error, suggestion)
+            sections.append(formatted)
+
+        return "\n\n".join(sections)
+
     def format_per_query(
         self, query_id: int, errors: list[str], source_labels: list[str]
     ) -> str:

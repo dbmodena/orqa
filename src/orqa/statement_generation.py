@@ -549,6 +549,15 @@ def _get_formatted_match(
     return "\n".join(match.get(f"{kind}_matches", []))
 
 
+def _already_succeeded(results: dict, kind: str, idx: str) -> bool:
+    """Return True if any model already has a 'success' entry for this idx and kind."""
+    for model_data in results.values():
+        entry = model_data.get(kind, {}).get(idx)
+        if entry and entry.get("status") == "success":
+            return True
+    return False
+
+
 def create_statements(
     config_path: Path,
     csv_folder: Path,
@@ -572,10 +581,14 @@ def create_statements(
 
     cross_agent = StatementGenerationAgent(config_path, kind, bad_tokens, languages=languages)
 
+    # ── Cross-table generation ────────────────────────────────────────────────
     for idx, match in enumerate(all_matches):
-        if kind == " SQL" and idx in [0,2,6,8,11,13,14,18,20,21,22,23,24,25,26,28,29,33,35,36]:
-            continue
         if _is_single_table_candidate(match):
+            continue
+
+        str_idx = str(idx)
+        if _already_succeeded(results, kind, str_idx):
+            print(f"[{idx}] Already succeeded — skipping.")
             continue
 
         dataset_paths, aliases, metadatas, involved_cols, dfs = _build_match_inputs(
@@ -603,7 +616,7 @@ def create_statements(
         result = content["result"]
         model  = content["model"].split("/")[-1]
 
-        results.setdefault(model, {}).setdefault(kind, {})[str(idx)] = {
+        results.setdefault(model, {}).setdefault(kind, {})[str_idx] = {
             "status":          "success" if result.get("queries") else "failure",
             "proposed_columns":content["proposed_columns"],
             "data":            result,
@@ -615,6 +628,54 @@ def create_statements(
         }
         save_json(results, output_file)
         sys.stdout.flush()
+
+    # ── Single-table generation ───────────────────────────────────────────────
+    if enable_single_table and single_table_query_count > 0:
+        print(f"\nStarting single-table generation ({single_table_query_count} datasets)...")
+        sampled = _sample_single_table_datasets(csv_folder, single_table_query_count)
+        single_agent = SingleTableStatementGenerationAgent(
+            config_path, kind, bad_tokens, languages=languages
+        )
+
+        for st_idx, csv_path in enumerate(sampled):
+            dataset_name = csv_path.stem
+            aliases = {"Table_0": dataset_name}
+            str_idx = f"st_{st_idx}"
+
+            if _already_succeeded(results, kind, str_idx):
+                print(f"[st_{st_idx}] Already succeeded — skipping.")
+                continue
+
+            start = __import__("time").perf_counter()
+
+            content = single_agent.generate_statements(
+                csv_path, aliases, kind,
+                datasets_metadata.get(dataset_name),
+                max_cols, sample_size=5,
+            )
+
+            generation_time = __import__("time").perf_counter() - start
+
+            actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
+            cooldown = _compute_timeout(actual_tokens)
+            print(f"[st_{st_idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
+            __import__("time").sleep(cooldown)
+
+            result = content["result"]
+            model  = content["model"].split("/")[-1]
+
+            results.setdefault(model, {}).setdefault(kind, {})[str_idx] = {
+                "status":          "success" if result.get("queries") else "failure",
+                "proposed_columns":content.get("proposed_columns"),
+                "data":            result,
+                "tokens":          content["token_usage"],
+                "tables":          aliases,
+                "errors":          content["errors"],
+                "generation_time": generation_time,
+                "avg_cols":        content["avg_cols"],
+            }
+            save_json(results, output_file)
+            sys.stdout.flush()
 
     print(f"\nResults saved to {output_file}")
     return results
