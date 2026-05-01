@@ -63,13 +63,32 @@ logger = logging.getLogger(__name__)
 def _set_memory_limit_unix(mem_limit_bytes: int) -> None:
     """Set the process virtual-memory address-space limit on Unix via resource.setrlimit.
 
+    The limit is set as current usage + the configured budget so that only
+    *new* allocations made by the query are constrained (the Python runtime
+    and loaded DataFrames are already in memory).
+
     Logs a warning and continues without the limit if the call fails for any
     reason (e.g. unsupported platform, permission error, or the resource module
     is unavailable on Windows).
     """
     try:
         import resource
-        resource.setrlimit(resource.RLIMIT_AS, (mem_limit_bytes, mem_limit_bytes))
+        # Current virtual-memory size (soft limit baseline)
+        try:
+            import os
+            current_usage = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+            # Better: use actual process RSS via /proc if available
+            try:
+                with open(f'/proc/{os.getpid()}/statm', 'r') as f:
+                    pages = int(f.read().split()[1])  # resident pages
+                    current_usage = pages * os.sysconf('SC_PAGE_SIZE')
+            except (FileNotFoundError, OSError):
+                pass
+        except (ValueError, OSError):
+            current_usage = 256 * 1024 * 1024  # conservative fallback
+
+        effective_limit = current_usage + mem_limit_bytes
+        resource.setrlimit(resource.RLIMIT_AS, (effective_limit, effective_limit))
     except ImportError:
         logger.warning(
             "resource module not available on this platform; "
@@ -145,9 +164,24 @@ def _set_memory_limit_windows(mem_limit_bytes: int) -> None:
             return
 
         # 2. Configure the extended limit information
+        # On Windows the limit is absolute (not incremental).  The child process
+        # already consumes memory for the Python runtime, loaded libraries, and
+        # deserialized DataFrames.  We add the configured budget ON TOP of the
+        # current committed memory so the limit only constrains *new* allocations
+        # made by the query itself.
+        import os
+        try:
+            import psutil
+            current_usage = psutil.Process(os.getpid()).memory_info().rss
+        except Exception:
+            # psutil may not be available; fall back to a conservative 256MB estimate
+            current_usage = 256 * 1024 * 1024
+
+        effective_limit = current_usage + mem_limit_bytes
+
         info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY
-        info.ProcessMemoryLimit = mem_limit_bytes
+        info.ProcessMemoryLimit = effective_limit
 
         # 3. Apply the limit to the Job Object
         success = kernel32.SetInformationJobObject(
