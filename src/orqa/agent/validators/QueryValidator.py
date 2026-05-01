@@ -57,22 +57,145 @@ TERM_SUGGESTIONS = {
 }
 
 
+logger = logging.getLogger(__name__)
+
+
+def _set_memory_limit_unix(mem_limit_bytes: int) -> None:
+    """Set the process virtual-memory address-space limit on Unix via resource.setrlimit.
+
+    Logs a warning and continues without the limit if the call fails for any
+    reason (e.g. unsupported platform, permission error, or the resource module
+    is unavailable on Windows).
+    """
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_AS, (mem_limit_bytes, mem_limit_bytes))
+    except ImportError:
+        logger.warning(
+            "resource module not available on this platform; "
+            "skipping memory limit enforcement"
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to set memory limit via resource.setrlimit: %s. "
+            "Continuing without OS-level memory limit.",
+            exc,
+        )
+
+
+def _set_memory_limit_windows(mem_limit_bytes: int) -> None:
+    """Set process memory limit on Windows using the Job Object API via ctypes.
+
+    Creates a Job Object, configures it with a ProcessMemoryLimit, and assigns
+    the current process to the job.  Logs a warning and continues without the
+    limit if any step fails (e.g. missing API, permission error, or non-Windows
+    platform).
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        # --- ctypes structure definitions (Windows-only) ---
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        # Constants
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
+        JobObjectExtendedLimitInformation = 9
+
+        kernel32 = ctypes.windll.kernel32
+
+        # 1. Create a Job Object
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            logger.warning(
+                "CreateJobObjectW returned NULL; "
+                "skipping Windows memory limit enforcement"
+            )
+            return
+
+        # 2. Configure the extended limit information
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        info.ProcessMemoryLimit = mem_limit_bytes
+
+        # 3. Apply the limit to the Job Object
+        success = kernel32.SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not success:
+            logger.warning(
+                "SetInformationJobObject failed; "
+                "skipping Windows memory limit enforcement"
+            )
+            return
+
+        # 4. Assign the current process to the Job Object
+        process_handle = kernel32.GetCurrentProcess()
+        success = kernel32.AssignProcessToJobObject(job, process_handle)
+        if not success:
+            logger.warning(
+                "AssignProcessToJobObject failed; "
+                "skipping Windows memory limit enforcement"
+            )
+            return
+
+    except Exception as exc:
+        logger.warning(
+            "Failed to set memory limit via Windows Job Object API: %s. "
+            "Continuing without OS-level memory limit.",
+            exc,
+        )
+
+
 def _sandbox_worker(queue: mp.Queue, fn, args: tuple, mem_limit_bytes: int = 0) -> None:
     """Execute *fn* inside the sandbox process.
 
-    If *mem_limit_bytes* > 0 and the platform supports it (Unix), the process
-    virtual-memory address space is capped via resource.setrlimit.  On Windows
-    the resource module is unavailable so the limit is skipped (the parent-side
-    _check_input_memory pre-check still applies).
+    If *mem_limit_bytes* > 0, the process memory is capped via the appropriate
+    platform mechanism: resource.setrlimit on Unix, or the Windows Job Object
+    API on Windows.  If the platform API is unavailable, a warning is logged
+    and execution continues (the parent-side _check_input_memory pre-check
+    still applies).
     """
     # Enforce memory limit in child process
-    if mem_limit_bytes > 0 and sys.platform != "win32":
-        try:
-            import resource
-            resource.setrlimit(resource.RLIMIT_AS, (mem_limit_bytes, mem_limit_bytes))
-        except (ImportError, ValueError, OSError):
-            # If we can't set the limit (e.g. unsupported platform), continue without it
-            pass
+    if mem_limit_bytes > 0:
+        if sys.platform == "win32":
+            _set_memory_limit_windows(mem_limit_bytes)
+        else:
+            _set_memory_limit_unix(mem_limit_bytes)
 
     try:
         queue.put(("ok", fn(*args)))
@@ -90,7 +213,7 @@ def _sandbox_worker(queue: mp.Queue, fn, args: tuple, mem_limit_bytes: int = 0) 
 
 class QueryValidator(ABC):
 
-    DEFAULT_TIMEOUT   = 30
+    DEFAULT_TIMEOUT   = 180
     DEFAULT_MEM_LIMIT = 512
 
     def __init__(
@@ -111,6 +234,86 @@ class QueryValidator(ABC):
         self.validation_errors: list = []
         self.good_queries:      dict = {}
         self.errors:            list = []
+
+    # ------------------------------------------------------------------
+    # Table Name Sanitization
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sanitize_name(name: str) -> str | None:
+        """Convert a single table name to a valid Python identifier.
+
+        Rules:
+        1. Replace all non-alphanumeric, non-underscore characters with '_'
+        2. If result starts with a digit, prefix with '_'
+        3. If result is empty or all underscores, return None
+           (caller handles fallback with Table_{index})
+        """
+        # Replace all non-alphanumeric, non-underscore characters with '_'
+        sanitized = re.sub(r'[^A-Za-z0-9_]', '_', name)
+
+        # If result is empty or all underscores, return None
+        if not sanitized or all(c == '_' for c in sanitized):
+            return None
+
+        # If result starts with a digit, prefix with '_'
+        if sanitized[0].isdigit():
+            sanitized = '_' + sanitized
+
+        return sanitized
+
+    def _sanitize_table_names(self, names: list[str]) -> tuple[list[str], dict[str, str]]:
+        """Sanitize a list of table names, resolving collisions.
+
+        For each name in *names*:
+        1. Call ``_sanitize_name()``; use ``Table_{index}`` as fallback when
+           the result is None (all-illegal-character names).
+        2. Resolve collisions by appending numeric suffixes (``_2``, ``_3``, …).
+
+        Returns:
+            (sanitized_names, rewrite_map) where *rewrite_map* maps each
+            original name to its sanitized counterpart (only entries that
+            actually changed are included).
+        """
+        sanitized_names: list[str] = []
+        rewrite_map: dict[str, str] = {}
+        seen: dict[str, int] = {}  # base_name -> count of times seen
+
+        for index, raw_name in enumerate(names):
+            base = self._sanitize_name(raw_name)
+            if base is None:
+                base = f"Table_{index}"
+
+            # Resolve collisions
+            if base in seen:
+                seen[base] += 1
+                unique_name = f"{base}_{seen[base]}"
+                # Keep incrementing if the suffixed name also collides
+                while unique_name in seen:
+                    seen[base] += 1
+                    unique_name = f"{base}_{seen[base]}"
+                seen[unique_name] = 1
+                sanitized_names.append(unique_name)
+                rewrite_map[raw_name] = unique_name
+            else:
+                seen[base] = 1
+                sanitized_names.append(base)
+                if raw_name != base:
+                    rewrite_map[raw_name] = base
+
+        return sanitized_names, rewrite_map
+
+    def _rewrite_query(self, query: str, rewrite_map: dict[str, str]) -> str:
+        """Replace all occurrences of original table names in query with sanitized versions.
+
+        Keys are processed longest-first to avoid partial replacements when one
+        name is a prefix of another.  Uses word-boundary regex (``\\b``) so that
+        only standalone identifier occurrences are replaced.
+        """
+        # Sort by length descending so longer names are replaced first
+        for original in sorted(rewrite_map.keys(), key=len, reverse=True):
+            sanitized = rewrite_map[original]
+            query = re.sub(rf'\b{re.escape(original)}\b', sanitized, query)
+        return query
 
     # ------------------------------------------------------------------
     # Sandbox
@@ -185,6 +388,11 @@ class QueryValidator(ABC):
         except MemoryError as e:
             return False, [{"role": "user", "content": f"MemoryError: {e}"}], {}, [str(e)]
 
+        # Sanitize table names early so downstream methods receive valid identifiers
+        sanitized_names, rewrite_map = self._sanitize_table_names(self.table_names)
+        # Build a mapping from original ordered_name -> sanitized name
+        sanitize_lookup = dict(zip(self.table_names, sanitized_names))
+
         for idx, q in enumerate(result["queries"]):
             actual_query = q
             try:
@@ -194,9 +402,13 @@ class QueryValidator(ABC):
                     raise ValueError("query 'code' field is missing or empty")
 
                 query_code = self.replace_aliases(raw_code, self.lookup_dict)
+                # Rewrite original table name references to sanitized identifiers
+                query_code = self._rewrite_query(query_code, rewrite_map)
                 query_code = self._preprocess_query(query_code.strip())
                 actual_query["code"] = query_code
-                result_data = self._execute_query(query_code, dataframes, ordered_names)
+                # Map ordered_names to their sanitized counterparts
+                sanitized_ordered = [sanitize_lookup[n] for n in ordered_names]
+                result_data = self._execute_query(query_code, dataframes, sanitized_ordered)
 
                 # FIX: empty-result rejection is now gated through _empty_result_is_error(),
                 # which subclasses can override. For multi-table queries, sample data may
@@ -204,7 +416,7 @@ class QueryValidator(ABC):
                 # rejecting it here generates spurious correction cycles and token waste.
                 if self._is_empty_result(result_data) and self._empty_result_is_error(ordered_names):
                     raise ValueError(self._build_empty_result_feedback())
-                if not self._check_table_usage(query_code):
+                if not self._check_table_usage(query_code, sanitized_names):
                     raise ValueError(self._build_unused_tables_feedback())
                 if not self._check_tables_field_coverage(actual_query):
                     raise ValueError(self._build_tables_field_coverage_feedback())
@@ -342,13 +554,14 @@ class QueryValidator(ABC):
             return len(result) == 0
         return False
 
-    def _check_table_usage(self, query_text: str) -> bool:
-        if len(self.table_names) == 1:
-            if self.table_names[0] in query_text:
+    def _check_table_usage(self, query_text: str, table_names: list[str] | None = None) -> bool:
+        names = table_names if table_names is not None else self.table_names
+        if len(names) == 1:
+            if names[0] in query_text:
                 return True
-            self.unused_tables = {self.table_names[0]}
+            self.unused_tables = {names[0]}
             return False
-        self.unused_tables = {t for t in self.table_names if t not in query_text}
+        self.unused_tables = {t for t in names if t not in query_text}
         return len(self.unused_tables) == 0
 
     def _check_table_names_in_question(self, question: str) -> bool:
