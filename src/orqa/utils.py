@@ -348,9 +348,9 @@ def prepare_dataset(
 
     col_map = {c.strip().lower(): c for c in df.columns}
     resolved_cols = [
-        col_map[c.strip().lower()]
+        col_map[str(c).strip().lower()]
         for c in involved_cols
-        if c.strip().lower() in col_map
+        if str(c).strip().lower() in col_map
     ]
 
     remaining_budget = max(0, limit_to_n_columns - len(resolved_cols))

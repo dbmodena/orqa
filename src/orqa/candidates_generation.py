@@ -48,8 +48,15 @@ PRINT_PAD = 120
 
 ## (Temporary solution) Added a check for illegal table names in duck db enviroment
 def has_unsafe_sql_chars(dataset_id: str) -> bool:
-    """Skip datasets whose IDs would break SQL string literals."""
-    return "'" in dataset_id or '"' in dataset_id
+    """Skip datasets whose IDs would break SQL identifiers or string literals."""
+    import re
+    # Reject names with quotes, semicolons, parentheses, or other SQL-unsafe chars
+    if re.search(r"""['"`;()\[\]{}\\@#$%^&*!~<>|/]""", dataset_id):
+        return True
+    # Reject names that start with a digit (invalid SQL identifier)
+    if dataset_id and dataset_id[0].isdigit():
+        return True
+    return False
 
 # NOTE: this implementation of BLEND is currently based on DuckDB, and
 # in some cases it needs to fetch a lot of data. We try to limit the memory

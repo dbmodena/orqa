@@ -27,9 +27,9 @@ You are an expert Data Engineer. Correct only the listed Pandas queries and ques
 result = (
     df_a
     .merge(df_b, on='key', how='left', suffixes=('', '_b'))
-    .rename(columns={'col_b': 'col_from_b'})      # resolve before next merge
+    .rename(columns={{'col_b': 'col_from_b'}})      # resolve before next merge
     .merge(df_c, on='key', how='left', suffixes=('', '_c'))
-    .rename(columns={'col_c': 'col_from_c'})
+    .rename(columns={{'col_c': 'col_from_c'}})
     [['key', 'col_a', 'col_from_b', 'col_from_c']]
 )
 ```
