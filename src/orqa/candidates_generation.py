@@ -46,6 +46,11 @@ COMPLETION_CALLS_TIMEOUT = 1
 PRINT_PAD = 120
 
 
+## (Temporary solution) Added a check for illegal table names in duck db enviroment
+def has_unsafe_sql_chars(dataset_id: str) -> bool:
+    """Skip datasets whose IDs would break SQL string literals."""
+    return "'" in dataset_id or '"' in dataset_id
+
 # NOTE: this implementation of BLEND is currently based on DuckDB, and
 # in some cases it needs to fetch a lot of data. We try to limit the memory
 # usage in order to avoid a machine complete block (maybe works maybe not,
@@ -442,7 +447,7 @@ def pipeline(cfg: OrQAConfig):
     agent = CandidatesDiscoveryAgent(litellm_config_path)
 
     tokens_budget = 1_000_000
-    n_datasets_limit = 100#1000
+    n_datasets_limit = 400#1000
 
     _format = cfg.datasets_format
 
@@ -495,6 +500,11 @@ def pipeline(cfg: OrQAConfig):
         if resource_id in visited:
             continue
 
+        # we skip (temporary)
+        if has_unsafe_sql_chars(dataset_id):
+            print(f"Skipping dataset with unsafe SQL chars in name: {dataset_id}")
+            visited.add(resource_id)
+            continue
         # if we run out of budget, stop generation
         if tokens_budget <= 0 or n_datasets_limit <= 0:
             break

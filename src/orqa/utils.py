@@ -297,6 +297,40 @@ def prepare_dataframe(df: pd.DataFrame, alias: str, logger=None) -> pd.DataFrame
     return df
 
 
+import re
+
+def _is_valid_column_name(col) -> bool:
+    """
+    Returns False if the column name:
+    - is a numeric type (int, float, complex)
+    - is purely numeric when represented as a string
+    - contains characters illegal in SQL identifiers or pandas query strings
+    """
+    # Reject actual numeric types (can occur with parquet/Excel column labels)
+    if isinstance(col, (int, float, complex)):
+        return False
+
+    stripped = str(col).strip()
+
+    # Discard purely numeric string representations (e.g. "0", "123", "3.14")
+    try:
+        float(stripped)
+        return False
+    except ValueError:
+        pass
+
+    # Must start with a letter or underscore (SQL/pandas identifier rule)
+    if not re.match(r'^[A-Za-z_]', stripped):
+        return False
+
+    # Discard names containing characters illegal in SQL/pandas identifiers
+    # Allowed: letters, digits, underscores
+    if re.search(r'[^\w]', stripped, re.ASCII):
+        return False
+
+    return True
+
+
 def prepare_dataset(
     dataset_path: Path,
     involved_cols: list[str],
@@ -304,9 +338,13 @@ def prepare_dataset(
     sample_size: int = 5,
     bad_tokens: list = []
 ) -> tuple[dict, dict]:
-    #involved_cols = [c for c in involved_cols if isinstance(c, str)]
     df = pd_read_dataset(dataset_path, opts={"csv": {"na_values": bad_tokens, "low_memory": False}, "parquet": {"na_values": bad_tokens, "low_memory": False}})
     df = df.dropna()
+
+    # ── drop columns with illegal / purely-numeric names ──────────────────────
+    valid_columns = [c for c in df.columns if _is_valid_column_name(c)]
+    df = df[valid_columns]
+    # ──────────────────────────────────────────────────────────────────────────
 
     col_map = {c.strip().lower(): c for c in df.columns}
     resolved_cols = [
