@@ -38,4 +38,4 @@ You are an expert Data Engineer. Correct only the listed DuckDB SQL queries and 
 - Update `question`, `translated_question`, `motivation`, `tables` if the SQL changed.
 
 ### Output
-JSON `queries` array. Required fields: `difficulty`, `question`, `query`, `motivation`, `tables`, `translated_question`, `detected_language`.
+{pydantic_constraint}

@@ -48,4 +48,4 @@ result = (
 - Update `question`, `translated_question`, `motivation`, `tables` if the code changed.
 
 ### Output
-JSON `queries` array. Required fields: `difficulty`, `question`, `query`, `motivation`, `tables`, `translated_question`, `detected_language`.
+{pydantic_constraint}

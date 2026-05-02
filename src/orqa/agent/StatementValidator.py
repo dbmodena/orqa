@@ -190,9 +190,9 @@ class LLMStatementValidator(LLMClientStructured):
                     f"sending {len(pending)} query/queries with judge feedback to LLM."
                 )
 
-                corrected_queries, tokens, llm_errors = (
+                corrected_queries, tokens, llm_errors, assistant_content = (
                     self._run_judge_feedback_cycle(
-                        pending, remapped_judge_feedback, table_schemas, aliases
+                        pending, remapped_judge_feedback, table_schemas, aliases,
                     )
                 )
                 _accumulate_usage(usage_total, tokens)
@@ -236,7 +236,7 @@ class LLMStatementValidator(LLMClientStructured):
 
             print(f"[Validator] Error↔Query pairing for cycle {cycle}:")
 
-            corrected_queries, tokens, llm_errors = (
+            corrected_queries, tokens, llm_errors, assistant_content = (
                 self._run_static_correction_cycle(
                     pending, static_errors, table_schemas, dataframes, aliases,
                     previous_errors_by_id=previous_errors_by_id,
@@ -291,14 +291,14 @@ class LLMStatementValidator(LLMClientStructured):
         dataframes: list,
         aliases: dict,
         previous_errors_by_id: dict[str, list[str]] | None = None,
-    ) -> tuple[list, dict, list]:
+    ) -> tuple[list, dict, list, str | None]:
         """Normal correction cycle: format static errors and call LLM.
 
         Builds per-query error map, handles error escalation for recurring
         failures, formats errors with ``[STATIC VALIDATION ERROR]`` prefix via
         ``ErrorFormatter.format_static_error()``, detects recurring patterns,
-        builds the correction prompt, assembles the 4-block message, and calls
-        the correction LLM.
+        builds the correction prompt, assembles the stateless 2-message array,
+        and calls the correction LLM.
 
         Args:
             failing: Non-empty list of query dicts that failed static validation.
@@ -311,15 +311,13 @@ class LLMStatementValidator(LLMClientStructured):
                 escalation comparison. ``None`` on the first correction attempt.
 
         Returns:
-            (corrected_queries, usage_dict, error_strings)
+            (corrected_queries, usage_dict, error_strings, assistant_content)
+            assistant_content is the raw string from the LLM response (or None).
         """
         error_formatter = ErrorFormatter()
         message_builder = ValidatorMessageBuilder()
 
-        system_prompt = (
-            "You are an expert Data Engineer specialising in query correction. "
-            "Fix the listed queries exactly as instructed and return valid JSON."
-        )
+        system_prompt = "You are a helpful assistant."
 
         if previous_errors_by_id is None:
             previous_errors_by_id = {}
@@ -370,24 +368,27 @@ class LLMStatementValidator(LLMClientStructured):
             queries_with_errors_entries, recurring
         )
 
-        correction_prompt = self._correction_prompt.update(
+        # ---- Generate pydantic constraint text ----------------------------
+        pydantic_constraint = self.reform_prompt_constraint("").strip()
+
+        # ---- Render the full user message from the correction template ----
+        user_content = self._correction_prompt.update(
             table_schemas=table_schemas,
-            aliases=json.dumps(aliases, indent=2),
             queries_with_errors=queries_with_errors_text,
+            pydantic_constraint=pydantic_constraint,
         )
 
-        # ---- Fixed-structure rebuild: always exactly 4 blocks -------------
+        # ---- Fixed-structure rebuild: stateless 2 blocks -------------------
         messages_to_send = message_builder.build(
-            system_prompt=system_prompt,
-            table_schemas=table_schemas,
-            queries_text=queries_with_errors_text,
-            errors_text=self.reform_prompt_constraint(correction_prompt),
+            system_content=system_prompt,
+            user_content=user_content,
         )
 
-        corrected_queries, tokens, llm_errors, _assistant_message = (
+        corrected_queries, tokens, llm_errors, assistant_message = (
             self._correct_with_llm(messages_to_send, failing)
         )
-        return corrected_queries, tokens, llm_errors
+        assistant_content = assistant_message.get("content") if assistant_message else None
+        return corrected_queries, tokens, llm_errors, assistant_content
 
     def _run_judge_feedback_cycle(
         self,
@@ -395,7 +396,7 @@ class LLMStatementValidator(LLMClientStructured):
         judge_feedback: list,
         table_schemas: str,
         aliases: dict | None = None,
-    ) -> tuple[list, dict, list]:
+    ) -> tuple[list, dict, list, str | None]:
         """First cycle when judge feedback is present — skips static validation.
 
         Sends ALL pending queries together with their judge feedback (including
@@ -406,18 +407,16 @@ class LLMStatementValidator(LLMClientStructured):
             judge_feedback: Non-empty list of feedback entries, each with
                 ``"id"``, ``"error"``, and optionally ``"suggestion"``.
             table_schemas: Pre-formatted schema string for the correction prompt.
-            aliases: Optional alias mapping (used in the correction prompt).
+            aliases: Optional alias mapping (unused, kept for interface compat).
 
         Returns:
-            (corrected_queries, usage_dict, error_strings)
+            (corrected_queries, usage_dict, error_strings, assistant_content)
+            assistant_content is the raw string from the LLM response (or None).
         """
         error_formatter = ErrorFormatter()
         message_builder = ValidatorMessageBuilder()
 
-        system_prompt = (
-            "You are an expert Data Engineer specialising in query correction. "
-            "Fix the listed queries exactly as instructed and return valid JSON."
-        )
+        system_prompt = "You are a helpful assistant."
 
         # Build feedback block using ErrorFormatter
         feedback_text = error_formatter.build_judge_feedback_block(
@@ -438,23 +437,30 @@ class LLMStatementValidator(LLMClientStructured):
             )
         queries_text = "\n\n".join(queries_text_parts)
 
-        correction_prompt = self._correction_prompt.update(
+        # Combine queries text and judge feedback into queries_with_errors
+        queries_with_errors_text = f"{queries_text}\n\n{feedback_text}"
+
+        # ---- Generate pydantic constraint text ----------------------------
+        pydantic_constraint = self.reform_prompt_constraint("").strip()
+
+        # ---- Render the full user message from the correction template ----
+        user_content = self._correction_prompt.update(
             table_schemas=table_schemas,
-            aliases=json.dumps(aliases or {}, indent=2),
-            queries_with_errors=feedback_text,
+            queries_with_errors=queries_with_errors_text,
+            pydantic_constraint=pydantic_constraint,
         )
 
+        # ---- Fixed-structure rebuild: stateless 2 blocks -------------------
         messages = message_builder.build(
-            system_prompt=system_prompt,
-            table_schemas=table_schemas,
-            queries_text=queries_text,
-            errors_text=self.reform_prompt_constraint(correction_prompt),
+            system_content=system_prompt,
+            user_content=user_content,
         )
 
-        corrected_queries, usage, errors, _assistant_message = (
+        corrected_queries, usage, errors, assistant_message = (
             self._correct_with_llm(messages, pending)
         )
-        return corrected_queries, usage, errors
+        assistant_content = assistant_message.get("content") if assistant_message else None
+        return corrected_queries, usage, errors, assistant_content
 
     def _split_valid_invalid(
         self, queries: list, dataframes: list, aliases: dict

@@ -6,46 +6,40 @@ Each agent has a defined message template that is rebuilt (not appended to)
 on each cycle, preventing context window overflow and ensuring clean, focused
 prompts.
 
-- ValidatorMessageBuilder: 4 blocks (system + schema context + queries + errors/feedback)
+- ValidatorMessageBuilder: 2 or 3 blocks (system + [assistant] + user)
 - ClientMessageBuilder: 2 blocks (system + generation prompt)
 - JudgeMessageBuilder: 2 blocks (system + single query evaluation)
 """
 
 
 class ValidatorMessageBuilder:
-    """Builds the fixed 4-block message array for correction LLM calls.
+    """Builds the fixed 2-message array for correction LLM calls.
 
-    The validator always sends exactly 4 messages:
-      1. System prompt (role: system)
-      2. Schema context (role: user) — table schemas and alias info
-      3. Generated queries (role: user) — the queries from the previous cycle
-      4. Validation errors/feedback (role: user) — errors and/or judge feedback
+    Each correction call sends exactly:
+      1. System message (role: system) — minimal generic instruction
+      2. User message (role: user) — full correction prompt with all context
+
+    Each call is stateless: no previous responses are threaded between cycles.
     """
 
     def build(
         self,
-        system_prompt: str,
-        table_schemas: str,
-        queries_text: str,
-        errors_text: str,
+        system_content: str,
+        user_content: str,
     ) -> list[dict]:
-        """Returns exactly 4 message blocks:
-        [system, schema_context, queries, errors_feedback]
+        """Returns exactly 2 message blocks: [system, user].
 
         Args:
-            system_prompt: The system-level instruction for the correction LLM.
-            table_schemas: Pre-formatted schema string with table definitions.
-            queries_text: Formatted text of the generated queries to correct.
-            errors_text: Formatted validation errors and/or judge feedback.
+            system_content: The minimal system instruction.
+            user_content: The full rendered correction prompt containing
+                fix rules, schemas, queries+errors, and pydantic constraint.
 
         Returns:
-            A list of exactly 4 message dicts with 'role' and 'content' keys.
+            A list of exactly 2 message dicts with 'role' and 'content' keys.
         """
         return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": table_schemas},
-            {"role": "user", "content": queries_text},
-            {"role": "user", "content": errors_text},
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
         ]
 
 

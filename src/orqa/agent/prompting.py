@@ -498,22 +498,17 @@ class PandasValidatorCorrectionPrompt(Prompt):
     that failed static validation and/or were rejected by the judge.
 
     Template variables:
-        {table_schemas}       — pre-formatted DatasetDescription text for all tables
-        {aliases}             — JSON string of alias → file mappings
-        {queries_with_errors} — formatted block listing each failing query + its errors
+        {table_schemas}        — pre-formatted DatasetDescription text for all tables
+        {queries_with_errors}  — formatted pending queries with their errors/feedback
+        {pydantic_constraint}  — JSON schema output format instructions
     """
     _prompt_path = PROMPT_PATH.joinpath("pandas_validator_correction.md")
 
-    def update(
-        self,
-        table_schemas: str,
-        aliases: str,
-        queries_with_errors: str,
-    ) -> str:
+    def update(self, table_schemas: str, queries_with_errors: str, pydantic_constraint: str) -> str:
         return self._update(
             table_schemas=table_schemas,
-            #aliases=aliases,
             queries_with_errors=queries_with_errors,
+            pydantic_constraint=pydantic_constraint,
         )
 
 
@@ -523,20 +518,15 @@ class SQLValidatorCorrectionPrompt(Prompt):
     that failed static validation and/or were rejected by the judge.
 
     Template variables:
-        {table_schemas}       — pre-formatted DatasetDescription text for all tables
-        {aliases}             — JSON string of alias → file mappings
-        {queries_with_errors} — formatted block listing each failing query + its errors
+        {table_schemas}        — pre-formatted DatasetDescription text for all tables
+        {queries_with_errors}  — formatted pending queries with their errors/feedback
+        {pydantic_constraint}  — JSON schema output format instructions
     """
     _prompt_path = PROMPT_PATH.joinpath("sql_validator_correction.md")
 
-    def update(
-        self,
-        table_schemas: str,
-        aliases: str,
-        queries_with_errors: str,
-    ) -> str:
+    def update(self, table_schemas: str, queries_with_errors: str, pydantic_constraint: str) -> str:
         return self._update(
             table_schemas=table_schemas,
-            #aliases=aliases,
             queries_with_errors=queries_with_errors,
+            pydantic_constraint=pydantic_constraint,
         )
