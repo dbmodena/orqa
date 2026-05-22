@@ -27,6 +27,7 @@ Could this exact question be asked about a completely different dataset?
 For each table, list columns it contributes to SELECT, WHERE, GROUP BY, or aggregations (join keys alone do not count).
 - Empty list → `approved: false`, criterion: `unjustified_table`.
 - "Needed for the join" is valid only if the question explicitly requires cross-table validation.
+- **When a table's only contribution is its join key**, do not recommend dropping it. Instead, identify what descriptive or filtering columns that table uniquely holds and instruct the question to be rewritten to surface a requirement that would justify pulling those columns into the output (e.g. adding a breakdown, a label, a filter, or an additional dimension that only that table can provide).
 
 ### Rejection Criteria
 | Criterion | Trigger |
@@ -54,8 +55,8 @@ Follow the provided JSON schema exactly.
 - `translated_response`: translated response into the detected target language.
 - `suggestion`: Empty string if approved. If rejected, one sentence per violated criterion, each prefixed with either **[FIX QUESTION]** or **[FIX QUERY]** to indicate where the change must be made.
   - Use **[FIX QUESTION]** when the criterion is caused by how the question is written (`vocabulary_mismatch`, `too_broad`, `unclear_result`, `trivial`).
-  - Use **[FIX QUERY]** when the criterion is caused by how the query is implemented (`partial_implementation`, `over_engineering`, `unjustified_table`, `disjointed_query`, `silent_filter_bias`).
-  - Use **[FIX QUESTION & QUERY]** only when both artifacts must change together to resolve the criterion.
+  - Use **[FIX QUERY]** when the criterion is caused by how the query is implemented (`partial_implementation`, `over_engineering`, `disjointed_query`, `silent_filter_bias`).
+  - Use **[FIX QUESTION & QUERY]** only when both artifacts must change together to resolve the criterion — this is **required** for `unjustified_table`: always propose enriching the question with a new requirement (e.g. a breakdown, label, filter, or dimension) that only the unjustified table can satisfy, so that its columns become genuinely needed. Never suggest removing the table.
 
 Queries:
 {data}

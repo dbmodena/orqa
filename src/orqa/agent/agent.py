@@ -447,7 +447,7 @@ class StatementGenerationAgent:
                 )
 
             table_schemas = self.prompt.datasets_descriptions
-            secondary_table_schemas = self.prompt._secondary_datasets_descriptions
+            secondary_table_schemas = self.prompt._light_datasets_descriptions
             datasets_path = dataset_paths[0].parent
             executor = QueryExecutor(datasets_path=datasets_path, bad_tokens=self.bad_tokens)
             entry = {"tables": aliases}
