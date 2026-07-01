@@ -257,15 +257,15 @@ class LLMClientStructured(LLMClient):
         structural = self._fix_structural_issues(escaped)
         return json.loads(structural)
 
-    def _normalize_response(self, json_data: Any, root_key: str = "queries") -> dict:
+    def _normalize_response(self, json_data: Any, root_key: str | None = "queries") -> Any:
         """
-        Coerce the top-level LLM response into ``{root_key: [...]}`` form.
+        Normalize the LLM response for Pydantic validation.
 
-        Handles three common LLM output shapes:
-        - A bare list  →  wrap directly
-        - A dict already containing ``root_key``  →  pass through
-        - A dict without ``root_key``  →  treat the whole dict as one item
+        If ``root_key`` is None, return the parsed JSON unchanged.
+        Otherwise, coerce the top-level JSON into ``{root_key: [...]}`` form.
         """
+        if root_key is None:
+            return json_data
         if isinstance(json_data, list):
             return {root_key: json_data}
         if isinstance(json_data, dict):
@@ -311,7 +311,7 @@ class LLMClientStructured(LLMClient):
     # Generic completion loop
     # ------------------------------------------------------------------
 
-    def complete(self, prompt: str, **kwargs) -> Any:
+    def complete(self, prompt: str, root_key: str | None = "queries", **kwargs) -> Any:
         """
         Make a structured completion request with automatic retry and error feedback.
 
@@ -348,7 +348,7 @@ class LLMClientStructured(LLMClient):
 
                 try:
                     json_data = self._repair_json(cleaned)
-                    json_data = self._normalize_response(json_data)
+                    json_data = self._normalize_response(json_data, root_key=root_key)
                     result = self.response_model.model_validate(json_data)
                     print(f"✓ Success on attempt {attempt + 1}")
                     return result.model_dump(), usage_total

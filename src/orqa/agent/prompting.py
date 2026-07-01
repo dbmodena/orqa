@@ -141,8 +141,8 @@ class LightDatasetDescription(Prompt):
             **{
                 "dataset_name": dataset_name,
                 "columns": columns,
-                "matches":matches
-                #"sample_data": sample_data,
+                "matches":matches,
+                "sample": sample_data,
             }
         )
 
@@ -380,7 +380,7 @@ class SingleTablePandasPrompt(Prompt):
         column_details: dict,
         sample_data,
         aliases,
-        matches,languages,columns,alias
+        languages,columns,alias
     ) -> str:
         query_dataset_prompt = DatasetDescription()
         light_query_dataset_prompt = LightDatasetDescription()
@@ -395,7 +395,7 @@ class SingleTablePandasPrompt(Prompt):
         light_dataset_description = light_query_dataset_prompt.update(
             alias,
             columns,
-            sample_data,matches
+            sample_data,""
         )
         secondary_query_dataset_prompt = DatasetDescription()
         secondary_query_dataset_description = secondary_query_dataset_prompt.update(
@@ -413,7 +413,7 @@ class SingleTablePandasPrompt(Prompt):
         self._secondary_datasets_descriptions += f"\n{secondary_query_dataset_description}"
         self._light_datasets_descriptions += f"\n{light_dataset_description}"
         #self.light_query_dataset_descriptions=
-        return self._update(table=self._datasets_descriptions, matches=matches, languages=languages, aliases=aliases)
+        return self._update(table=self._datasets_descriptions, languages=languages, alias=aliases)
 
 
 class SingleTableSQLPrompt(Prompt):
@@ -452,7 +452,7 @@ class SingleTableSQLPrompt(Prompt):
         column_details: dict,
         sample_data,
         aliases,
-        matches,languages,columns,alias
+        languages,columns,alias
     ) -> str:
         query_dataset_prompt = DatasetDescription()
         light_query_dataset_prompt = LightDatasetDescription()
@@ -467,7 +467,7 @@ class SingleTableSQLPrompt(Prompt):
         light_dataset_description = light_query_dataset_prompt.update(
             alias,
             columns,
-            sample_data,matches
+            sample_data,""
         )
         secondary_query_dataset_prompt = DatasetDescription()
         secondary_query_dataset_description = secondary_query_dataset_prompt.update(
@@ -485,7 +485,7 @@ class SingleTableSQLPrompt(Prompt):
         self._secondary_datasets_descriptions += f"\n{secondary_query_dataset_description}"
         self._light_datasets_descriptions += f"\n{light_dataset_description}"
         #self.light_query_dataset_descriptions=
-        return self._update(table=self._datasets_descriptions, matches=matches, languages=languages, aliases=aliases)
+        return self._update(table=self._datasets_descriptions, languages=languages, alias=aliases)
 
 
 # ---------------------------------------------------------------------------

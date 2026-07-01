@@ -52,9 +52,13 @@ querying:
   module: "structured_outputs"
   class: "QuerySet"
 
-table_analyzer: 
+table_analyzer:
   module: "structured_outputs"
-  class: "Result"
+  class: "TableAnalyses"
+
+query_planner:
+  module: "structured_outputs"
+  class: "QueryPlan"
 
 fallback_querying:
   module: "structured_outputs"

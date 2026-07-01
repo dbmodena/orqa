@@ -13,6 +13,8 @@ Instructions:
 
 - Avoid bullet points unless absolutely necessary.
 
+- If a `topic` is available, use it to anchor the interpretation and keep the narrative coherent.
+
 User Prompt:
 Question:
 {question}

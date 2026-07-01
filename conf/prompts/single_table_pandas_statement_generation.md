@@ -3,7 +3,6 @@ Generate 3 Python Pandas queries (easy → medium → hard) with business-focuse
 
 ### Inputs
 - **Detected languages** - The following datasets can have the following langauges `{languages}`
-- **Alias** — use only this in queries: `{alias}`
 - **Table** — schema, columns, types, metadata: `{table}`
 
 ### Question rules
@@ -13,6 +12,7 @@ Each question must read as if asked by a domain expert who understands the busin
 ✓ **Anchor to a domain** — the setting must be unambiguous from the question alone (e.g. corporate HR, e-commerce, hospital staffing). A reader must know *where* the data comes from without any schema knowledge.
 ✓ **Reflect the query faithfully** — every metric, filter, and grouping in the query must correspond to something explicitly asked in the question, and vice versa.
 ✓ **Be outcome-focused** — frame questions around a decision or insight a business user would act on, not around enumerating what data is available.
+✓ **Name a single topic** — every query must be centered on one clear business topic, and that topic must be exposed through the `topic` field.
 ✗ Never mention table names, column names, DataFrame names, or any Pandas/Python operations.
 ✗ Never produce a question that could apply unchanged to a different industry or dataset.
 
@@ -31,8 +31,16 @@ Each question must read as if asked by a domain expert who understands the busin
 ### Per-query output (conform to Pydantic schema)
 - `difficulty`: easy / medium / hard
 - `question`: natural language question
+- `topic`: one short business topic or theme that best summarizes the query's primary analytical concern.
+- `story`: one short business narrative describing the insight or storyline behind this query.
 - `query`: Python/Pandas code
 - `motivation`: 2–3 sentences in business language explaining (1) the analytical value, (2) which specific columns are used and why they matter. Must be distinct across the three queries.
 - `tables`: list of `alias, columns_used[]` couples  — minimal subset only
 - `translated_question`: translated question into the detected target language.
 - `detected_language`: detected language from the dataset.
+ - `question_keywords`: list of keywords describing the question intent (English or source language)
+ - `translated_question_keywords`: list of the above keywords translated into the detected language
+
+Notes:
+- Table-level `keywords` and `translated_keywords` are generated once per table during the table-analysis phase and must be stored under each table entry in `tables` (do not repeat table keywords on every query separately).
+- Each table entry in `tables` must include: `alias`, `columns_used[]`, `description`, `keywords`, and `translated_keywords`.

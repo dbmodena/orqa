@@ -443,23 +443,25 @@ class SQLValidator(QueryValidator):
     def _build_empty_result_feedback(self) -> str:
         if len(self.table_names) == 1:
             return "\n".join([
-                "Query returned 0 rows — filters may be too restrictive.",
+                "Query returned 0 rows — filters may be too restrictive or case/type mismatch.",
                 "Suggestions:",
-                "  1. Relax filters; verify actual column values.",
-                "  2. Normalize strings with LOWER(): WHERE LOWER(col) = 'value'",
-                "  3. Cast text numbers: WHERE TRY_CAST(col AS DOUBLE) > x",
-                "  4. Check date/range values exist.",
-                "Rewrite using LOWER() or TRY_CAST() where needed.",
+                "  1. Normalize strings: WHERE LOWER(col) = LOWER('value')",
+                "  2. Cast text numbers: WHERE TRY_CAST(col AS DOUBLE) > x",
+                "  3. Relax or remove filters one at a time to find which predicate eliminates all rows.",
+                "  4. Widen date ranges or numeric thresholds if they may exclude all data.",
+                "  5. Verify actual column values exist in the data before filtering.",
+                "Rewrite using LOWER() or TRY_CAST() where needed, then re-tighten filters.",
             ])
         return "\n".join([
-            "Query returned 0 rows — JOIN/filters may not match.",
+            "Query returned 0 rows — JOIN keys or filters may not match due to case/type mismatch.",
             "Suggestions:",
-            "  1. Normalize join keys: LOWER(t1.key) = LOWER(t2.key)",
-            "  2. Use LEFT JOIN to debug missing matches.",
-            "  3. Normalize filters: WHERE LOWER(col) = 'value'",
-            "  4. Cast text numbers: TRY_CAST(col AS DOUBLE)",
-            "  5. Check date/range values exist.",
-            "Rewrite using LOWER() or TRY_CAST() where needed.",
+            "  1. Normalize join keys: ON LOWER(t1.key) = LOWER(t2.key)",
+            "  2. Normalize string filters: WHERE LOWER(col) = LOWER('value')",
+            "  3. Cast text numbers: WHERE TRY_CAST(col AS DOUBLE) > x",
+            "  4. Switch to LEFT JOIN to diagnose which side produces no matches.",
+            "  5. Relax or remove WHERE filters one at a time to isolate the offending predicate.",
+            "  6. Widen date ranges or numeric thresholds if they may exclude all data.",
+            "Rewrite using LOWER() or TRY_CAST() where needed, then re-tighten filters.",
         ])
 
     def _get_language_name(self) -> str:

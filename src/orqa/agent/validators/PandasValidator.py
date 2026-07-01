@@ -578,20 +578,35 @@ class PandasValidator(QueryValidator):
         is_single = len(self.table_names) == 1
 
         if is_concat:
-            return (
-                "Empty result — one or more concat inputs are empty due to over-filtering.\n"
-                "Widen filters and normalise strings: df['col'].str.strip().str.lower()"
-            )
+            return "\n".join([
+                "Empty result — one or more concat inputs are empty due to over-filtering.",
+                "Suggestions:",
+                "  1. Normalize strings: df['col'].str.strip().str.lower() == value.lower()",
+                "  2. Relax or remove filters one at a time to find which branch is empty.",
+                "  3. Widen date ranges or numeric thresholds that may exclude all rows.",
+                "  4. Cast numeric strings: df['col'].astype(float) before comparing.",
+            ])
         if is_single:
-            return (
-                "Empty result — filter is too restrictive or matches no data.\n"
-                "Widen filter, normalise strings (.str.strip().str.lower()), or cast numerics (.astype(float))."
-            )
-        return (
-            "Empty result — merge/filter matched nothing, likely case or type mismatch on join keys.\n"
-            "  ✓ t1.assign(_k=t1['key'].str.lower()).merge(t2.assign(_k=t2['key'].str.lower()), on='_k')\n"
-            "Try a left/outer join to diagnose which side has no matches."
-        )
+            return "\n".join([
+                "Empty result — filter is too restrictive or no data matches.",
+                "Suggestions:",
+                "  1. Normalize strings: df['col'].str.strip().str.lower() == value.lower()",
+                "  2. Cast numeric strings: df['col'].astype(float) before comparing.",
+                "  3. Relax or remove filters one at a time to find the offending predicate.",
+                "  4. Widen date ranges or numeric thresholds that may exclude all rows.",
+            ])
+        return "\n".join([
+            "Empty result — merge or filter matched nothing, likely case or type mismatch on join keys.",
+            "Suggestions:",
+            "  1. Normalize join keys before merging:",
+            "     t1.assign(_k=t1['key'].str.strip().str.lower())",
+            "     .merge(t2.assign(_k=t2['key'].str.strip().str.lower()), on='_k')",
+            "  2. Normalize string filters: df[df['col'].str.lower() == value.lower()]",
+            "  3. Cast numeric strings: df['col'].astype(float) before comparing.",
+            "  4. Use how='left' to diagnose which side produces no matches.",
+            "  5. Relax or remove WHERE-equivalent filters one at a time to isolate the offending predicate.",
+            "  6. Widen date ranges or numeric thresholds that may exclude all rows.",
+        ])
 
     def _get_language_name(self) -> str:
         return 'Python'

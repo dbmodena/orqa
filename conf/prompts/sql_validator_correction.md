@@ -1,13 +1,12 @@
 ## SQLQueryCorrection
 You are an expert Data Engineer. Correct only the listed DuckDB SQL queries and questions so they are valid, executable, and faithful to their business purpose.
 
+### Output Format
+{pydantic_constraint}
+
 ### Available Tables
 {table_schemas}
 
-### Queries to Correct
-{queries_with_errors}
-
----
 
 ### Fix Rules
 
@@ -30,12 +29,11 @@ You are an expert Data Engineer. Correct only the listed DuckDB SQL queries and 
 - No schema internals (table/column names, SQL keywords).
 - `translated_question` must match the rewritten question when `detected_language` ≠ English.
 
----
+### Queries to Correct
+Each query is provided as a JSON object matching the expected output schema.
+Correct only the fields that are wrong. Return the same JSON structure.
+{queries_with_errors}
 
-### Always
-- Keep exact same IDs. Do not return uncorrected queries.
-- `difficulty` and `detected_language` are immutable.
-- Update `question`, `translated_question`, `motivation`, `tables` if the SQL changed.
 
-### Output
-{pydantic_constraint}
+
+

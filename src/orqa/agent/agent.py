@@ -416,7 +416,6 @@ class StatementGenerationAgent:
             tables = []
             base_prompt = ""
             self.prompt.reset()
-
             dataset_names = [p.name for p in dataset_paths]
             self._log.section(f"Multi-table generation — {', '.join(dataset_names)}  [{kind}]")
             inverted_aliases = {v: k for k, v in aliases.items()}
@@ -434,6 +433,10 @@ class StatementGenerationAgent:
                     "columns_provided": df.columns.tolist(),
                 })
                 tables.append(df)
+                columns_for_prompt=""
+                for col in df.columns:
+                    dtype = df[col].dtype
+                    columns_for_prompt+=f"\n- {col} ({dtype})"
                 base_prompt = self.prompt.update(
                     dataset_info["dataset_name"],
                     dataset_info["num_rows"],
@@ -443,7 +446,7 @@ class StatementGenerationAgent:
                     dataset_info["sample_data"],
                     json.dumps(aliases, indent=2),
                     match,
-                    self.languages,df.columns.values,inverted_aliases[dataset_info["dataset_name"]]
+                    self.languages,columns_for_prompt,inverted_aliases[dataset_info["dataset_name"]]
                 )
 
             table_schemas = self.prompt.datasets_descriptions
@@ -473,6 +476,9 @@ class StatementGenerationAgent:
                 aliases,
                 typology=kind,
                 involved_cols=involved_cols,
+                matches=match,
+                metadata=metadatas,
+                languages=self.languages,
             )
             total_time += time.perf_counter() - start
 
@@ -609,6 +615,11 @@ class StatementGenerationAgent:
             # Step 3 — Build final approved output
             # ----------------------------------------------------------------
             approved_query_ids = {str(er["id"]) for er in all_approved_executed}
+
+            # Build a lookup from normalised qid → executed result so we can
+            # recover the post-normalisation id (guaranteed clean by _normalise_ids).
+            approved_executed_by_id = {str(er["id"]): er for er in all_approved_executed}
+
             next_id = (
                 max(
                     (int(i) for i in original_ids if str(i).lstrip("-").isdigit()),
@@ -623,9 +634,21 @@ class StatementGenerationAgent:
                 if not q:
                     continue
                 q_copy = dict(q)
-                if qid not in original_ids:
+
+                # Always enforce a clean integer id. The original query dict
+                # (_original_query) is captured before _normalise_ids runs, so it
+                # can still carry a null/sentinel id. We prefer the post-normalisation
+                # id stored on the executed result; fall back to a fresh incremental id.
+                er = approved_executed_by_id.get(qid)
+                raw_id = er.get("id") if er else None
+                if isinstance(raw_id, int):
+                    q_copy["id"] = raw_id
+                elif isinstance(raw_id, str) and raw_id.lstrip("-").isdigit():
+                    q_copy["id"] = int(raw_id)
+                else:
                     q_copy["id"] = next_id
                     next_id += 1
+
                 approved_queries.append({
                     **q_copy,
                     "response": judge.all_judgments_by_id.get(qid, {}).get("response", ""),
@@ -757,6 +780,8 @@ class SingleTableStatementGenerationAgent:
                 [df],
                 alias,
                 typology=kind,
+                metadata=metadata,
+                languages=self.languages,
             )
             total_time += time.perf_counter() - start
 
@@ -894,6 +919,11 @@ class SingleTableStatementGenerationAgent:
             # ----------------------------------------------------------------
             approved_query_ids = {str(er["id"]) for er in all_approved_executed}
             expected_alias = list(alias.keys())[0]
+
+            # Build a lookup from normalised qid → executed result so we can
+            # recover the post-normalisation id (guaranteed clean by _normalise_ids).
+            approved_executed_by_id = {str(er["id"]): er for er in all_approved_executed}
+
             next_id = (
                 max(
                     (int(i) for i in original_ids if str(i).lstrip("-").isdigit()),
@@ -908,9 +938,21 @@ class SingleTableStatementGenerationAgent:
                 if not q:
                     continue
                 q_copy = dict(q)
-                if qid not in original_ids:
+
+                # Always enforce a clean integer id. The original query dict
+                # (_original_query) is captured before _normalise_ids runs, so it
+                # can still carry a null/sentinel id. We prefer the post-normalisation
+                # id stored on the executed result; fall back to a fresh incremental id.
+                er = approved_executed_by_id.get(qid)
+                raw_id = er.get("id") if er else None
+                if isinstance(raw_id, int):
+                    q_copy["id"] = raw_id
+                elif isinstance(raw_id, str) and raw_id.lstrip("-").isdigit():
+                    q_copy["id"] = int(raw_id)
+                else:
                     q_copy["id"] = next_id
                     next_id += 1
+
                 tables_field = q_copy.get("tables", [])
                 if len(tables_field) != 1 or tables_field[0].get("name") != expected_alias:
                     q_copy["tables"] = [{

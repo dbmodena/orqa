@@ -289,9 +289,15 @@ class LLMStatementValidator(LLMClientStructured):
                     messages=messages,
                     temperature=self.temperature,
                 )
+                for message in messages:
+                    print("="*50)
+                    print(f"{message['role']}")
+                    print(f"{message['content']}")
+                print("="*50)
                 _accumulate_usage(usage, response["usage"])
 
                 content = response["choices"][0]["message"]["content"]
+                print(response["choices"][0]["message"]["content"])
                 if content is None:
                     raise ValueError("LLM returned None content during correction.")
                 last_content = content
@@ -376,6 +382,11 @@ class LLMStatementValidator(LLMClientStructured):
         entries = [
             {
                 "query_id": q.get("id"),
+                "question": q.get("question", ""),
+                "translated_question": q.get("translated_question", ""),
+                "detected_language": q.get("detected_language", ""),
+                "code": q.get("code", ""),
+                "tables": q.get("tables"),
                 "errors": [errors_by_id.get(str(q.get("id")), "(no error)")],
                 "source_labels": ["Static validation error"],
             }
@@ -395,23 +406,19 @@ class LLMStatementValidator(LLMClientStructured):
         judge_feedback: list[dict],
         table_schemas: str,
     ) -> str:
-        """Render the user message for a judge-feedback correction cycle."""
+        """Render the user message for a judge-feedback correction cycle.
+
+        Delegates fully to build_judge_feedback_block, which renders each
+        query through format_per_query — identical structure to the static
+        path so the LLM sees complete context (detected_language, question,
+        translated_question, tables, code) alongside the judge error and
+        suggestion.
+        """
         error_formatter = ErrorFormatter()
 
-        queries_parts = []
-        for q in pending:
-            queries_parts.append(
-                f"--- Query ID: {q.get('id')}  "
-                f"(difficulty: {q.get('difficulty', 'unknown')}) ---\n"
-                f"Question: {q.get('question', '(no question)')}\n"
-                f"Code:\n{q.get('code', '(no code)')}"
-            )
-        queries_text = "\n\n".join(queries_parts)
-
-        feedback_text = error_formatter.build_judge_feedback_block(
+        queries_with_errors_text = error_formatter.build_judge_feedback_block(
             pending, judge_feedback
         )
-        queries_with_errors_text = f"{queries_text}\n\n{feedback_text}"
 
         return self._correction_prompt.update(
             table_schemas=table_schemas,

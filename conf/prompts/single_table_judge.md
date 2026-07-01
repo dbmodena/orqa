@@ -4,6 +4,8 @@ Assess whether each (question, query) pair is valid: the question must be specif
 enough to uniquely guide a user to the right data, and the query must faithfully
 implement exactly what the question asks — nothing more, nothing less.
 
+When writing the `response`, if a `topic` is available, use it to anchor the interpretation and keep the insight focused on the main business concern.
+
 ### Context
 The end user does NOT know the schema, table names, or column names. Each question must:
 - Be self-contained and interpretable without any knowledge of the underlying data.
@@ -51,7 +53,7 @@ Follow the provided JSON schema exactly.
 - `feedback`: If approved — why the result is meaningful and complexity is justified.
   If rejected — quote the exact vague terms or unjustified operations and name the criterion.
 - `approved`: true only if both checks pass and no criterion is triggered.
-- `response`: 3–4 sentence insight. Empty string if not approved.
+- `response`: 3–4 sentence business insight interpreting what the query result means for the user. Do not describe query quality, approval status, or the judge process. Empty string if not approved.
 - `translated_response`: translated response into the detected target language.
 
 Queries:

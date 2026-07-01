@@ -13,6 +13,106 @@ class DatasetAnalysisResult(BaseModel):
     )
 
 
+class TableAnalysis(BaseModel):
+    alias: str = Field(
+        ...,
+        description="Table alias as provided in the prompt."
+    )
+    table_description: str = Field(
+        ...,
+        description="A concise business description of the table and its role in the final query."
+    )
+    table_keywords: List[str] = Field(
+        default_factory=list,
+        description="Keywords that capture the most important concepts in this table (max 10)."
+    )
+
+    @field_validator("table_keywords")
+    @classmethod
+    def limit_table_keywords(cls, v: List[str]) -> List[str]:
+        """Limit table keywords to max 10 and remove duplicates"""
+        seen = set()
+        unique_keywords = []
+        for kw in v[:10]:  # Take only first 10
+            if kw not in seen:
+                seen.add(kw)
+                unique_keywords.append(kw)
+        return unique_keywords
+
+
+class TableAnalyses(BaseModel):
+    tables: List[TableAnalysis] = Field(
+        ...,
+        description="Analysis results for each table, including alias, description, and keywords."
+    )
+
+
+class QueryLink(BaseModel):
+    type: Literal["join", "union", "correlation", "other"] = Field(
+        ...,
+        description="The relationship type between tables for the query plan."
+    )
+    tables: List[str] = Field(
+        ...,
+        description="The aliases of the tables involved in this link."
+    )
+    description: str = Field(
+        ...,
+        description="A short description of how these tables are related and why the relationship is needed."
+    )
+    columns: List[str] = Field(
+        default_factory=list,
+        description="Columns that participate in the join or union relationship."
+    )
+
+
+class QueryPlan(BaseModel):
+    question: str = Field(
+        ...,
+        description="A business-focused natural language question that the final query should answer, phrased as a non-expert user would ask."
+    )
+    query_plan: str = Field(
+        ...,
+        description="A high-level plan describing how the query should be constructed."
+    )
+    question_keywords: List[str] = Field(
+        default_factory=list,
+        description="Keywords that capture the intent of the question (max 10)."
+    )
+    plan_keywords: List[str] = Field(
+        default_factory=list,
+        description="Keywords extracted from the query plan (max 10)."
+    )
+    table_links: List[QueryLink] = Field(
+        default_factory=list,
+        description="Descriptions of how tables should be joined or unioned in the final query."
+    )
+
+    @field_validator("question_keywords")
+    @classmethod
+    def limit_question_keywords(cls, v: List[str]) -> List[str]:
+        """Limit question keywords to max 10 and remove duplicates"""
+        seen = set()
+        unique_keywords = []
+        for kw in v[:10]:  # Take only first 10
+            if kw not in seen:
+                seen.add(kw)
+                unique_keywords.append(kw)
+        return unique_keywords
+
+    @field_validator("plan_keywords")
+    @classmethod
+    def limit_plan_keywords(cls, v: List[str]) -> List[str]:
+        """Limit plan keywords to max 10 and remove duplicates"""
+        seen = set()
+        unique_keywords = []
+        for kw in v[:10]:  # Take only first 10
+            if kw not in seen:
+                seen.add(kw)
+                unique_keywords.append(kw)
+        return unique_keywords
+
+
 class TaskUnion(BaseModel):
     """UNION task: columns that can be combined with similar columns from other datasets"""
 
@@ -152,6 +252,42 @@ class Table(BaseModel):
             "or the final output — omit anything not directly used."
         )
     )
+    description: str = Field(
+        default="",
+        description="A short business description for this table as used by the generated query."
+    )
+    keywords: List[str] = Field(
+        default_factory=list,
+        description="Keywords extracted from the table analysis that are relevant for this query (max 10)."
+    )
+    translated_keywords: List[str] = Field(
+        default_factory=list,
+        description="Translated keywords for this table in the detected language (max 10)."
+    )
+
+    @field_validator("keywords")
+    @classmethod
+    def limit_keywords(cls, v: List[str]) -> List[str]:
+        """Limit keywords to max 10 and remove duplicates"""
+        seen = set()
+        unique_keywords = []
+        for kw in v[:10]:  # Take only first 10
+            if kw not in seen:
+                seen.add(kw)
+                unique_keywords.append(kw)
+        return unique_keywords
+
+    @field_validator("translated_keywords")
+    @classmethod
+    def limit_translated_keywords(cls, v: List[str]) -> List[str]:
+        """Limit translated keywords to max 10 and remove duplicates"""
+        seen = set()
+        unique_keywords = []
+        for kw in v[:10]:  # Take only first 10
+            if kw not in seen:
+                seen.add(kw)
+                unique_keywords.append(kw)
+        return unique_keywords
 
 
 
@@ -168,14 +304,37 @@ class Query(BaseModel):
         ...,
         description=(
             "A natural language question that the code answers. "
+            "Must be phrased as an average, non-expert user would ask it, "
+            "using context clues and table keywords to indicate relevant tables without naming them. "
             "The question must describe the business or analytical intent, "
             "NOT the operations or technical implementation details."
+        )
+    )
+    difficulty: str = Field(
+        ...,
+        description=(
+            "The difficulty level of the query: easy, medium, or hard. "
+            "Reflects the complexity of the analytical operations and structure."
         )
     )
     translated_question:str = Field(
         ...,
         description=(
             "A natural language question that the code answers translated in the detected language."
+        )
+    )
+    topic: str = Field(
+        ...,
+        description=(
+            "A short business topic or theme that summarizes the query's primary analytical concern. "
+            "Use this field as a reference alongside keywords when planning, questioning, and interpreting results."
+        )
+    )
+    story: str = Field(
+        ...,
+        description=(
+            "A short narrative describing the business insight or storyline behind this query. "
+            "This should capture why the query matters and what story it tells about the data."
         )
     )
     detected_language : str = Field(
@@ -195,6 +354,42 @@ class Query(BaseModel):
         ...,
         description="List of tables involved in the query and why they're employed in the query."
     )
+    query_plan: str = Field(
+        default="",
+        description="A high-level plan describing how the query was constructed."
+    )
+    question_keywords: List[str] = Field(
+        default_factory=list,
+        description="Keywords associated with the question and query intent (max 10). Should include keywords from tables."
+    )
+    translated_question_keywords: List[str] = Field(
+        default_factory=list,
+        description="Translated keywords associated with the question in the detected language (max 10)."
+    )
+
+    @field_validator("question_keywords")
+    @classmethod
+    def limit_question_keywords_query(cls, v: List[str]) -> List[str]:
+        """Limit question keywords to max 10 and remove duplicates"""
+        seen = set()
+        unique_keywords = []
+        for kw in v[:10]:  # Take only first 10
+            if kw not in seen:
+                seen.add(kw)
+                unique_keywords.append(kw)
+        return unique_keywords
+
+    @field_validator("translated_question_keywords")
+    @classmethod
+    def limit_translated_question_keywords(cls, v: List[str]) -> List[str]:
+        """Limit translated question keywords to max 10 and remove duplicates"""
+        seen = set()
+        unique_keywords = []
+        for kw in v[:10]:  # Take only first 10
+            if kw not in seen:
+                seen.add(kw)
+                unique_keywords.append(kw)
+        return unique_keywords
 
 
 
@@ -209,89 +404,72 @@ class QuerySet(BaseModel):
     )
 
 
-
-
 class ViolatedCriterion(str, Enum):
     vocabulary_mismatch    = "vocabulary_mismatch"
     too_broad              = "too_broad"
     unclear_result         = "unclear_result"
     partial_implementation = "partial_implementation"
     over_engineering       = "over_engineering"
-    trivial                = "trivial"
     silent_filter_bias     = "silent_filter_bias"
+    unjustified_table      = "unjustified_table"
+    disjointed_query       = "disjointed_query"
 
 
 class Judgment(BaseModel):
-    id: int = Field(
-        ...,
-        description="Identifier of the query being evaluated, copied from input."
-    )
+    id: int = Field(..., description="Query identifier copied from input.")
     vagueness_check: str = Field(
         ...,
         description=(
-            "Result of the portability self-check. Must start with 'YES' or 'NO' "
-            "(whether the question could apply to a completely different dataset), "
-            "followed by one sentence quoting the specific term(s) that anchor or "
-            "fail to anchor the question to its domain."
-        )
+            "Start with YES or NO (does the question contain no domain-specific "
+            "anchoring term at all?), then one sentence quoting the term(s) that "
+            "anchor or fail to anchor it."
+        ),
     )
     requirements_check: str = Field(
         ...,
         description=(
-            "Bidirectional coverage check in plain language. List every analytical "
-            "requirement extracted from the question and whether it is implemented. "
-            "Then list every operation in the query and whether it maps to a stated "
-            "requirement. Flag anything MISSING or UNJUSTIFIED explicitly."
-        )
+            "Bidirectional coverage. List each core question requirement as "
+            "IMPLEMENTED or MISSING. List each query operation as JUSTIFIED or "
+            "UNJUSTIFIED. Flag only material gaps — omit minor stylistic observations."
+        ),
     )
     violated_criteria: List[ViolatedCriterion] = Field(
         default_factory=list,
         description=(
-            "Exhaustive list of rejection criteria triggered. Must be empty if approved is true."
-        )
+            "All triggered criteria. Empty if approved. Reject only when a flaw "
+            "is unambiguous and material."
+        ),
     )
     feedback: str = Field(
         ...,
         description=(
-            "If approved: explain what makes the result meaningful and why the "
-            "query complexity is justified. If rejected: quote the exact vague "
-            "terms or unjustified operations, referencing which criterion was violated."
-        )
+            "Approved: why the result is meaningful and complexity justified. "
+            "Rejected: quote the exact terms or operations that triggered each criterion."
+        ),
     )
     approved: bool = Field(
         ...,
-        description=(
-            "True only if both pre-flight checks pass and no rejection criterion "
-            "is triggered. Must be consistent with violated_criteria."
-        )
+        description="True only if all checks pass and violated_criteria is empty.",
     )
     response: str = Field(
         ...,
-        description=(
-            "Concise business-facing interpretation of the query result "
-            "(3–4 sentences, insights only). Empty string if approved is false."
-        )
+        description="3-4 sentence business insight. Empty string if not approved.",
     )
     translated_response: str = Field(
         ...,
-        description=(
-            "The response translated into the target language"
-        )
+        description="Response in the detected target language. Empty string if not approved.",
     )
     suggestions: str = Field(
         ...,
         description=(
-            "If approved: say that there are none since the query is fine."
-            "If rejected: provide suggestions to improve the query to resolve the problems."
-        )
+            "Empty string if approved. If rejected: one sentence per criterion "
+            "prefixed [FIX QUESTION], [FIX QUERY], or [FIX QUESTION & QUERY]."
+        ),
     )
 
 
 class Judgments(BaseModel):
     queries: List[Judgment] = Field(
         ...,
-        description=(
-            "One Judgment per (question, query) pair submitted for evaluation. "
-            "Order must match the input order."
-        )
+        description="One Judgment per input pair, in input order.",
     )

@@ -13,7 +13,7 @@ from .utils import load_datasets_metadata,load_normalized_datasets_metadata, loa
 from conf import OrQAConfig
 from dataclasses import dataclass, field
 
-_TIMEOUT_SECONDS_PER_5K_TOKENS: int = 5
+_TIMEOUT_SECONDS_PER_5K_TOKENS: int = 15
 _TOKENS_PER_BUCKET: int = 5_000
 
 
@@ -556,7 +556,13 @@ def _already_succeeded(results: dict, kind: str, idx: str) -> bool:
         if entry and entry.get("status") == "success":
             return True
     return False
-
+def _already_processed(results: dict, kind: str, idx: str) -> bool:
+    """Return True if any model already has a 'success' entry for this idx and kind."""
+    for model_data in results.values():
+        entry = model_data.get(kind, {}).get(idx)
+        if entry:
+            return True
+    return False
 
 def create_statements(
     config_path: Path,
@@ -583,12 +589,12 @@ def create_statements(
 
     # ── Cross-table generation ────────────────────────────────────────────────
     for idx, match in enumerate(all_matches):
-        if _is_single_table_candidate(match):
-            continue
-
+        #if _is_single_table_candidate(match):
+        #    continue
+        #continue
         str_idx = str(idx)
-        if _already_succeeded(results, kind, str_idx):
-            print(f"[{idx}] Already succeeded — skipping.")
+        if _already_processed(results, kind, str_idx):
+            print(f"[{idx}] Already processed — skipping.")
             continue
 
         dataset_paths, aliases, metadatas, involved_cols, dfs = _build_match_inputs(
@@ -642,8 +648,8 @@ def create_statements(
             aliases = {"Table_0": dataset_name}
             str_idx = f"st_{st_idx}"
 
-            if _already_succeeded(results, kind, str_idx):
-                print(f"[st_{st_idx}] Already succeeded — skipping.")
+            if _already_processed(results, kind, str_idx):
+                print(f"[st_{st_idx}] Already processed — skipping.")
                 continue
 
             start = __import__("time").perf_counter()
@@ -734,8 +740,8 @@ async def stream_generate_statements(
         cfg.statement_generation.bad_tokens,
     )
     for idx, match in enumerate(all_matches):
-        if idx < resume_from:
-            continue
+        #if idx < resume_from:
+        continue
 
         def _process_cross(match=match):
             dataset_paths, aliases, metadatas, involved_cols, dfs = _build_match_inputs(

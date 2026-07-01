@@ -3,209 +3,141 @@ ErrorFormatter
 ==============
 Formats validation errors for the correction LLM prompt.
 
-Responsibilities:
-- Per-query error formatting with source labels (static vs judge)
-- Token-limited output (300 tokens max per error message)
-- Recurring error pattern detection across queries
-- Error escalation with diagnostic context for repeated failures
-- Building the full correction prompt with recurring mistakes header
-
-Token approximation: words * 1.3 ≈ tokens
+Each query is rendered as a JSON object matching the Query Pydantic schema,
+followed by its errors/feedback — giving the LLM the exact structure it must
+return alongside the context it needs to fix it.
 """
 
+import json
 from collections import Counter
 
 
 class ErrorFormatter:
-    """Formats validation errors for the correction LLM prompt."""
-
-    MAX_ERROR_TOKENS = 300
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def truncate_to_tokens(self, message: str, max_tokens: int = 300) -> str:
-        """Truncate message to approximate token limit.
-
-        Uses word-count approximation: words * 1.3 ≈ tokens.
-        So max_tokens=300 allows roughly floor(300 / 1.3) ≈ 230 words.
-
-        Args:
-            message: The text to truncate.
-            max_tokens: Maximum token budget (default 300).
-
-        Returns:
-            The original message if within budget, or a truncated version
-            ending with '...' if it exceeds the limit.
-        """
-        if not message:
-            return message
-
-        words = message.split()
-        max_words = int(max_tokens / 1.3)
-
-        if len(words) <= max_words:
-            return message
-
-        truncated_words = words[:max_words]
-        return " ".join(truncated_words) + "..."
-
     def format_judge_feedback(
         self, query_id: int, error: str, suggestion: str = ""
     ) -> str:
-        """Format a single judge feedback entry with clear labeling.
-
-        Produces a string prefixed with ``[JUDGE FEEDBACK]`` that includes
-        both the error reason and the suggestion text.  The output is
-        truncated to MAX_ERROR_TOKENS.
-
-        Args:
-            query_id: The positional integer ID of the query.
-            error: The judge's rejection reason.
-            suggestion: The judge's suggestion for improvement.
-                        Defaults to empty string if not provided.
-
-        Returns:
-            A formatted, token-limited string clearly labeled as judge feedback.
-        """
         if suggestion is None:
             suggestion = ""
-
         parts = [f"[JUDGE FEEDBACK] Query #{query_id}:"]
         parts.append(f"  Error: {error}")
         parts.append(f"  Suggestion: {suggestion}")
-
-        combined = "\n".join(parts)
-        return self.truncate_to_tokens(combined, self.MAX_ERROR_TOKENS)
+        return "\n".join(parts)
 
     def format_static_error(self, query_id: int, error: str) -> str:
-        """Format a single static validation error with clear labeling.
-
-        Produces a string prefixed with ``[STATIC VALIDATION ERROR]`` that
-        includes the error message.  The output is truncated to
-        MAX_ERROR_TOKENS and is guaranteed to never contain the
-        ``[JUDGE FEEDBACK]`` label.
-
-        Args:
-            query_id: The positional integer ID of the query.
-            error: The static validation error message.
-
-        Returns:
-            A formatted, token-limited string clearly labeled as a static
-            validation error.
-        """
-        # Sanitize: ensure the output never contains the judge feedback label
         sanitized_error = error.replace("[JUDGE FEEDBACK]", "[JUDGE_FEEDBACK]")
-        combined = f"[STATIC VALIDATION ERROR] Query #{query_id}:\n  {sanitized_error}"
-        return self.truncate_to_tokens(combined, self.MAX_ERROR_TOKENS)
+        return f"[STATIC VALIDATION ERROR] Query #{query_id}:\n  {sanitized_error}"
 
     def build_judge_feedback_block(
         self, queries: list[dict], judge_feedback: list[dict]
     ) -> str:
-        """Build the complete feedback block for the judge-feedback-first cycle.
+        """Build a correction prompt block for judge-feedback entries."""
+        queries_by_id: dict = {str(q.get("id")): q for q in queries}
 
-        Iterates over judge feedback entries, formats each with
-        ``format_judge_feedback()``, and returns a combined block with a
-        clear section header.
+        entries: list[dict] = []
+        for fb in judge_feedback:
+            qid = str(fb.get("id"))
+            q = queries_by_id.get(qid, {})
 
-        Args:
-            queries: List of pending query dicts (used for context/ID mapping).
-            judge_feedback: List of feedback entries, each with:
-                - ``"id"`` (int): The query ID this feedback applies to.
-                - ``"error"`` (str): The judge's rejection reason.
-                - ``"suggestion"`` (str, optional): Improvement suggestion.
-                  Defaults to ``""`` if missing.
+            error = fb.get("error", "")
+            suggestion = fb.get("suggestion", "")
+            error_text = error
+            if suggestion:
+                error_text = f"{error}\n  Suggestion: {suggestion}"
 
-        Returns:
-            A formatted string block with a section header and all feedback
-            entries clearly labeled as ``[JUDGE FEEDBACK]``.
-        """
-        sections: list[str] = ["--- Judge Feedback ---"]
+            entries.append({
+                "query_id": qid,
+                "question": q.get("question", ""),
+                "translated_question": q.get("translated_question", ""),
+                "detected_language": q.get("detected_language", ""),
+                "code": q.get("code", ""),
+                "tables": q.get("tables"),
+                "errors": [error_text],
+                "source_labels": ["Judge Feedback"],
+            })
 
-        for entry in judge_feedback:
-            query_id = entry["id"]
-            error = entry["error"]
-            suggestion = entry.get("suggestion", "")
-            formatted = self.format_judge_feedback(query_id, error, suggestion)
-            sections.append(formatted)
-
-        return "\n\n".join(sections)
+        return self.build_correction_prompt(entries, [])
 
     def format_per_query(
-        self, query_id: int, errors: list[str], source_labels: list[str]
+        self,
+        query_id: int,
+        errors: list[str],
+        source_labels: list[str],
+        question: str = "",
+        translated_question: str = "",
+        detected_language: str = "",
+        code: str = "",
+        tables: list = None,
     ) -> str:
-        """Format errors for a single query with source labels,
-        truncating to MAX_ERROR_TOKENS.
+        """Format a single query as a JSON block (matching the Query Pydantic schema)
+        followed by its errors/feedback.
 
-        Args:
-            query_id: The positional integer ID of the query.
-            errors: List of error messages for this query.
-            source_labels: Corresponding source label for each error
-                           (e.g., "Static validation error" or "Judge feedback").
-
-        Returns:
-            A formatted string with labeled errors, truncated to token limit.
+        The JSON block gives the LLM the exact structure it must reproduce in its
+        response, with every field populated so it has full context to correct only
+        what is broken.
         """
-        if not errors:
-            return f"Query #{query_id}: No errors."
+        # --- Build the query JSON object (mirrors Query Pydantic schema) ---
+        # Normalise tables into the Table schema shape regardless of how they
+        # arrived (dict with name/reason/columns_involved, or plain string).
+        normalised_tables: list[dict] = []
+        for t in (tables or []):
+            if isinstance(t, dict):
+                normalised_tables.append({
+                    "name": t.get("name", ""),
+                    "reason": t.get("reason", ""),
+                    "columns_involved": t.get("columns_involved", []),
+                })
+            else:
+                normalised_tables.append({
+                    "name": str(t),
+                    "reason": "",
+                    "columns_involved": [],
+                })
 
-        parts: list[str] = []
+        query_obj = {
+            "question": question,
+            "translated_question": translated_question,
+            "detected_language": detected_language,
+            "code": code,
+            "tables": normalised_tables,
+        }
+        query_json = json.dumps(query_obj, ensure_ascii=False, indent=2)
+
+        # --- Build the error/feedback block --------------------------------
+        error_lines: list[str] = []
         for error, label in zip(errors, source_labels):
-            parts.append(f"[{label}] {error}")
+            error_lines.append(f"[{label}] {error}")
+        if not error_lines:
+            error_lines.append("[No errors]")
 
-        combined = f"Query #{query_id}:\n" + "\n".join(parts)
-        return self.truncate_to_tokens(combined, self.MAX_ERROR_TOKENS)
+        return (
+            f"--- Query #{query_id} ---\n"
+            f"{query_json}\n\n"
+            + "\n".join(error_lines)
+        )
 
     def detect_recurring(self, all_errors: list[str]) -> list[str]:
-        """Identify error patterns appearing 2+ times across queries.
-
-        Normalizes errors by stripping leading/trailing whitespace and
-        counts occurrences. Patterns appearing 2 or more times are returned
-        as rule strings.
-
-        Args:
-            all_errors: Flat list of all error messages across all queries.
-
-        Returns:
-            List of rule strings for recurring patterns. Empty if no pattern
-            appears more than once.
-        """
+        """Identify error patterns appearing 2+ times across queries."""
         if not all_errors:
             return []
-
-        # Normalize errors for comparison
         normalized = [e.strip() for e in all_errors if e.strip()]
         counts = Counter(normalized)
-
-        recurring = []
-        for pattern, count in counts.items():
-            if count >= 2:
-                recurring.append(
-                    f"Recurring issue ({count} occurrences): {pattern}"
-                )
-
-        return recurring
+        return [
+            f"Recurring issue ({count} occurrences): {pattern}"
+            for pattern, count in counts.items()
+            if count >= 2
+        ]
 
     def build_correction_prompt(
         self, queries_with_errors: list, recurring: list[str]
     ) -> str:
-        """Build the full correction prompt with recurring mistakes header.
-
-        Args:
-            queries_with_errors: List of dicts, each with:
-                - "query_id" (int): The query's positional ID
-                - "errors" (list[str]): Error messages for this query
-                - "source_labels" (list[str]): Source label per error
-            recurring: List of recurring pattern rule strings (from detect_recurring).
-
-        Returns:
-            The complete correction prompt text with optional recurring
-            mistakes header followed by per-query error sections.
-        """
+        """Build the full correction prompt with an optional recurring-mistakes header."""
         sections: list[str] = []
 
-        # Recurring mistakes header
         if recurring:
             header_lines = ["=== RECURRING MISTAKES ==="]
             header_lines.append(
@@ -217,52 +149,39 @@ class ErrorFormatter:
             header_lines.append("")
             sections.append("\n".join(header_lines))
 
-        # Per-query error sections
         sections.append("=== PER-QUERY ERRORS ===")
         for entry in queries_with_errors:
-            query_id = entry["query_id"]
-            errors = entry["errors"]
-            source_labels = entry["source_labels"]
-            formatted = self.format_per_query(query_id, errors, source_labels)
+            formatted = self.format_per_query(
+                query_id=entry["query_id"],
+                errors=entry["errors"],
+                source_labels=entry["source_labels"],
+                question=entry.get("question", ""),
+                translated_question=entry.get("translated_question", ""),
+                detected_language=entry.get("detected_language", ""),
+                code=entry.get("code", ""),
+                tables=entry.get("tables"),
+            )
             sections.append(formatted)
 
         return "\n\n".join(sections)
 
     def escalate_error(self, error: str, context: dict) -> str:
-        """Add diagnostic context for errors repeating across attempts.
-
-        When the same error appears in consecutive correction attempts,
-        this method augments the error message with additional diagnostic
-        information to help the LLM produce a different fix.
-
-        Args:
-            error: The original error message.
-            context: Diagnostic context dict, may contain:
-                - "columns" (list[str]): Available column names
-                - "shape" (tuple): DataFrame shape (rows, cols)
-                - "dtypes" (dict): Column name → dtype mapping
-
-        Returns:
-            The error message augmented with diagnostic context.
-        """
+        """Add diagnostic context for errors repeating across attempts."""
         parts = [error, "", "--- ESCALATED: Additional diagnostic context ---"]
 
         if "columns" in context:
-            cols = context["columns"]
-            parts.append(f"Available columns: {cols}")
-
+            parts.append(f"Available columns: {context['columns']}")
         if "shape" in context:
             shape = context["shape"]
             parts.append(f"DataFrame shape: {shape[0]} rows × {shape[1]} columns")
-
         if "dtypes" in context:
-            dtypes = context["dtypes"]
-            dtype_str = ", ".join(f"{col}: {dt}" for col, dt in dtypes.items())
+            dtype_str = ", ".join(
+                f"{col}: {dt}" for col, dt in context["dtypes"].items()
+            )
             parts.append(f"Column dtypes: {dtype_str}")
 
         parts.append(
             "This error has persisted across attempts. "
             "Please try a fundamentally different approach."
         )
-
         return "\n".join(parts)

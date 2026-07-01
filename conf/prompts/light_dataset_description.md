@@ -1,11 +1,12 @@
-### Dataset Description
-  - Name: {dataset_name}
---- 
-
-columns: 
+### {dataset_name} Description
+columns and dtype: 
 {columns}
 
-matches between tables: 
+
+join union/matches:
 {matches}
 
+
+{dataset_name} sample
+{sample}
 ---

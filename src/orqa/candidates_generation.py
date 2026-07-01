@@ -19,6 +19,7 @@ import random
 import time
 import ctypes
 from pathlib import Path
+from .data_cleaning import has_unsafe_id, purge_illegal_datasets
 
 try:
     import resource
@@ -57,6 +58,12 @@ def has_unsafe_sql_chars(dataset_id: str) -> bool:
     if dataset_id and dataset_id[0].isdigit():
         return True
     return False
+
+
+
+
+
+
 
 # NOTE: this implementation of BLEND is currently based on DuckDB, and
 # in some cases it needs to fetch a lot of data. We try to limit the memory
@@ -454,7 +461,7 @@ def pipeline(cfg: OrQAConfig):
     agent = CandidatesDiscoveryAgent(litellm_config_path)
 
     tokens_budget = 1_000_000
-    n_datasets_limit = 400#1000
+    n_datasets_limit = 100#1000
 
     _format = cfg.datasets_format
 
@@ -465,6 +472,11 @@ def pipeline(cfg: OrQAConfig):
         xash_size=cfg.blend_opts.xash_size,
         max_cell_length=cfg.blend_opts.max_cell_length,
     )
+    # ── Purge illegal dataset IDs from the index before querying ──────────
+    print(" PURGING ILLEGAL DATASET IDS FROM INDEX ".center(PRINT_PAD, "="))
+    purge_illegal_datasets(cfg.indexing.index_database_path, dry_run=False)
+    print("=" * PRINT_PAD + "\n")
+    # ──────────────────────────────────────────────────────────────────────
 
     top_k = cfg.candidates_discovery.top_k_results_per_task
 
@@ -508,8 +520,8 @@ def pipeline(cfg: OrQAConfig):
             continue
 
         # we skip (temporary)
-        if has_unsafe_sql_chars(dataset_id):
-            print(f"Skipping dataset with unsafe SQL chars in name: {dataset_id}")
+        if has_unsafe_id(dataset_id):
+            print(f"Skipping dataset with unsafe ID: {dataset_id}")
             visited.add(resource_id)
             continue
         # if we run out of budget, stop generation

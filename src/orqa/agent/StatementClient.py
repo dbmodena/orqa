@@ -1,37 +1,26 @@
 import importlib
 import json
 import os
+import re
 import time
+from io import StringIO
 from pathlib import Path
 from typing import Any, Optional, Type
 
-import yaml
 import litellm
+import pandas as pd
+import polars as pl
+import yaml
 from litellm import completion, Router
 from pydantic import BaseModel, ValidationError
 
-
-import pandas as pd
-from .prompting import DatasetDescription, _load_prompt
-from pathlib import Path
-from .structured_outputs import QuerySet, Query
-import duckdb
-
-
-import pandas as pd
-import polars as pl
-from typing import List, Dict, Tuple, Union, Any
-
-import sys
-from io import StringIO
-
-import pandas as pd
-from pathlib import Path
-import duckdb
 from .LLMClientStructured import LLMClientStructured
 from .alias_substitution import AliasSubstitution
 from .message_builder import ClientMessageBuilder
-import re
+from .prompting import DatasetDescription, _load_prompt
+from .structured_outputs import QuerySet, Query, TableAnalyses, QueryPlan
+import duckdb
+import sys
 
 
 class LLMClientStatementGenerator(LLMClientStructured):
@@ -46,7 +35,127 @@ class LLMClientStatementGenerator(LLMClientStructured):
 
     def __init__(self, config_path: Path):
         super().__init__(config_path, "querying")
+        self.table_analyzer_model = self._load_pydantic_response_model("table_analyzer")
+        self.query_planner_model = self._load_pydantic_response_model("query_planner")
         self.fallback_response_model = self._load_pydantic_response_model("fallback_querying")
+
+    def _response_root_key(self, model_name: str) -> str | None:
+        if model_name == "table_analyzer":
+            return "tables"
+        if model_name == "query_planner":
+            return None
+        return "queries"
+
+    def _complete_with_model(self, prompt: str, response_model_name: str, **kwargs) -> Any:
+        original_model = self.response_model
+        self.response_model = self._load_pydantic_response_model(response_model_name)
+        try:
+            return super().complete(
+                prompt,
+                root_key=self._response_root_key(response_model_name),
+                **kwargs,
+            )
+        finally:
+            self.response_model = original_model
+
+    def _build_table_analysis_prompt(
+        self,
+        alias: str,
+        metadata: dict,
+        columns: list[str],
+        sample: list[dict],
+        languages: list[str],
+    ) -> str:
+        return (
+            "Analyze a single table and return a JSON object matching the provided schema. "
+            "Do not include any explanatory text outside the JSON.\n\n"
+            "IMPORTANT INSTRUCTIONS:\n"
+            "- Extract up to 10 keywords (max) that best capture the essential concepts and domain concepts in this table.\n"
+            "- Keywords should be meaningful terms that a domain expert would use to describe what this table contains.\n"
+            "- Keywords are crucial for helping non-expert users understand what data this table contains.\n"
+            f"\n\nAlias: {alias}"
+            f"\nDetected languages: {json.dumps(languages, ensure_ascii=False)}"
+            f"\nColumns:\n{json.dumps(columns, indent=2, ensure_ascii=False)}"
+            f"\n\nMetadata:\n{json.dumps(metadata, indent=2, ensure_ascii=False, default=str)}"
+            f"\n\nSample rows:\n{json.dumps(sample, indent=2, ensure_ascii=False, default=str)}"
+        )
+
+    def _run_table_analysis(
+        self,
+        alias: str,
+        metadata: dict,
+        columns: list[str],
+        sample: list[dict],
+        languages: list[str],
+    ) -> dict:
+        prompt = self._build_table_analysis_prompt(alias, metadata, columns, sample, languages)
+        result, _ = self._complete_with_model(prompt, "table_analyzer")
+        tables = result.get("tables", [])
+        if tables:
+            return tables[0]
+        return {"alias": alias, "table_description": "", "table_keywords": []}
+
+    def _build_query_planner_prompt(
+        self,
+        analyses: list[dict],
+        aliases: dict,
+        matches: Any,
+        languages: list[str],
+    ) -> str:
+        return (
+            "Use the following per-table analysis results to produce a query plan, "
+            "a business question, and keyword-level guidance. Return only valid JSON.\n\n"
+            "IMPORTANT INSTRUCTIONS FOR QUESTION GENERATION:\n"
+            "- Generate a question as if asked by an AVERAGE, NON-EXPERT USER who:\n"
+            "  * Does NOT know table or column names\n"
+            "  * Has general business knowledge\n"
+            "  * Phrases questions naturally and conversationally\n"
+            "- USE TABLE KEYWORDS STRATEGICALLY: incorporate the keywords from each table's analysis "
+            "to help pinpoint to the correct tables without naming them directly.\n"
+            "  Example: if a table has keywords 'sales', 'revenue', 'orders', use them naturally in the question.\n"
+            "- Generate up to 10 keywords (max) for the question that capture its intent and incorporate table keywords.\n"
+            "- The question should read naturally and allow someone to infer which tables are being queried.\n"
+            f"\n\nAliases: {json.dumps(list(aliases.keys()), indent=2, ensure_ascii=False)}"
+            f"\n\nTable analysis:\n{json.dumps({'tables': analyses}, indent=2, ensure_ascii=False, default=str)}"
+            f"\n\nMatch requirements:\n{json.dumps(matches, indent=2, ensure_ascii=False, default=str)}"
+            f"\n\nDetected languages: {json.dumps(languages, ensure_ascii=False)}"
+        )
+
+    def _run_query_planner(
+        self,
+        analyses: list[dict],
+        aliases: dict,
+        matches: Any,
+        languages: list[str],
+    ) -> dict:
+        prompt = self._build_query_planner_prompt(analyses, aliases, matches, languages)
+        result, _ = self._complete_with_model(prompt, "query_planner")
+        return result
+
+    def _enrich_prompt_for_final_generation(
+        self,
+        prompt: str,
+        table_analyses: list[dict],
+        planner: dict,
+    ) -> str:
+        return (
+            f"{prompt}\n\n"
+            "### TABLE-LEVEL ANALYSIS\n"
+            f"{json.dumps({'tables': table_analyses}, indent=2, ensure_ascii=False, default=str)}\n\n"
+            "### QUERY PLANNING GUIDANCE\n"
+            f"{json.dumps(planner, indent=2, ensure_ascii=False, default=str)}\n\n"
+            "### KEYWORD CONSTRAINTS\n"
+            "- Each table must provide up to 10 keywords (max) that capture its domain concepts.\n"
+            "- Each question must include up to 10 keywords (max) that incorporate table keywords when relevant.\n"
+            "- Keywords help non-expert users understand which tables the query touches.\n\n"
+            "When generating the final output, include the following fields in each query:\n"
+            "- query_plan\n"
+            "- question_keywords (max 10, should include relevant table keywords)\n"
+            "- translated_question_keywords (max 10)\n"
+            "- For each table, description, keywords (max 10), and translated_keywords (max 10) copied from the table analysis\n"
+            "- Ensure the question is phrased as a non-expert user would ask it, using table keywords as hints.\n"
+            "Return only valid JSON matching the expected schema."
+        )
 
     # ------------------------------------------------------------------
     # JSON repair utilities
@@ -263,6 +372,9 @@ class LLMClientStatementGenerator(LLMClientStructured):
         table_names,
         typology: str = "SQL",
         involved_cols=None,
+        matches=None,
+        metadata=None,
+        languages=None,
     ) -> Any:
         """
         Generate the initial set of queries from *prompt*, then validate that
@@ -282,12 +394,41 @@ class LLMClientStatementGenerator(LLMClientStructured):
         all_errors: list[str] = []
         all_aliases: list[str] = list(table_names.keys())  # e.g. ["Table_0", "Table_1"]
 
-        # Optionally enrich the prompt with suffix-constraint context
-        enriched_prompt = prompt
-        if involved_cols is not None and typology == "PANDAS":
-            enriched_prompt = self.add_suffix_constraint(
-                prompt, dataframes, list(table_names.keys()), involved_cols
+        # Build analysis context for each table before generating the final queries.
+        metadata_list = metadata or []
+        if isinstance(metadata_list, dict):
+            metadata_list = [metadata_list.get(alias, {}) for alias in table_names]
+
+        detected_languages = languages or []
+        if isinstance(detected_languages, str):
+            detected_languages = [detected_languages]
+
+        table_analyses = []
+        for idx, (alias, _) in enumerate(table_names.items()):
+            df = dataframes[idx]
+            table_metadata = metadata_list[idx] if idx < len(metadata_list) else {}
+            table_analyses.append(
+                self._run_table_analysis(
+                    alias=alias,
+                    metadata=table_metadata,
+                    columns=[f"{col} ({df[col].dtype})" for col in df.columns],
+                    sample=df.head(3).to_dict(orient="records"),
+                    languages=detected_languages,
+                )
             )
+
+        plan = self._run_query_planner(
+            table_analyses,
+            table_names,
+            matches=matches,
+            languages=detected_languages,
+        )
+
+        enriched_prompt = self._enrich_prompt_for_final_generation(
+            prompt,
+            table_analyses,
+            plan,
+        )
 
         initial_message = self.reform_prompt_constraint(enriched_prompt)
 
@@ -325,6 +466,22 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 result = self.response_model.model_validate(json_data)
                 result_dict = result.model_dump()
                 result_dict = self.clean_query_set(result_dict, table_names)
+
+                # Merge table-level analysis into each generated query's tables[] so
+                # keywords/descriptions are preserved centrally (not duplicated per-query).
+                analyses_map = {t.get('alias') or t.get('name'): t for t in table_analyses}
+                for q in result_dict.get('queries', []):
+                    if not isinstance(q.get('tables'), list):
+                        continue
+                    for tbl in q['tables']:
+                        tbl_name = tbl.get('name') or tbl.get('alias')
+                        analysis = analyses_map.get(tbl_name, {})
+                        if 'description' not in tbl or not tbl.get('description'):
+                            tbl['description'] = analysis.get('table_description') or analysis.get('description', tbl.get('description', ''))
+                        if 'keywords' not in tbl or not tbl.get('keywords'):
+                            tbl['keywords'] = analysis.get('table_keywords') or analysis.get('keywords', tbl.get('keywords', []))
+                        if 'translated_keywords' not in tbl:
+                            tbl['translated_keywords'] = analysis.get('translated_keywords', [])
 
                 # Successfully parsed — break out and move to alias validation
                 break
@@ -424,6 +581,21 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 retried = self.response_model.model_validate(json_data)
                 retried_dict = self.clean_query_set(retried.model_dump(), table_names)
 
+                # Merge table-level analysis into retried results as well
+                analyses_map = {t.get('alias') or t.get('name'): t for t in table_analyses}
+                for q in retried_dict.get('queries', []):
+                    if not isinstance(q.get('tables'), list):
+                        continue
+                    for tbl in q['tables']:
+                        tbl_name = tbl.get('name') or tbl.get('alias')
+                        analysis = analyses_map.get(tbl_name, {})
+                        if 'description' not in tbl or not tbl.get('description'):
+                            tbl['description'] = analysis.get('table_description') or analysis.get('description', tbl.get('description', ''))
+                        if 'keywords' not in tbl or not tbl.get('keywords'):
+                            tbl['keywords'] = analysis.get('table_keywords') or analysis.get('keywords', tbl.get('keywords', []))
+                        if 'translated_keywords' not in tbl:
+                            tbl['translated_keywords'] = analysis.get('translated_keywords', [])
+
                 # Re-partition: some may now be fixed, others still broken
                 newly_good, bad_queries = self._partition_queries(
                     retried_dict.get("queries", []), all_aliases
@@ -450,15 +622,17 @@ class LLMClientStatementGenerator(LLMClientStructured):
             self.config["model"],
         )
 
-    def _normalize_response(self, json_data):
-        if isinstance(json_data, list):
-            return {"queries": json_data}
-        if isinstance(json_data, dict):
-            if "queries" not in json_data:
-                if len(json_data) > 0:
-                    return {"queries": [json_data]}
+    def _normalize_response(self, json_data: Any, root_key: str | None = "queries") -> Any:
+        if root_key is None:
             return json_data
-        return {"queries": [json_data]}
+        if isinstance(json_data, list):
+            return {root_key: json_data}
+        if isinstance(json_data, dict):
+            if root_key not in json_data:
+                if len(json_data) > 0:
+                    return {root_key: [json_data]}
+            return json_data
+        return {root_key: [json_data]}
 
     def add_suffix_constraint(self, prompt, dataframes, table_names, involved_cols):
         from itertools import combinations
