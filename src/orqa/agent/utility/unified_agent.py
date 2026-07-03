@@ -238,6 +238,10 @@ class UnifiedStatementGenerationAgent:
         self._validator = validator or LLMStatementValidator(config_path, kind)
 
         self._log = PipelineLogger()
+        self._log.tabpfn_gate(
+            allow_tabpfn=self._gate_ctx.allow_tabpfn,
+            api_key_present=self._gate_ctx.tabpfn_api_key_present,
+        )
 
     # ------------------------------------------------------------------
     # Backward-compatible adapter methods (task 11.4)
