@@ -3,11 +3,14 @@ from .. import utils
 import time
 import json
 import uuid
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from .TaskProposer import TaskProposerLLMClient
 from .StatementClient import LLMClientStatementGenerator
 from .StatementValidator import LLMStatementValidator
 from .StatementJudge import LLMStatementJudge
 from .LLMClient import LLMClient
+from .utility.budget_guard import BudgetGuard
 from .prompting import (
     CandidatesDiscoveryPrompt,
     JudgementResponseGenerationPrompt,
@@ -23,6 +26,14 @@ from .PipelineLogger import PipelineLogger
 import pandas as pd
 import copy
 import re
+
+
+logger = logging.getLogger(__name__)
+
+# Default bound on the number of concurrent judging calls (Requirement 15.1).
+# Kept small so the LLM backend is not overwhelmed while still removing the
+# serial one-at-a-time bottleneck. Configurable per JudgementResponseAgent.
+JUDGE_CONCURRENCY = 6
 
 
 class CandidatesDiscoveryAgent:
@@ -78,9 +89,9 @@ class CandidatesDiscoveryAgent:
                 "token_usage": tokens,
             }
         except FileNotFoundError as e:
-            print(f"Error: '{e}'")
+            logger.error("Dataset not found: %s", e)
         except Exception as e:
-            print(f"\n❌ Analysis failed: {e}")
+            logger.error("Analysis failed: %s", e)
             raise e
 
 
@@ -92,22 +103,33 @@ class JudgementResponseAgent:
         executor,
         entry: dict,
         max_tokens: int = 2000,
-        single_table: bool = False
+        single_table: bool = False,
+        judge_concurrency: int = JUDGE_CONCURRENCY,
     ):
         self.config_path = config_path
-        self.prompt = (
-            SingleTableJudgementResponseGenerationPrompt()
+        self.single_table = single_table
+        # Prompt factory (Requirement 15.3): each concurrent judging call builds
+        # its OWN prompt instance rather than sharing one mutable prompt object,
+        # so no mutable prompt/message state is shared across worker threads.
+        self._prompt_factory = (
+            SingleTableJudgementResponseGenerationPrompt
             if single_table
-            else JudgementResponseGenerationPrompt()
+            else JudgementResponseGenerationPrompt
         )
+        # Kept for backward compatibility with callers that read `self.prompt`.
+        self.prompt = self._prompt_factory()
         self._client = LLMStatementJudge(config_path)
         self.max_tokens = max_tokens
         self.executor = executor
         self.entry = entry
         self.kind = kind
+        # Bound the worker pool (Requirement 15.1). Never below 1.
+        self.judge_concurrency = max(1, int(judge_concurrency))
         self._rejection_counts: dict[str, int] = {}
         self._accumulated_feedback: dict[str, list[str]] = {}
         self.all_judgments_by_id: dict[str, dict] = {}
+        # Judgments keyed by the opaque echoed client_id (Requirement 15.2).
+        self.all_judgments_by_client_id: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -130,16 +152,22 @@ class JudgementResponseAgent:
                 "all_done": False,
             }
 
-        # ── Judge one query at a time to guarantee 1-to-1 id correspondence ──
-        # The Judgment Pydantic model uses an integer id field. When all queries
-        # are sent in a single batch the LLM assigns sequential ints (1, 2, 3…)
-        # that have no relation to the real query ids (which may be auto_* UUIDs).
-        # Judging individually avoids any positional ambiguity: we always send
-        # id=1 to the LLM and remap the returned judgment back to the real qid.
+        # ── Judge concurrently, keyed by the opaque client_id ──
+        # (Requirement 15.1) Judging runs on a bounded worker pool instead of
+        # serially, removing the one-at-a-time bottleneck.
+        # (Requirement 15.2) Each judgment is mapped back to its query by the
+        # query's client_id — never by positional/completion order, so results
+        # that complete out-of-order are still attributed to the right query.
+        # (Requirement 15.3) Every judging call rebuilds its own messages via a
+        # fresh prompt instance; no mutable prompt/message state is shared.
+        self.all_judgments_by_client_id = self._judge_all_concurrent(executed)
+
+        # Re-key by the (normalised, unique) query id for downstream consumers
+        # that still look judgments up by id.
         for er in executed:
-            judgment = self._judge_one(er)
-            qid = str(er["id"])
-            self.all_judgments_by_id[qid] = judgment
+            self.all_judgments_by_id[str(er["id"])] = (
+                self.all_judgments_by_client_id.get(self._client_id_of(er), {})
+            )
 
         approved = [
             er for er in executed
@@ -251,6 +279,9 @@ class JudgementResponseAgent:
                 df_result = self.executor.execute(self.entry, sanitized, self.kind).head(8)
                 executed.append({
                     "id": qid,
+                    # Preserve the opaque echoed client_id (task 8) so judging can
+                    # map judgments back by client_id rather than position (15.2).
+                    "client_id": query.get("client_id"),
                     "code": sanitized.get("code", ""),
                     "question": sanitized.get("question", ""),
                     "translated_question": sanitized.get("translated_question", ""),
@@ -342,6 +373,53 @@ class JudgementResponseAgent:
             })
         return feedback
 
+    def _client_id_of(self, executed_result: dict) -> str:
+        """Return the opaque client_id used to key a query's judgment.
+
+        Falls back to the (already-normalised, unique) query id when a query has
+        no ``client_id`` — e.g. legacy callers that never ran the task-8
+        generator. Because ids are made unique by ``_normalise_ids``, this
+        fallback still yields a stable, collision-free key (Requirement 15.2).
+        """
+        cid = executed_result.get("client_id")
+        if cid is not None and str(cid).strip():
+            return str(cid)
+        return str(executed_result.get("id"))
+
+    def _judge_all_concurrent(self, executed: list) -> dict:
+        """Judge executed queries concurrently, returning ``{client_id: judgment}``.
+
+        Requirement 15.1: judging runs on a bounded ``ThreadPoolExecutor`` whose
+        worker count never exceeds ``self.judge_concurrency`` (nor the number of
+        queries). Requirement 15.2: each future is tagged with its query's
+        ``client_id`` up front, so the returned mapping is keyed by client_id and
+        is unaffected by the order in which futures complete. Requirement 15.3:
+        each task calls ``_judge_one``, which rebuilds its own prompt and message
+        array — no mutable prompt/message state is shared across workers.
+        """
+        judgments_by_client_id: dict = {}
+        if not executed:
+            return judgments_by_client_id
+
+        max_workers = max(1, min(self.judge_concurrency, len(executed)))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_client_id: dict = {}
+            for er in executed:
+                client_id = self._client_id_of(er)
+                future = pool.submit(self._judge_one, er)
+                future_to_client_id[future] = client_id
+
+            for future in as_completed(future_to_client_id):
+                client_id = future_to_client_id[future]
+                try:
+                    judgments_by_client_id[client_id] = future.result()
+                except Exception as exc:  # noqa: BLE001 — isolate per-query failures
+                    logger.warning(
+                        "Judging failed for client_id=%s: %s", client_id, exc
+                    )
+                    judgments_by_client_id[client_id] = {}
+        return judgments_by_client_id
+
     def _judge_one(self, executed_result: dict) -> dict:
         """
         Judge a single executed query in isolation.
@@ -350,20 +428,25 @@ class JudgementResponseAgent:
         any mismatch between the LLM-assigned integer and the real query id
         (which may be an auto_* UUID string), we always send ``id=1`` to the
         LLM and extract ``queries[0]`` from the response, then store it under
-        the real query id in ``all_judgments_by_id``.
+        the real query's client_id in ``all_judgments_by_client_id``.
+
+        A fresh prompt instance is built per call (Requirement 15.3) so no
+        mutable prompt state is shared across concurrent judging workers.
 
         Returns the judgment dict for the query, or an empty dict on failure.
         """
         # Temporarily override id to 1 so the LLM produces a valid integer id.
         single = dict(executed_result)
         single["id"] = 1
-        prompt_str = self.prompt.update([single])
+        # Build an independent prompt per call — no shared mutable prompt state.
+        prompt = self._prompt_factory()
+        prompt_str = prompt.update([single])
         result, _ = self._client.complete(prompt_str, max_tokens=self.max_tokens)
         judgments = result.get("queries", [])
         return judgments[0] if judgments else {}
 
 
-class StatementGenerationAgent:
+class LegacyStatementGenerationAgent:
     """
     Orchestrates the full multi-table query-generation pipeline:
 
@@ -382,12 +465,17 @@ class StatementGenerationAgent:
         config_path: Path,
         kind: str,
         bad_tokens: list,
-        max_judge_iterations: int = 3,languages:list=["English"]
+        max_judge_iterations: int = 3,languages:list=["English"],
+        budget: "BudgetGuard | None" = None,
     ):
         self.config_path = config_path
         self.kind = kind
         self.bad_tokens = bad_tokens
         self.max_judge_iterations = max_judge_iterations
+        # Overall budget ceiling across the (multiplicative) retry loops
+        # (Requirement 17). A guard may be injected for testing; otherwise one is
+        # built from the query_generation config. Never raises — see BudgetGuard.
+        self._budget = budget or BudgetGuard.from_config(self.config_path)
 
         if kind == "PANDAS":
             self.prompt = PandasStatementGenerationPrompt()
@@ -470,6 +558,7 @@ class StatementGenerationAgent:
             # Step 1 — One-shot initial generation
             # ----------------------------------------------------------------
             start = time.perf_counter()
+            self._budget.start()  # Requirement 17: begin the overall wall-clock budget
             result, tokens, errors, model = self._client.complete(
                 base_prompt,
                 tables,
@@ -484,6 +573,8 @@ class StatementGenerationAgent:
 
             for k in all_tokens:
                 all_tokens[k] += tokens.get(k, 0)
+            # Feed generation tokens into the overall budget (Requirement 17).
+            self._budget.add_tokens(tokens)
             all_errors.extend(errors)
             last_model = model
 
@@ -501,6 +592,17 @@ class StatementGenerationAgent:
             structured_judge_feedback: list | None = None
 
             for iteration in range(self.max_judge_iterations):
+                # Requirement 17.2/17.3/17.5: at each iteration boundary, stop the
+                # validator↔judge loop early when the overall budget is exceeded,
+                # returning the queries approved so far without raising or
+                # discarding them (Step 3 assembles from all_approved_executed).
+                if self._budget.exceeded():
+                    self._log.warning(
+                        f"Budget exceeded before iteration {iteration + 1} — "
+                        f"stopping loop and returning approved queries so far."
+                    )
+                    break
+
                 self._log.step2_start(iteration + 1)
 
                 # --- 2a. Validate + correct ---
@@ -519,6 +621,8 @@ class StatementGenerationAgent:
 
                 for k in all_tokens:
                     all_tokens[k] += val_tokens.get(k, 0)
+                # Feed validation/correction tokens into the overall budget (Req 17).
+                self._budget.add_tokens(val_tokens)
                 # Tag validator errors with the query ids they belong to so errors
                 # remain associated with their source query, not lost in a flat pile.
                 tagged_val_errors = [
@@ -671,7 +775,7 @@ class StatementGenerationAgent:
             }
 
         except FileNotFoundError as e:
-            print(f"Error: '{e}'")
+            logger.error("Dataset not found: %s", e)
         except Exception as e:
             raise e
 
@@ -689,7 +793,7 @@ class StatementGenerationAgent:
         }
 
 
-class SingleTableStatementGenerationAgent:
+class LegacySingleTableStatementGenerationAgent:
     """
     Single-table variant of StatementGenerationAgent.
     Uses the same Validator ↔ Judge loop architecture.
@@ -700,12 +804,17 @@ class SingleTableStatementGenerationAgent:
         config_path: Path,
         kind: str,
         bad_tokens: list,
-        max_judge_iterations: int = 3,languages:list=["English"]
+        max_judge_iterations: int = 3,languages:list=["English"],
+        budget: "BudgetGuard | None" = None,
     ):
         self.config_path = config_path
         self.kind = kind
         self.bad_tokens = bad_tokens
         self.max_judge_iterations = max_judge_iterations
+        # Overall budget ceiling across the (multiplicative) retry loops
+        # (Requirement 17). A guard may be injected for testing; otherwise one is
+        # built from the query_generation config. Never raises — see BudgetGuard.
+        self._budget = budget or BudgetGuard.from_config(self.config_path)
 
         if kind == "PANDAS":
             self.prompt = SingleTablePandasPrompt()
@@ -775,6 +884,7 @@ class SingleTableStatementGenerationAgent:
             # Step 1 — One-shot initial generation
             # ----------------------------------------------------------------
             start = time.perf_counter()
+            self._budget.start()  # Requirement 17: begin the overall wall-clock budget
             result, tokens, errors, model = self._client.complete(
                 base_prompt,
                 [df],
@@ -787,6 +897,8 @@ class SingleTableStatementGenerationAgent:
 
             for k in all_tokens:
                 all_tokens[k] += tokens.get(k, 0)
+            # Feed generation tokens into the overall budget (Requirement 17).
+            self._budget.add_tokens(tokens)
             all_errors.extend(errors)
             last_model = model
 
@@ -804,6 +916,17 @@ class SingleTableStatementGenerationAgent:
             structured_judge_feedback: list | None = None
 
             for iteration in range(self.max_judge_iterations):
+                # Requirement 17.2/17.3/17.5: at each iteration boundary, stop the
+                # validator↔judge loop early when the overall budget is exceeded,
+                # returning the queries approved so far without raising or
+                # discarding them (Step 3 assembles from all_approved_executed).
+                if self._budget.exceeded():
+                    self._log.warning(
+                        f"Budget exceeded before iteration {iteration + 1} — "
+                        f"stopping loop and returning approved queries so far."
+                    )
+                    break
+
                 self._log.step2_start(iteration + 1)
 
                 # --- 2a. Validate + correct ---
@@ -822,6 +945,8 @@ class SingleTableStatementGenerationAgent:
 
                 for k in all_tokens:
                     all_tokens[k] += val_tokens.get(k, 0)
+                # Feed validation/correction tokens into the overall budget (Req 17).
+                self._budget.add_tokens(val_tokens)
                 # Tag validator errors with the query ids they belong to so errors
                 # remain associated with their source query, not lost in a flat pile.
                 tagged_val_errors = [
@@ -981,7 +1106,7 @@ class SingleTableStatementGenerationAgent:
             }
 
         except FileNotFoundError as e:
-            print(f"Error: '{e}'")
+            logger.error("Dataset not found: %s", e)
         except Exception as e:
             raise e
 
@@ -996,3 +1121,29 @@ class SingleTableStatementGenerationAgent:
             "avg_cols": avg_cols,
             "executed_results": [],
         }
+
+
+# ----------------------------------------------------------------------------
+# Backward-compatible re-export of the unified-backed agents (task 11.4)
+# ----------------------------------------------------------------------------
+#
+# ``src/orqa/statement_generation.py`` imports the two agent names from this
+# module:
+#
+#     from .agent.agent import StatementGenerationAgent, SingleTableStatementGenerationAgent
+#
+# To route those call sites onto the unified, mode-aware pipeline WITHOUT editing
+# ``statement_generation.py``, we bind those names to the unified-backed named
+# subclasses defined in ``unified_agent.py``. The original implementations are
+# preserved (not deleted) in this file as ``LegacyStatementGenerationAgent`` and
+# ``LegacySingleTableStatementGenerationAgent`` so the legacy budget-wiring test
+# can still exercise them.
+#
+# This import sits at the BOTTOM of the module, after ``JudgementResponseAgent``
+# (which ``unified_agent`` imports back from here) is defined, so the
+# ``agent`` <-> ``unified_agent`` cycle resolves regardless of which module the
+# interpreter loads first.
+from .utility.unified_agent import (  # noqa: E402
+    StatementGenerationAgent,
+    SingleTableStatementGenerationAgent,
+)

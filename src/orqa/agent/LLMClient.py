@@ -5,6 +5,10 @@ from typing import Any
 import yaml
 from litellm import Router
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class LLMClient:
     """
@@ -98,7 +102,7 @@ class LLMClient:
 
     def _load_config(self, config_path) -> dict[str, Any]:
         """Load configuration from YAML file"""
-        print(config_path)
+        logger.debug("Loading LLM config from %s", config_path)
         with open(config_path, "r") as f:
             return yaml.safe_load(f)
 
@@ -143,11 +147,11 @@ class LLMClient:
                 return last_content, usage_total
             except Exception as e:
                 last_error = e
-                print(f"✗ Error on attempt {attempt + 1}: {e}")
+                logger.error("Error on attempt %d: %s", attempt + 1, e)
                 # Wait before retry
                 if attempt < self.max_retries - 1:
                     messages.append({"role": "user", "content": e})
-                    print(f"Retrying in {self.retry_delay} seconds...\n")
+                    logger.debug("Retrying in %s seconds...", self.retry_delay)
                     time.sleep(self.retry_delay)
         # All retries exhausted
         #print(f"\n❌ Failed after {self.max_retries} attempts")

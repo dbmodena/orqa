@@ -15,8 +15,8 @@ from litellm import completion, Router
 from pydantic import BaseModel, ValidationError
 
 from .LLMClientStructured import LLMClientStructured
-from .alias_substitution import AliasSubstitution
-from .message_builder import ClientMessageBuilder
+from .utility.alias_substitution import AliasSubstitution
+from .utility.message_builder import ClientMessageBuilder
 from .prompting import DatasetDescription, _load_prompt
 from .structured_outputs import QuerySet, Query, TableAnalyses, QueryPlan
 import duckdb

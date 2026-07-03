@@ -29,7 +29,7 @@ import pandas as pd
 from pathlib import Path
 import duckdb
 from .LLMClientStructured import LLMClientStructured
-from .message_builder import JudgeMessageBuilder
+from .utility.message_builder import JudgeMessageBuilder
 from .validators.SQLValidator import SQLValidator
 from .validators.PandasValidator import PandasValidator
 import re

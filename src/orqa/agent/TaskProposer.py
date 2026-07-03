@@ -6,6 +6,10 @@ from typing import Any
 from .LLMClientStructured import LLMClientStructured
 from pydantic import ValidationError
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class TaskProposerLLMClient(LLMClientStructured):
     """
@@ -100,7 +104,7 @@ class TaskProposerLLMClient(LLMClientStructured):
 
         for attempt in range(self.max_retries):
             try:
-                print(f"Attempt {attempt + 1}/{self.max_retries}...")
+                logger.debug("Attempt %d/%d...", attempt + 1, self.max_retries)
 
                 response = self.router.completion(**completion_args)
                 usage = response["usage"]
@@ -144,52 +148,51 @@ class TaskProposerLLMClient(LLMClientStructured):
                                         )
                                         continue
 
-                    print(f"✓ Success on attempt {attempt + 1}\n")
+                    logger.debug("Success on attempt %d", attempt + 1)
                     return result, usage_total
                 except json.JSONDecodeError as e:
                     # JSON parsing failed
                     last_error = e
                     error_msg = self._format_json_error(cleaned_content, e)
-                    print(f"⚠️ JSON parsing error on attempt {attempt + 1}")
+                    logger.warning("JSON parsing error on attempt %d", attempt + 1)
 
                     if attempt < self.max_retries - 1:
                         # Add assistant's failed response
                         messages.append({"role": "assistant", "content": content})
                         # Add error feedback as user message
                         messages.append({"role": "user", "content": error_msg})
-                        print("💬 Sending error feedback to LLM...\n")
+                        logger.debug("Sending error feedback to LLM...")
                         time.sleep(self.retry_delay)
                         continue
                 except ValidationError as e:
                     # Pydantic validation failed
                     last_error = e
                     error_msg = self._format_validation_error(e)
-                    print(f"⚠️ Validation error on attempt {attempt + 1}")
+                    logger.warning("Validation error on attempt %d", attempt + 1)
 
                     if attempt < self.max_retries - 1:
                         # Add assistant's failed response
                         messages.append({"role": "assistant", "content": content})
                         # Add error feedback as user message
                         messages.append({"role": "user", "content": error_msg})
-                        print("💬 Sending validation errors to LLM...\n")
+                        logger.debug("Sending validation errors to LLM...")
                         time.sleep(self.retry_delay)
                         continue
 
             except Exception as e:
                 last_error = e
-                print(f"✗ Error on attempt {attempt + 1}: {e}")
+                logger.error("Error on attempt %d: %s", attempt + 1, e)
 
                 # Wait before retry
                 if attempt < self.max_retries - 1:
-                    print(f"Retrying in {self.retry_delay} seconds...\n")
+                    logger.debug("Retrying in %s seconds...", self.retry_delay)
                     time.sleep(self.retry_delay)
 
         # All retries failed
         # All retries exhausted
-        print(f"\n❌ Failed after {self.max_retries} attempts")
-        print(f"Last error: {last_error}")
+        logger.error("Failed after %d attempts. Last error: %s", self.max_retries, last_error)
         if last_content:
-            print(f"\nLast response preview:\n{last_content[:300]}...\n")
+            logger.debug("Last response preview:\n%s...", last_content[:300])
 
         return {}, usage_total
 

@@ -300,6 +300,15 @@ class Query(BaseModel):
     #id: int = Field(..., description=(
     #    "Incremental identifier of the query."
     #))
+    client_id: str = Field(
+        default="",
+        description=(
+            "An opaque, short unique identifier for this query. It is assigned by "
+            "the generator and MUST be echoed back unchanged on every subsequent "
+            "return of this query (correction and judging). Do not invent, reorder, "
+            "or modify it."
+        ),
+    )
     question: str = Field(
         ...,
         description=(

@@ -60,6 +60,10 @@ query_planner:
   module: "structured_outputs"
   class: "QueryPlan"
 
+structured_query_planner:
+  module: "prompting.models"
+  class: "StructuredQueryPlan"
+
 fallback_querying:
   module: "structured_outputs"
   class: "Query"

@@ -10,6 +10,10 @@ from pydantic import BaseModel, ValidationError
 from .prompting import DatasetDescription, _load_prompt
 from .LLMClient import LLMClient
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class LLMClientStructured(LLMClient):
     """
@@ -331,7 +335,7 @@ class LLMClientStructured(LLMClient):
 
         for attempt in range(self.max_retries):
             try:
-                print(f"Attempt {attempt + 1}/{self.max_retries}...")
+                logger.debug("Attempt %d/%d...", attempt + 1, self.max_retries)
                 response = self.router.completion(**completion_args)
 
                 usage = response["usage"]
@@ -350,12 +354,12 @@ class LLMClientStructured(LLMClient):
                     json_data = self._repair_json(cleaned)
                     json_data = self._normalize_response(json_data, root_key=root_key)
                     result = self.response_model.model_validate(json_data)
-                    print(f"✓ Success on attempt {attempt + 1}")
+                    logger.debug("Success on attempt %d", attempt + 1)
                     return result.model_dump(), usage_total
 
                 except json.JSONDecodeError as e:
                     last_error = e
-                    print(f"⚠️ JSON parsing error on attempt {attempt + 1}")
+                    logger.warning("JSON parsing error on attempt %d", attempt + 1)
                     if attempt < self.max_retries - 1:
                         messages.append({"role": "assistant", "content": content})
                         messages.append({"role": "user", "content": self._format_json_error(cleaned, e)})
@@ -363,7 +367,7 @@ class LLMClientStructured(LLMClient):
 
                 except ValidationError as e:
                     last_error = e
-                    print(f"⚠️ Validation error on attempt {attempt + 1}")
+                    logger.warning("Validation error on attempt %d", attempt + 1)
                     if attempt < self.max_retries - 1:
                         messages.append({"role": "assistant", "content": content})
                         messages.append({"role": "user", "content": self._format_validation_error(e)})
@@ -371,12 +375,12 @@ class LLMClientStructured(LLMClient):
 
             except Exception as e:
                 last_error = e
-                print(f"✗ Error on attempt {attempt + 1}: {e}")
+                logger.error("Error on attempt %d: %s", attempt + 1, e)
                 if attempt < self.max_retries - 1:
-                    print(f"Retrying in {self.retry_delay}s…")
+                    logger.debug("Retrying in %ss…", self.retry_delay)
                     time.sleep(self.retry_delay)
 
-        print(f"\n❌ Failed after {self.max_retries} attempts. Last error: {last_error}")
+        logger.error("Failed after %d attempts. Last error: %s", self.max_retries, last_error)
         if last_content:
-            print(f"Last response preview:\n{last_content[:300]}…")
+            logger.debug("Last response preview:\n%s…", last_content[:300])
         return {}, usage_total

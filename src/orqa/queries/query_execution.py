@@ -4,6 +4,9 @@ from typing import Any
 from .. import utils
 import textwrap
 import ast
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import duckdb
@@ -81,7 +84,7 @@ class QueryExecutor:
             df=df.dropna()
             df=df[involved_columns]
             dataframes[alias] = df
-            print(f"{alias}: {df.columns}")
+            logger.debug("%s: %s", alias, df.columns)
         return dataframes
 
     def _execute_sql(self, sql: str, dataframes: dict[str, pd.DataFrame]) -> pd.DataFrame:

@@ -46,9 +46,9 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from .alias_substitution import AliasSubstitution
-from .error_formatter import ErrorFormatter
-from .message_builder import ValidatorMessageBuilder
+from .utility.alias_substitution import AliasSubstitution
+from .utility.error_formatter import ErrorFormatter
+from .utility.message_builder import ValidatorMessageBuilder
 from .StatementClient import LLMClientStructured
 from .prompting import PandasValidatorCorrectionPrompt, SQLValidatorCorrectionPrompt
 from .validators.SQLValidator import SQLValidator
@@ -290,14 +290,14 @@ class LLMStatementValidator(LLMClientStructured):
                     temperature=self.temperature,
                 )
                 for message in messages:
-                    print("="*50)
-                    print(f"{message['role']}")
-                    print(f"{message['content']}")
-                print("="*50)
+                    logger.debug("=" * 50)
+                    logger.debug("%s", message['role'])
+                    logger.debug("%s", message['content'])
+                logger.debug("=" * 50)
                 _accumulate_usage(usage, response["usage"])
 
                 content = response["choices"][0]["message"]["content"]
-                print(response["choices"][0]["message"]["content"])
+                logger.debug("%s", response["choices"][0]["message"]["content"])
                 if content is None:
                     raise ValueError("LLM returned None content during correction.")
                 last_content = content
@@ -499,8 +499,6 @@ def _check_error_alignment(
     whatever alignment exists and the worst outcome is a slightly mismatched
     error message in the LLM prompt, caught on the next validation cycle.
     """
-    sep = "─" * 68
-
     # 1. Internal consistency: validation_errors vs error_messages counts
     if len(validation_errors) != len(error_messages):
         logger.error(
@@ -509,13 +507,6 @@ def _check_error_alignment(
             "Validator internal state is inconsistent.",
             len(validation_errors), len(error_messages),
         )
-        print(f"\n{sep}")
-        print(
-            f"[Validator] ⚠ ALIGNMENT MISMATCH: "
-            f"validation_errors={len(validation_errors)}, "
-            f"error_messages={len(error_messages)}"
-        )
-        print(sep)
 
     # 2. Count: one error entry per failing query
     if len(validation_errors) != len(failing):
@@ -524,12 +515,6 @@ def _check_error_alignment(
             "failing queries count (%d) != validation_errors count (%d).",
             len(failing), len(validation_errors),
         )
-        print(f"\n{sep}")
-        print(
-            f"[Validator] ⚠ ALIGNMENT MISMATCH: "
-            f"failing={len(failing)}, validation_errors={len(validation_errors)}"
-        )
-        print(sep)
         return   # positional check below is meaningless if counts differ
 
     # 3. Order: validation_errors[i] must belong to the same query as failing[i]
@@ -549,15 +534,10 @@ def _check_error_alignment(
             "failing query order at %d position(s):\n%s",
             len(mismatches), "\n".join(mismatches),
         )
-        print(f"\n{sep}")
-        print(f"[Validator] ⚠ ERROR ORDER MISMATCH ({len(mismatches)} position(s)):")
-        for m in mismatches:
-            print(m)
-        print(sep)
     else:
-        print(
-            f"[Validator] ✓ Error alignment OK — "
-            f"{len(failing)} failing queries paired correctly."
+        logger.debug(
+            "[Validator] Error alignment OK — %d failing queries paired correctly.",
+            len(failing),
         )
 
 
@@ -567,24 +547,34 @@ def _print_query_diff(
     cycle: int,
     path: str,
 ) -> None:
-    """Print old and new query lists independently — no positional pairing assumed."""
-    sep = "─" * 68
-    print(f"\n{sep}")
-    print(f"[Validator] Cycle {cycle} ({path}) — before correction "
-          f"({len(old_queries)} queries)")
-    print(sep)
-    for q in old_queries:
-        print(f"  #{q.get('id', '?')}  {q.get('question', '(no question)')}")
-        print(f"  code: {q.get('code', '(no code)')}\n")
+    """Log old and new query lists independently — no positional pairing assumed."""
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
 
-    print(sep)
-    print(f"[Validator] Cycle {cycle} ({path}) — after correction "
-          f"({len(new_queries)} queries)")
-    print(sep)
+    sep = "─" * 68
+    lines = [
+        "",
+        sep,
+        f"[Validator] Cycle {cycle} ({path}) — before correction "
+        f"({len(old_queries)} queries)",
+        sep,
+    ]
+    for q in old_queries:
+        lines.append(f"  #{q.get('id', '?')}  {q.get('question', '(no question)')}")
+        lines.append(f"  code: {q.get('code', '(no code)')}\n")
+
+    lines.append(sep)
+    lines.append(
+        f"[Validator] Cycle {cycle} ({path}) — after correction "
+        f"({len(new_queries)} queries)"
+    )
+    lines.append(sep)
     for q in new_queries:
-        print(f"  #{q.get('id', '?')}  {q.get('question', '(no question)')}")
-        print(f"  code: {q.get('code', '(no code)')}\n")
-    print(f"{sep}\n")
+        lines.append(f"  #{q.get('id', '?')}  {q.get('question', '(no question)')}")
+        lines.append(f"  code: {q.get('code', '(no code)')}\n")
+    lines.append(f"{sep}\n")
+
+    logger.debug("%s", "\n".join(lines))
 
 
 def _positional_errors(

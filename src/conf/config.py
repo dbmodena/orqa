@@ -194,6 +194,10 @@ class StatementGeneration:
     # Number of queries to generate per single table (None = fall back to cross-table count)
     single_table_query_count: Optional[int] = None
 
+    # Deliberate opt-in gate for injecting the TabPFN skill during PANDAS
+    # generation. Defaults to disabled so base runs never attempt TabPFN.
+    allow_tabpfn: bool = False
+
     
 
     def __post_init__(self):
@@ -413,6 +417,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     detected_languages  = parsed["tasks"]["query_generation"].get(
         "languages", ["English"]
     )
+    allow_tabpfn = parsed["tasks"]["query_generation"].get("allow_tabpfn", False)
     statement_generation = StatementGeneration(
         kind=kind,
         max_cols=max_cols,
@@ -423,6 +428,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         detected_languages=detected_languages,
         enable_single_table=enable_single_table,
         single_table_query_count=single_table_query_count,
+        allow_tabpfn=allow_tabpfn,
 
     )
 
