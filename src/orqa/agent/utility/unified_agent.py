@@ -430,6 +430,7 @@ class UnifiedStatementGenerationAgent:
 
             # ── Phase 2c: skill selection + gating ─────────────────────────
             skills = self._skill_registry.select(plan, kind, stats, self._gate_ctx)
+            self._log.skill_selected(skills)
 
             # ── Phase 2d: skill-injected code generation (client_id contract)
             # NOTE (seam for the full generator migration): the CodeGenerator
@@ -1001,6 +1002,7 @@ class UnifiedStatementGenerationAgent:
             "time_elapsed": total_time,
             "avg_cols": avg_cols,
             "executed_results": all_approved_executed,
+            "skills": self._summarize_skills(skills),
         }
         # Divergence (Requirement 1.3): proposed_columns only in multi mode.
         if mode == MULTI:
@@ -1134,6 +1136,23 @@ class UnifiedStatementGenerationAgent:
             return int(keyword_count or 0)
         except (TypeError, ValueError):
             return 0
+
+    @staticmethod
+    def _summarize_skills(skills: Optional[Any]) -> list:
+        """Summarise the skill(s) provided by the gate for the result payload.
+
+        ``skills`` is a ``SkillSelection`` (``.cards`` list of ``SkillCard``).
+        Returns a list of ``{"name", "version"}`` entries (empty when no skill
+        passed the gate and plain-Python generation was used).
+        """
+        cards = list(getattr(skills, "cards", []) or []) if skills is not None else []
+        return [
+            {
+                "name": getattr(card, "name", None),
+                "version": getattr(card, "version", None),
+            }
+            for card in cards
+        ]
 
     @staticmethod
     def _build_skill_trace(skills: Optional[Any]) -> SkillTrace:

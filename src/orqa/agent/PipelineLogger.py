@@ -84,6 +84,21 @@ class PipelineLogger:
         for q in queries:
             print(_indent(f"{DIM}#{q.get('id', '?')}{RESET}  {q.get('question', '(no question)')}", 2))
 
+    def skill_selected(self, skills) -> None:
+        """Log which skill(s) the gate provided for this generation.
+
+        ``skills`` is a ``SkillSelection`` (``.cards`` list of ``SkillCard``).
+        When no skill passes the gate, plain-Python generation is reported.
+        """
+        cards = list(getattr(skills, "cards", []) or []) if skills is not None else []
+        if not cards:
+            print(_indent(f"{DIM}⚙  Skill provided: none (plain generation){RESET}", 1))
+            return
+        names = ", ".join(
+            f"{getattr(c, 'name', '?')} v{getattr(c, 'version', '?')}" for c in cards
+        )
+        print(_indent(f"{CYAN}⚙  Skill provided: {BOLD}{names}{RESET}", 1))
+
     # ------------------------------------------------------------------ #
     # Step 2 — Validator ↔ Judge loop                                     #
     # ------------------------------------------------------------------ #
