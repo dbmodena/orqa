@@ -84,6 +84,25 @@ class PipelineLogger:
         for q in queries:
             print(_indent(f"{DIM}#{q.get('id', '?')}{RESET}  {q.get('question', '(no question)')}", 2))
 
+    def tabpfn_gate(self, allow_tabpfn: bool, api_key_present: bool) -> None:
+        """Report whether the TabPFN skill is allowed for this run.
+
+        TabPFN is unlocked only when both gates pass: the ``allow_tabpfn``
+        workflow-config gate and the presence of ``TABPFN_API_KEY``. When either
+        is missing, the specific reason is reported.
+        """
+        if allow_tabpfn and api_key_present:
+            print(_indent(f"{GREEN}✔  TabPFN skill allowed (config + API key){RESET}", 1))
+            return
+        reasons = []
+        if not allow_tabpfn:
+            reasons.append("allow_tabpfn disabled in workflow config")
+        if not api_key_present:
+            reasons.append("TABPFN_API_KEY not set")
+        print(_indent(
+            f"{DIM}✖  TabPFN skill not allowed ({'; '.join(reasons)}){RESET}", 1
+        ))
+
     def skill_selected(self, skills) -> None:
         """Log which skill(s) the gate provided for this generation.
 
