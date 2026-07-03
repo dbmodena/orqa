@@ -197,6 +197,7 @@ class UnifiedStatementGenerationAgent:
         bad_tokens: list,
         max_judge_iterations: int = 3,
         languages: Optional[list] = None,
+        allow_tabpfn: Optional[bool] = None,
         gate_ctx: Optional[SkillGateContext] = None,
         budget: Optional[BudgetGuard] = None,
         skill_registry: Optional[SkillRegistry] = None,
@@ -215,12 +216,22 @@ class UnifiedStatementGenerationAgent:
         # Overall budget ceiling across the (multiplicative) retry loops (Req 17).
         self._budget = budget or BudgetGuard.from_config(config_path)
 
-        # Skill gate context: the yaml ``allow_tabpfn`` gate (formalised in the
-        # StatementGeneration config, read here directly from the workflow yaml
-        # as a self-contained fallback) and the .env API-key gate.
+        # Skill gate context: the yaml ``allow_tabpfn`` gate and the .env
+        # API-key gate. The ``allow_tabpfn`` value is taken from the explicit
+        # ``allow_tabpfn`` argument when the caller provides it (the parsed
+        # ``StatementGeneration.allow_tabpfn`` from the workflow config). It
+        # falls back to reading the workflow yaml directly only when no explicit
+        # value and no gate context are supplied. NOTE: ``config_path`` is the
+        # LLM config (``litellm.yaml``), which does NOT carry the workflow
+        # ``allow_tabpfn`` key, so the explicit argument is the reliable source.
         # The key value itself is never read here — only its presence.
+        resolved_allow_tabpfn = (
+            allow_tabpfn
+            if allow_tabpfn is not None
+            else _read_allow_tabpfn(config_path)
+        )
         self._gate_ctx = gate_ctx or SkillGateContext(
-            allow_tabpfn=_read_allow_tabpfn(config_path),
+            allow_tabpfn=resolved_allow_tabpfn,
             tabpfn_api_key_present=bool(os.environ.get(TABPFN_API_KEY_ENV)),
         )
 

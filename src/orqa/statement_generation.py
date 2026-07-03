@@ -575,7 +575,8 @@ def create_statements(
     bad_tokens: list | None = None,
     enable_single_table: bool = False,
     single_table_query_count: int = 0,
-    languages: list= ["English"]
+    languages: list= ["English"],
+    allow_tabpfn: bool = False,
 ) -> list[dict]:
     bad_tokens = bad_tokens or []
 
@@ -585,7 +586,7 @@ def create_statements(
     all_matches: list = load_json(candidates_file)
     results = load_json(output_file) if output_file.exists() else {}
 
-    cross_agent = StatementGenerationAgent(config_path, kind, bad_tokens, languages=languages)
+    cross_agent = StatementGenerationAgent(config_path, kind, bad_tokens, languages=languages, allow_tabpfn=allow_tabpfn)
 
     # ── Cross-table generation ────────────────────────────────────────────────
     for idx, match in enumerate(all_matches):
@@ -640,7 +641,7 @@ def create_statements(
         print(f"\nStarting single-table generation ({single_table_query_count} datasets)...")
         sampled = _sample_single_table_datasets(csv_folder, single_table_query_count)
         single_agent = SingleTableStatementGenerationAgent(
-            config_path, kind, bad_tokens, languages=languages
+            config_path, kind, bad_tokens, languages=languages, allow_tabpfn=allow_tabpfn
         )
 
         for st_idx, csv_path in enumerate(sampled):
@@ -738,6 +739,7 @@ async def stream_generate_statements(
         cfg.llm_config_path / "litellm.yaml",
         kind,
         cfg.statement_generation.bad_tokens,
+        allow_tabpfn=cfg.statement_generation.allow_tabpfn,
     )
     for idx, match in enumerate(all_matches):
         #if idx < resume_from:
@@ -809,6 +811,7 @@ async def stream_generate_statements(
             cfg.llm_config_path / "litellm.yaml",
             kind,
             cfg.statement_generation.bad_tokens,
+            allow_tabpfn=cfg.statement_generation.allow_tabpfn,
         )
         for st_idx, csv_path in enumerate(sampled):
             dataset_name = csv_path.stem
@@ -891,5 +894,6 @@ def generate_statements(cfg: OrQAConfig) -> None:
             bad_tokens=cfg.statement_generation.bad_tokens,
             enable_single_table=cfg.statement_generation.enable_single_table,
             single_table_query_count=cfg.statement_generation.single_table_query_count,
-            languages=cfg.statement_generation.detected_languages
+            languages=cfg.statement_generation.detected_languages,
+            allow_tabpfn=cfg.statement_generation.allow_tabpfn
         )
