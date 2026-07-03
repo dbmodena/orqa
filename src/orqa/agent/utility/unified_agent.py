@@ -1021,7 +1021,7 @@ class UnifiedStatementGenerationAgent:
         timings_ms: dict,
         all_tokens: dict,
         last_model: str,
-        keyword_count: int,
+        keyword_count: Any,
     ) -> TraceableQuery:
         """Assemble one approved query into a phase-grouped :class:`TraceableQuery`.
 
@@ -1110,7 +1110,7 @@ class UnifiedStatementGenerationAgent:
             id=int(q_copy.get("id", 0)),
             client_id=str(q_copy.get("client_id", "") or ""),
             code=q_copy.get("code", "") or "",
-            keyword_count=int(keyword_count or 0),
+            keyword_count=self._coerce_keyword_count(keyword_count),
             planning=planning,
             skill=skill,
             validation=validation,
@@ -1118,6 +1118,22 @@ class UnifiedStatementGenerationAgent:
             execution=execution,
             usage=usage,
         )
+
+    @staticmethod
+    def _coerce_keyword_count(keyword_count: Any) -> int:
+        """Reduce a keyword-count value to a single integer total.
+
+        ``utils.count_keywords`` returns a ``dict[str, int]`` mapping each
+        matched keyword to its number of occurrences, but the traceable model
+        stores a single integer. Sum the occurrences when a mapping is given,
+        otherwise fall back to a plain integer coercion.
+        """
+        if isinstance(keyword_count, dict):
+            return sum(int(v or 0) for v in keyword_count.values())
+        try:
+            return int(keyword_count or 0)
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _build_skill_trace(skills: Optional[Any]) -> SkillTrace:
