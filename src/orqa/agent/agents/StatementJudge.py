@@ -1,38 +1,12 @@
-import importlib
 import json
-import os
 import time
 from pathlib import Path
-from typing import Any, Optional, Type
+from typing import Any, Optional
 
-import yaml
-import litellm
-from litellm import completion, Router
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
-
-import pandas as pd
-from .prompting import DatasetDescription, _load_prompt
-from pathlib import Path
-from .structured_outputs import QuerySet, Query
-import duckdb
-
-
-import pandas as pd
-import polars as pl
-from typing import List, Dict, Tuple, Union, Any
-
-import sys
-from io import StringIO
-
-import pandas as pd
-from pathlib import Path
-import duckdb
-from .LLMClientStructured import LLMClientStructured
-from .utility.message_builder import JudgeMessageBuilder
-from .validators.SQLValidator import SQLValidator
-from .validators.PandasValidator import PandasValidator
-import re
+from ..llm_client.LLMClientStructured import LLMClientStructured
+from ..utility.message_builder import JudgeMessageBuilder, sanitize_messages
 
 
 
@@ -49,13 +23,20 @@ class LLMStatementJudge(LLMClientStructured):
         super().__init__(config_path, "statement_judge")
         self._message_builder = JudgeMessageBuilder()
 
-    def complete(self, prompt: str, **kwargs) -> Any:
+    def complete(self, prompt: str, data: Any = None, **kwargs) -> Any:
         """
         Make a structured completion request with fixed 2-block messages.
 
+        ``prompt`` carries ONLY the static judge instructions; ``data`` carries
+        the per-query evaluation payload. The instructions plus the (equally
+        static) output-schema constraint form the system message, so the system
+        message is byte-identical across every judge call in a run — the
+        provider's prompt cache serves that whole prefix, and only the short
+        user message (the payload) is uncached.
+
         Each call rebuilds the message array from scratch using JudgeMessageBuilder,
-        ensuring no history is retained between calls. On parse errors, the prompt
-        is rebuilt with error feedback rather than appending to history.
+        ensuring no history is retained between calls. On parse errors, the user
+        payload is rebuilt with error feedback (the system message never changes).
 
         Returns ``(result_dict, usage_total)`` on success; ``({}, usage_total)`` on
         exhausted retries.
@@ -65,13 +46,21 @@ class LLMStatementJudge(LLMClientStructured):
         last_content: Optional[str] = None
         last_error: Optional[Exception] = None
 
-        # The query_payload starts as empty; on retries it includes error feedback
-        query_payload = ""
+        # First-attempt user message: the queries to evaluate. On retries it is
+        # replaced with error feedback. Never empty — providers reject
+        # zero-token messages (OCI 400: "message must be at least 1 token long").
+        query_payload = (
+            f"Queries:\n{data}\n\n"
+            "Evaluate the queries above following the instructions and "
+            "return only the JSON verdict."
+        )
 
         for attempt in range(self.max_retries):
             try:
                 # Fixed 2-block rebuild: system + query evaluation
-                messages = self._message_builder.build(system_prompt, query_payload)
+                messages = sanitize_messages(
+                    self._message_builder.build(system_prompt, query_payload)
+                )
 
                 completion_args = {
                     "model": "primary",
@@ -89,8 +78,8 @@ class LLMStatementJudge(LLMClientStructured):
                 usage_total["total_tokens"] += usage.get("total_tokens", 0)
 
                 content = response["choices"][0]["message"]["content"]
-                if content is None:
-                    raise ValueError("LLM returned None content.")
+                if content is None or not str(content).strip():
+                    raise ValueError("LLM returned empty content.")
                 last_content = content
 
                 cleaned = self._clean_json_response(content)
@@ -106,16 +95,23 @@ class LLMStatementJudge(LLMClientStructured):
                     last_error = e
                     print(f"⚠️ JSON parsing error on attempt {attempt + 1}")
                     if attempt < self.max_retries - 1:
-                        # Rebuild with error feedback — no accumulation
-                        query_payload = self._format_json_error(cleaned, e)
+                        # Rebuild with error feedback — no accumulation. The
+                        # queries stay in the payload (the system message no
+                        # longer carries them) so the retry can still see them.
+                        query_payload = (
+                            f"Queries:\n{data}\n\n{self._format_json_error(cleaned, e)}"
+                        )
                         time.sleep(self.retry_delay)
 
                 except ValidationError as e:
                     last_error = e
                     print(f"⚠️ Validation error on attempt {attempt + 1}")
                     if attempt < self.max_retries - 1:
-                        # Rebuild with error feedback — no accumulation
-                        query_payload = self._format_validation_error(e)
+                        # Rebuild with error feedback — no accumulation. Keep
+                        # the queries in the payload (see above).
+                        query_payload = (
+                            f"Queries:\n{data}\n\n{self._format_validation_error(e)}"
+                        )
                         time.sleep(self.retry_delay)
 
             except Exception as e:

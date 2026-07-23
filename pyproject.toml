@@ -15,21 +15,26 @@ dependencies = [
     "inflection>=0.5.1",
     "jsonlines>=4.0.0",
     "litellm>=1.80.10",
+    "mcp>=1.2",
+    "elasticsearch>=8,<9",
     "matplotlib>=3.10.8",
     "networkx>=3.6.1",
+    "numpy>=1.26",
     "pandas>=2.3.3",
     "pip>=26.0.1",
     "polars>=1.36.1",
     "pyarrow>=22.0.0",
     "pyyaml>=6.0.3",
     "requests>=2.33.1",
+    "scikit-learn>=1.4",
     "seaborn>=0.13.2",
     "tqdm>=4.67.1",
     "ulod",
     "uvicorn>=0.42.0",
     "valentine>=0.4.1",
     "wrapt-timeout-decorator>=1.5.1",
-    "tabulate"
+    "tabulate",
+    "tabpfn_client"
 ]
 
 [project.optional-dependencies]

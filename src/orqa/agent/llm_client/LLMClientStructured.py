@@ -7,8 +7,8 @@ from typing import Any, Optional, Type
 
 from pydantic import BaseModel, ValidationError
 
-from .prompting import DatasetDescription, _load_prompt
 from .LLMClient import LLMClient
+from ..utility.message_builder import sanitize_messages
 
 import logging
 
@@ -45,7 +45,13 @@ class LLMClientStructured(LLMClient):
             raise ValueError("response_model must specify both 'module' and 'class'")
 
         try:
-            module = importlib.import_module(f".{module_name}", package=__package__)
+            # Anchored to the fixed "orqa.agent" package rather than
+            # __package__: response-model module paths in the YAML config
+            # (e.g. "utility.structured_outputs") are always relative to
+            # orqa.agent regardless of which subpackage this class itself
+            # lives in, so resolution must not depend on this file's own
+            # location.
+            module = importlib.import_module(f".{module_name}", package="orqa.agent")
             model_class = getattr(module, class_name)
             if not issubclass(model_class, BaseModel):
                 raise TypeError(f"{class_name} is not a Pydantic BaseModel")
@@ -57,10 +63,15 @@ class LLMClientStructured(LLMClient):
                 f"Could not find class '{class_name}' in module '{module_name}': {e}"
             ) from e
 
-    def reform_prompt_constraint(self, prompt: str) -> str:
-        """Append the Pydantic JSON-schema constraint to a prompt."""
+    def schema_constraint(self) -> str:
+        """The static output-format constraint block for the current response model.
+
+        Deterministic for a given response model (``model_json_schema`` is
+        stable), so it can safely live in the system message where it extends
+        the cacheable static prefix instead of trailing the dynamic content.
+        """
         format_str = json.dumps(self.response_model.model_json_schema(), indent=2)
-        constraint = (
+        return (
             "### Output format instructions\n"
             "Return the final answer **strictly in JSON** and **exactly matching** "
             "the Pydantic following schema provided:\n\n"
@@ -70,7 +81,10 @@ class LLMClientStructured(LLMClient):
             "rules) must be satisfied. Do not add extra fields, omit required fields, "
             "or include explanatory text outside the JSON."
         )
-        return f"{prompt}\n{constraint}"
+
+    def reform_prompt_constraint(self, prompt: str) -> str:
+        """Append the Pydantic JSON-schema constraint to a prompt."""
+        return f"{prompt}\n{self.schema_constraint()}"
 
     # ------------------------------------------------------------------
     # JSON cleaning & repair pipeline
@@ -323,7 +337,19 @@ class LLMClientStructured(LLMClient):
         exhausted retries.
         """
         usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        messages = [{"role": "system", "content": self.reform_prompt_constraint(prompt)}]
+        # The prompt goes in a USER message (with a minimal system preamble),
+        # not a lone system message — some providers (e.g. Cohere via OCI)
+        # reject requests with no user message at all. The schema constraint
+        # lives in the system message: it is static per response model, so
+        # keeping it ahead of the (dynamic) user prompt maximises the stable
+        # prefix served from the provider's prompt cache.
+        messages = [
+            {
+                "role": "system",
+                "content": f"You are a helpful assistant.\n\n{self.schema_constraint()}",
+            },
+            {"role": "user", "content": prompt},
+        ]
         completion_args = {
             "model": "primary",
             "messages": messages,
@@ -336,6 +362,7 @@ class LLMClientStructured(LLMClient):
         for attempt in range(self.max_retries):
             try:
                 logger.debug("Attempt %d/%d...", attempt + 1, self.max_retries)
+                completion_args["messages"] = sanitize_messages(messages)
                 response = self.router.completion(**completion_args)
 
                 usage = response["usage"]
@@ -344,8 +371,8 @@ class LLMClientStructured(LLMClient):
                 usage_total["total_tokens"] += usage.get("total_tokens", 0)
 
                 content = response["choices"][0]["message"]["content"]
-                if content is None:
-                    raise ValueError("LLM returned None content.")
+                if content is None or not str(content).strip():
+                    raise ValueError("LLM returned empty content.")
                 last_content = content
 
                 cleaned = self._clean_json_response(content)
@@ -359,7 +386,7 @@ class LLMClientStructured(LLMClient):
 
                 except json.JSONDecodeError as e:
                     last_error = e
-                    logger.warning("JSON parsing error on attempt %d", attempt + 1)
+                    logger.warning("JSON parsing error on attempt %d: %s", attempt + 1, e)
                     if attempt < self.max_retries - 1:
                         messages.append({"role": "assistant", "content": content})
                         messages.append({"role": "user", "content": self._format_json_error(cleaned, e)})
@@ -367,7 +394,13 @@ class LLMClientStructured(LLMClient):
 
                 except ValidationError as e:
                     last_error = e
-                    logger.warning("Validation error on attempt %d", attempt + 1)
+                    field_errors = "; ".join(
+                        f"{' -> '.join(str(x) for x in err['loc'])}: {err['msg']}"
+                        for err in e.errors()
+                    )
+                    logger.warning(
+                        "Validation error on attempt %d: %s", attempt + 1, field_errors
+                    )
                     if attempt < self.max_retries - 1:
                         messages.append({"role": "assistant", "content": content})
                         messages.append({"role": "user", "content": self._format_validation_error(e)})

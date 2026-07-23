@@ -1,6 +1,6 @@
 # LLM Configuration File
 # Primary model (will be tried first)
-model: "oci/meta.llama-3.3-70b-instruct"
+model: "oci/openai.gpt-oss-120b"
 # Fallback models (tried in order if primary fails)
 fallback_models:
   - "groq/llama-3.3-70b-versatile"
@@ -8,6 +8,10 @@ fallback_models:
 #    - "groq/llama-3.3-70b-versatile"
 #   - "groq/llama-3.1-8b-instant"
 #  - "together_ai/togethercomputer/Llama-2-7B-32K-Instruct"
+
+# Embedding model for candidates discovery (metadata embeddings).
+# Must be multilingual: the portals include Italian, Spanish and French datasets.
+embedding_model: "oci/cohere.embed-multilingual-v3.0"
 
 # Provider-specific parameters
 provider_params:
@@ -22,6 +26,10 @@ provider_params:
     # Groq-specific params (if any)
     response_format: 
       type: "json_object"
+  anthropic:
+    api_key: os.environ/ANTHROPIC_API_KEY
+    drop_params: true
+    additional_drop_params: ["temperature"]
   together_ai:
     # TogetherAI-specific params (if any)
   oci:
@@ -43,34 +51,58 @@ retry_delay: 10.0
 enable_json_mode: true
 
 
+# Judge panels: each panel is a list of small models that judge the same
+# artifact independently; approval is decided by majority vote. Each entry is
+# a LiteLLM model string (or a mapping with a "model" key plus per-judge
+# overrides); its provider params are fetched from provider_params above by
+# the model's provider prefix, exactly like the primary/fallback models.
+# Prefer models from DIFFERENT families (votes only help when errors are
+# decorrelated) and different from the generation model (self-bias).
+# Remove/empty a panel to fall back to the single primary-model judge.
+judge_profiles:
+  # Judges the structured query plans (before code generation).
+  plan:
+    - "oci/google.gemini-2.5-flash"
+    - "oci/openai.gpt-oss-20b"
+    - "oci/meta.llama-3.3-70b-instruct"
+  # Judges the generated (question, code, result) triples.
+  code:
+    - "oci/google.gemini-2.5-flash"
+    - "oci/openai.gpt-oss-20b"
+    - "oci/meta.llama-3.3-70b-instruct"
+
 # Response model configuration
 response_model:
-  module: "structured_outputs"  # Python module where the model is defined
+  module: "utility.structured_outputs"  # Python module where the model is defined
   class: "Result"  # Pydantic model class name
 
 querying: 
-  module: "structured_outputs"
+  module: "utility.structured_outputs"
   class: "QuerySet"
 
 table_analyzer:
-  module: "structured_outputs"
+  module: "utility.structured_outputs"
   class: "TableAnalyses"
 
+pair_task_selector:
+  module: "utility.structured_outputs"
+  class: "PairTaskSelection"
+
 query_planner:
-  module: "structured_outputs"
+  module: "utility.structured_outputs"
   class: "QueryPlan"
 
-structured_query_planner:
-  module: "prompting.models"
-  class: "StructuredQueryPlan"
-
 fallback_querying:
-  module: "structured_outputs"
+  module: "utility.structured_outputs"
   class: "Query"
 
 statement_judge:
-  module: "structured_outputs"
+  module: "utility.structured_outputs"
   class: "Judgments"
+
+plan_judge:
+  module: "utility.structured_outputs"
+  class: "PlanJudgment"
 
 # Local Ollama setup
 # model: ollama_chat/llama3.3:latest

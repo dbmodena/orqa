@@ -1,11 +1,12 @@
 import importlib
 import json
+import logging
 import os
 import re
 import time
 from io import StringIO
 from pathlib import Path
-from typing import Any, Optional, Type
+from typing import Any, Type
 
 import litellm
 import pandas as pd
@@ -14,13 +15,16 @@ import yaml
 from litellm import completion, Router
 from pydantic import BaseModel, ValidationError
 
-from .LLMClientStructured import LLMClientStructured
-from .utility.alias_substitution import AliasSubstitution
-from .utility.message_builder import ClientMessageBuilder
-from .prompting import DatasetDescription, _load_prompt
-from .structured_outputs import QuerySet, Query, TableAnalyses, QueryPlan
+from ..llm_client.LLMClientStructured import LLMClientStructured
+from ..utility.alias_substitution import AliasSubstitution
+from ..utility.message_builder import ClientMessageBuilder, sanitize_messages
+from ..prompting import DatasetDescription, GenerationEnrichmentPrompt
+from ..utility.structured_outputs import Query, TableAnalyses, QueryPlan
+from ...utils.pipeline_logger import PipelineLogger
 import duckdb
 import sys
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClientStatementGenerator(LLMClientStructured):
@@ -38,6 +42,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
         self.table_analyzer_model = self._load_pydantic_response_model("table_analyzer")
         self.query_planner_model = self._load_pydantic_response_model("query_planner")
         self.fallback_response_model = self._load_pydantic_response_model("fallback_querying")
+        self._log = PipelineLogger()
 
     def _response_root_key(self, model_name: str) -> str | None:
         if model_name == "table_analyzer":
@@ -58,104 +63,25 @@ class LLMClientStatementGenerator(LLMClientStructured):
         finally:
             self.response_model = original_model
 
-    def _build_table_analysis_prompt(
-        self,
-        alias: str,
-        metadata: dict,
-        columns: list[str],
-        sample: list[dict],
-        languages: list[str],
-    ) -> str:
-        return (
-            "Analyze a single table and return a JSON object matching the provided schema. "
-            "Do not include any explanatory text outside the JSON.\n\n"
-            "IMPORTANT INSTRUCTIONS:\n"
-            "- Extract up to 10 keywords (max) that best capture the essential concepts and domain concepts in this table.\n"
-            "- Keywords should be meaningful terms that a domain expert would use to describe what this table contains.\n"
-            "- Keywords are crucial for helping non-expert users understand what data this table contains.\n"
-            f"\n\nAlias: {alias}"
-            f"\nDetected languages: {json.dumps(languages, ensure_ascii=False)}"
-            f"\nColumns:\n{json.dumps(columns, indent=2, ensure_ascii=False)}"
-            f"\n\nMetadata:\n{json.dumps(metadata, indent=2, ensure_ascii=False, default=str)}"
-            f"\n\nSample rows:\n{json.dumps(sample, indent=2, ensure_ascii=False, default=str)}"
-        )
-
-    def _run_table_analysis(
-        self,
-        alias: str,
-        metadata: dict,
-        columns: list[str],
-        sample: list[dict],
-        languages: list[str],
-    ) -> dict:
-        prompt = self._build_table_analysis_prompt(alias, metadata, columns, sample, languages)
-        result, _ = self._complete_with_model(prompt, "table_analyzer")
-        tables = result.get("tables", [])
-        if tables:
-            return tables[0]
-        return {"alias": alias, "table_description": "", "table_keywords": []}
-
-    def _build_query_planner_prompt(
-        self,
-        analyses: list[dict],
-        aliases: dict,
-        matches: Any,
-        languages: list[str],
-    ) -> str:
-        return (
-            "Use the following per-table analysis results to produce a query plan, "
-            "a business question, and keyword-level guidance. Return only valid JSON.\n\n"
-            "IMPORTANT INSTRUCTIONS FOR QUESTION GENERATION:\n"
-            "- Generate a question as if asked by an AVERAGE, NON-EXPERT USER who:\n"
-            "  * Does NOT know table or column names\n"
-            "  * Has general business knowledge\n"
-            "  * Phrases questions naturally and conversationally\n"
-            "- USE TABLE KEYWORDS STRATEGICALLY: incorporate the keywords from each table's analysis "
-            "to help pinpoint to the correct tables without naming them directly.\n"
-            "  Example: if a table has keywords 'sales', 'revenue', 'orders', use them naturally in the question.\n"
-            "- Generate up to 10 keywords (max) for the question that capture its intent and incorporate table keywords.\n"
-            "- The question should read naturally and allow someone to infer which tables are being queried.\n"
-            f"\n\nAliases: {json.dumps(list(aliases.keys()), indent=2, ensure_ascii=False)}"
-            f"\n\nTable analysis:\n{json.dumps({'tables': analyses}, indent=2, ensure_ascii=False, default=str)}"
-            f"\n\nMatch requirements:\n{json.dumps(matches, indent=2, ensure_ascii=False, default=str)}"
-            f"\n\nDetected languages: {json.dumps(languages, ensure_ascii=False)}"
-        )
-
-    def _run_query_planner(
-        self,
-        analyses: list[dict],
-        aliases: dict,
-        matches: Any,
-        languages: list[str],
-    ) -> dict:
-        prompt = self._build_query_planner_prompt(analyses, aliases, matches, languages)
-        result, _ = self._complete_with_model(prompt, "query_planner")
-        return result
-
-    def _enrich_prompt_for_final_generation(
+    def enrich_prompt_with_table_analysis(
         self,
         prompt: str,
         table_analyses: list[dict],
-        planner: dict,
     ) -> str:
-        return (
-            f"{prompt}\n\n"
-            "### TABLE-LEVEL ANALYSIS\n"
-            f"{json.dumps({'tables': table_analyses}, indent=2, ensure_ascii=False, default=str)}\n\n"
-            "### QUERY PLANNING GUIDANCE\n"
-            f"{json.dumps(planner, indent=2, ensure_ascii=False, default=str)}\n\n"
-            "### KEYWORD CONSTRAINTS\n"
-            "- Each table must provide up to 10 keywords (max) that capture its domain concepts.\n"
-            "- Each question must include up to 10 keywords (max) that incorporate table keywords when relevant.\n"
-            "- Keywords help non-expert users understand which tables the query touches.\n\n"
-            "When generating the final output, include the following fields in each query:\n"
-            "- query_plan\n"
-            "- question_keywords (max 10, should include relevant table keywords)\n"
-            "- translated_question_keywords (max 10)\n"
-            "- For each table, description, keywords (max 10), and translated_keywords (max 10) copied from the table analysis\n"
-            "- Ensure the question is phrased as a non-expert user would ask it, using table keywords as hints.\n"
-            "Return only valid JSON matching the expected schema."
+        """Append the table-analysis enrichment block to ``prompt``.
+
+        Called ONCE per run on the run-stable base prompt (see
+        ``StatementOrchestrator._run`` in ``agent.py``) — before the per-plan generation loop — so the
+        enrichment sits in the shared, cacheable prefix of every generation
+        call rather than trailing each call's unique plan section.
+        """
+        enrichment = GenerationEnrichmentPrompt().update(
+            table_analysis=json.dumps(
+                {"tables": table_analyses}, indent=2, ensure_ascii=False, default=str
+            ),
+            planning_section="",
         )
+        return f"{prompt}\n\n{enrichment}"
 
     # ------------------------------------------------------------------
     # JSON repair utilities
@@ -321,6 +247,66 @@ class LLMClientStatementGenerator(LLMClientStructured):
             if not re.search(r'(?<!\w)' + re.escape(alias) + r'(?!\w)', query_code)
         ]
 
+    def _finalize_query_set(self, queries: list[dict]) -> dict:
+        """Validate every generated query as a :class:`Query`, return a query-set dict.
+
+        This is the final gate before ``complete()`` hands its result back to the
+        caller: each dict in ``queries`` (already schema-checked once at parse
+        time via ``self.response_model.model_validate``, but possibly mutated
+        since — by ``clean_query_set``, the table-analysis merge, or the
+        table-alias retry loop) is re-validated as a :class:`Query`. A query
+        that fails re-validation is dropped (logged, not raised) rather than
+        failing the whole batch — one malformed query shouldn't sink every
+        other query in the same run.
+
+        ``Query`` itself no longer carries the planner-owned question-level
+        metadata (``query_plan``, ``question_keywords``,
+        ``translated_question_keywords``, ``translated_question``,
+        ``detected_language``, ``topic``, ``story`` — see
+        ``prompting.models.SQLQueryPlan``/``PandasQueryPlan``), which
+        ``complete()`` merges onto each query dict from the plan before this
+        method runs. Re-validating strictly through ``Query`` would silently
+        drop those fields, so each validated query's canonical fields are
+        merged back onto the ORIGINAL dict (which still carries them) rather
+        than the other way around.
+        """
+        validated: list[dict] = []
+        for q in queries:
+            try:
+                query_obj = Query.model_validate(q)
+            except ValidationError as exc:
+                logger.warning(
+                    "Dropping a generated query that failed Query validation "
+                    "in the final gate (client_id=%r): %s",
+                    q.get("client_id") if isinstance(q, dict) else None,
+                    exc,
+                )
+                continue
+            merged = dict(q) if isinstance(q, dict) else {}
+            merged.update(query_obj.model_dump())
+            validated.append(merged)
+        return {"queries": validated}
+
+    def _enforce_single_query(self, queries: list[dict]) -> list[dict]:
+        """Keep at most one query — every generation call is bound to a single plan.
+
+        Every call to :meth:`complete` is scoped to exactly one query plan
+        (``precomputed_plan`` — see ``QueryPlanner.plan_batch``) and the prompt
+        asks for exactly one query in return. If the model nonetheless returns
+        more than one, keep only the first — the plan/skill this call was
+        given only applies to one query, so any extras aren't traceable to a
+        plan of their own and would silently break the one-plan-to-one-query
+        contract downstream.
+        """
+        if len(queries) <= 1:
+            return queries
+        logger.warning(
+            "Generation call bound to a single plan returned %d queries; "
+            "keeping only the first and dropping the rest.",
+            len(queries),
+        )
+        return queries[:1]
+
     def _partition_queries(
         self, queries: list[dict], all_aliases: list[str]
     ) -> tuple[list[dict], list[dict]]:
@@ -370,11 +356,13 @@ class LLMClientStatementGenerator(LLMClientStructured):
         prompt: str,
         dataframes,
         table_names,
+        *,
         typology: str = "SQL",
         involved_cols=None,
         matches=None,
         metadata=None,
         languages=None,
+        precomputed_plan: dict,
     ) -> Any:
         """
         Generate the initial set of queries from *prompt*, then validate that
@@ -383,6 +371,18 @@ class LLMClientStatementGenerator(LLMClientStructured):
         ``MAX_TABLE_ALIAS_RETRIES`` extra rounds).  After all retries, any
         still-failing queries are silently dropped and only the good ones are
         returned.
+
+        Args:
+            precomputed_plan: The specific plan (dict form) this generation
+                call is bound to — one plan out of ``QueryPlanner.plan_batch``'s
+                several independent plans. It is already injected into
+                ``prompt`` upstream (by ``GenerationCoordinator``), so no plan
+                section is added here and the model sees exactly one plan.
+                Its own ``tables`` (name/reason/columns_involved/description/
+                keywords, already judged by the plan panel) is what gets
+                stamped onto every generated query below — table-level
+                analysis is no longer merged in here separately, since the
+                generation LLM no longer produces a ``tables`` field at all.
         """
         MAX_TABLE_ALIAS_RETRIES = 3
 
@@ -403,37 +403,23 @@ class LLMClientStatementGenerator(LLMClientStructured):
         if isinstance(detected_languages, str):
             detected_languages = [detected_languages]
 
-        table_analyses = []
-        for idx, (alias, _) in enumerate(table_names.items()):
-            df = dataframes[idx]
-            table_metadata = metadata_list[idx] if idx < len(metadata_list) else {}
-            table_analyses.append(
-                self._run_table_analysis(
-                    alias=alias,
-                    metadata=table_metadata,
-                    columns=[f"{col} ({df[col].dtype})" for col in df.columns],
-                    sample=df.head(3).to_dict(orient="records"),
-                    languages=detected_languages,
-                )
-            )
+        # Reuse the caller's already-computed plan verbatim — this method never
+        # runs its own query-planner LLM call. Both the plan AND the
+        # table-analysis enrichment are already injected into `prompt`
+        # upstream (GenerationCoordinator adds the plan; the orchestrator
+        # enriches the run-stable base prompt once via
+        # ``enrich_prompt_with_table_analysis``), so nothing is appended here
+        # and the run's generation calls keep their shared prompt prefix.
+        plan = precomputed_plan
+        self._log.query_plan(plan)
 
-        plan = self._run_query_planner(
-            table_analyses,
-            table_names,
-            matches=matches,
-            languages=detected_languages,
-        )
-
-        enriched_prompt = self._enrich_prompt_for_final_generation(
-            prompt,
-            table_analyses,
-            plan,
-        )
-
-        initial_message = self.reform_prompt_constraint(enriched_prompt)
+        initial_message = prompt
 
         message_builder = ClientMessageBuilder()
-        system_prompt = "You are an expert Data Engineer"
+        # The output-schema constraint is static per response model, so it
+        # rides in the system message — ahead of all dynamic content — where
+        # it extends the cacheable prefix shared by every generation call.
+        system_prompt = f"You are an expert Data Engineer.\n\n{self.schema_constraint()}"
         messages = message_builder.build(system_prompt, initial_message)
         last_content = ""
 
@@ -442,7 +428,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
             try:
                 completion_args = {
                     "model": self.config["model"],
-                    "messages": messages,
+                    "messages": sanitize_messages(messages),
                     "temperature": self.temperature,
                 }
 
@@ -467,21 +453,39 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 result_dict = result.model_dump()
                 result_dict = self.clean_query_set(result_dict, table_names)
 
-                # Merge table-level analysis into each generated query's tables[] so
-                # keywords/descriptions are preserved centrally (not duplicated per-query).
-                analyses_map = {t.get('alias') or t.get('name'): t for t in table_analyses}
+                # Copy the planner-owned question-level metadata onto every
+                # generated query. These fields are no longer part of the
+                # Query schema (the generation LLM never produces them) —
+                # they were already decided once, during planning, and every
+                # query bound to this plan/call shares that same metadata.
+                # `tables` (name/reason/columns_involved/description/keywords)
+                # is one of them: the plan's own `tables[]` (List[Table]) was
+                # already judged by the plan panel (PlanJudgment.table_check)
+                # and checked for full alias coverage by
+                # QueryPlanner.validate_plan, so it is simply copied here
+                # rather than asked of the generation LLM a second time.
+                plan_fields = {
+                    "query_plan": plan.get("query_plan", ""),
+                    "question_keywords": plan.get("question_keywords", []),
+                    "translated_question_keywords": plan.get("translated_question_keywords", []),
+                    "translated_question": plan.get("translated_question", ""),
+                    "detected_language": plan.get("detected_language", ""),
+                    "topic": plan.get("topic", ""),
+                    "story": plan.get("story", ""),
+                    "tables": plan.get("tables", []),
+                    # Plan-declared result contract, judged by the plan panel
+                    # (PlanJudgment.expected_result_check) and mechanically
+                    # enforced against the executed result by the validators
+                    # (QueryValidator._check_expected_result_type).
+                    "expected_result_type": plan.get("expected_result_type", ""),
+                    "expected_result_description": plan.get("expected_result_description", ""),
+                }
                 for q in result_dict.get('queries', []):
-                    if not isinstance(q.get('tables'), list):
-                        continue
-                    for tbl in q['tables']:
-                        tbl_name = tbl.get('name') or tbl.get('alias')
-                        analysis = analyses_map.get(tbl_name, {})
-                        if 'description' not in tbl or not tbl.get('description'):
-                            tbl['description'] = analysis.get('table_description') or analysis.get('description', tbl.get('description', ''))
-                        if 'keywords' not in tbl or not tbl.get('keywords'):
-                            tbl['keywords'] = analysis.get('table_keywords') or analysis.get('keywords', tbl.get('keywords', []))
-                        if 'translated_keywords' not in tbl:
-                            tbl['translated_keywords'] = analysis.get('translated_keywords', [])
+                    q.update(plan_fields)
+
+                result_dict['queries'] = self._enforce_single_query(
+                    result_dict.get('queries', [])
+                )
 
                 # Successfully parsed — break out and move to alias validation
                 break
@@ -490,11 +494,13 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 all_errors.append(f"JSONDecodeError on attempt {attempt + 1}: {e}")
                 error_msg = self._format_json_error(last_content, e)
                 if attempt < self.max_retries - 1:
-                    pydantic = self.reform_prompt_constraint("")
-                    # Rebuild from scratch with error feedback
+                    # Rebuild from scratch with error feedback appended AFTER
+                    # the unchanged initial message, so the retry still shares
+                    # the same cached prompt prefix. The schema itself already
+                    # rides in the (static) system message.
                     error_prompt = (
                         f"{initial_message}\n\n"
-                        f"Your previous output could not be parsed as JSON:\n{error_msg}\n{pydantic}"
+                        f"Your previous output could not be parsed as JSON:\n{error_msg}"
                     )
                     messages = message_builder.build(system_prompt, error_prompt)
                     time.sleep(self.retry_delay)
@@ -503,11 +509,10 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 all_errors.append(f"ValidationError on attempt {attempt + 1}: {e}")
                 error_msg = self._format_validation_error(e)
                 if attempt < self.max_retries - 1:
-                    pydantic = self.reform_prompt_constraint("")
                     # Rebuild from scratch with error feedback
                     error_prompt = (
-                        f"{enriched_prompt}\n\n"
-                        f"Your previous output failed schema validation:\n{error_msg}\n{pydantic}"
+                        f"{initial_message}\n\n"
+                        f"Your previous output failed schema validation:\n{error_msg}"
                     )
                     messages = message_builder.build(system_prompt, error_prompt)
                     time.sleep(self.retry_delay)
@@ -517,20 +522,20 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 if attempt < self.max_retries - 1:
                     # Rebuild from scratch with error feedback
                     error_prompt = (
-                        f"{enriched_prompt}\n\n"
+                        f"{initial_message}\n\n"
                         f"An error occurred: {e}\n"
-                        f"Return a JSON object matching:\n"
-                        f"{json.dumps(self.response_model.model_json_schema(), indent=2)}"
+                        f"Return a JSON object matching the schema in the instructions."
                     )
                     messages = message_builder.build(system_prompt, error_prompt)
                     time.sleep(self.retry_delay)
         else:
             # All JSON/Pydantic retries exhausted
             return (
-                {"queries": []},
+                self._finalize_query_set([]),
                 usage_total,
                 all_errors,
                 self.config["model"],
+                plan,
             )
 
         # ── Phase 2: table-alias validation with targeted retry loop ───────────
@@ -563,7 +568,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
             try:
                 response = self.router.completion(
                     model=self.config["model"],
-                    messages=retry_messages,
+                    messages=sanitize_messages(retry_messages),
                     temperature=self.temperature,
                 )
                 usage = response["usage"]
@@ -581,26 +586,18 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 retried = self.response_model.model_validate(json_data)
                 retried_dict = self.clean_query_set(retried.model_dump(), table_names)
 
-                # Merge table-level analysis into retried results as well
-                analyses_map = {t.get('alias') or t.get('name'): t for t in table_analyses}
+                # Re-apply the same planner-owned fields (including `tables`)
+                # the phase-1 queries got above — this is a FRESH LLM response,
+                # re-validated through the (tables-less) Query schema, so it
+                # never carries them on its own.
                 for q in retried_dict.get('queries', []):
-                    if not isinstance(q.get('tables'), list):
-                        continue
-                    for tbl in q['tables']:
-                        tbl_name = tbl.get('name') or tbl.get('alias')
-                        analysis = analyses_map.get(tbl_name, {})
-                        if 'description' not in tbl or not tbl.get('description'):
-                            tbl['description'] = analysis.get('table_description') or analysis.get('description', tbl.get('description', ''))
-                        if 'keywords' not in tbl or not tbl.get('keywords'):
-                            tbl['keywords'] = analysis.get('table_keywords') or analysis.get('keywords', tbl.get('keywords', []))
-                        if 'translated_keywords' not in tbl:
-                            tbl['translated_keywords'] = analysis.get('translated_keywords', [])
+                    q.update(plan_fields)
 
                 # Re-partition: some may now be fixed, others still broken
                 newly_good, bad_queries = self._partition_queries(
                     retried_dict.get("queries", []), all_aliases
                 )
-                good_queries.extend(newly_good)
+                good_queries.extend(self._enforce_single_query(newly_good))
 
             except (json.JSONDecodeError, ValidationError, Exception) as e:
                 all_errors.append(
@@ -616,10 +613,11 @@ class LLMClientStatementGenerator(LLMClientStructured):
             )
 
         return (
-            {"queries": good_queries},
+            self._finalize_query_set(good_queries),
             usage_total,
             all_errors,
             self.config["model"],
+            plan,
         )
 
     def _normalize_response(self, json_data: Any, root_key: str | None = "queries") -> Any:
@@ -633,27 +631,6 @@ class LLMClientStatementGenerator(LLMClientStructured):
                     return {root_key: [json_data]}
             return json_data
         return {root_key: [json_data]}
-
-    def add_suffix_constraint(self, prompt, dataframes, table_names, involved_cols):
-        from itertools import combinations
-        common_cols_info = []
-        for (name_a, df_a), (name_b, df_b) in combinations(zip(table_names, dataframes), 2):
-            common = set(df_a.columns) & set(df_b.columns)
-            common_cols_info.append(
-                f"  {name_a} ∩ {name_b}: {sorted(common) if common else '(no common columns)'}"
-            )
-        constraint = (
-            "### Suffix Constraint Information\n"
-            "Columns suffixed after merge (ONLY these get a suffix):\n"
-            + "\n".join(common_cols_info) + "\n\n"
-            + (
-                f"Join key columns (NEVER suffixed — kept as-is after merge):\n"
-                f"  {involved_cols}\n\n"
-                if involved_cols else ""
-            )
-            + "All other columns keep their original name — do not add any suffix to them.\n"
-        )
-        return f"{prompt}\n{constraint}"
 
     @staticmethod
     def clean_table_names(query_code: str, aliases: dict) -> str:

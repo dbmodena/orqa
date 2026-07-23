@@ -5,6 +5,8 @@ from typing import Any
 import yaml
 from litellm import Router
 
+from ..utility.message_builder import sanitize_messages
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -124,7 +126,13 @@ class LLMClient:
             "completion_tokens": 0,
             "total_tokens": 0,
         }
-        messages = [{"role": "system", "content": prompt}]
+        # The prompt goes in a USER message (with a minimal system preamble),
+        # not a lone system message — some providers (e.g. Cohere via OCI)
+        # reject requests with no user message at all.
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prompt},
+        ]
         completion_args = {
             "model": "primary",
             "messages": messages,
@@ -136,6 +144,7 @@ class LLMClient:
         for attempt in range(self.max_retries):
             try:
                 #print(f"Attempt {attempt + 1}/{self.max_retries}...")
+                completion_args["messages"] = sanitize_messages(messages)
                 response = self.router.completion(**completion_args)
                 usage = response["usage"]
                 usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
@@ -150,7 +159,7 @@ class LLMClient:
                 logger.error("Error on attempt %d: %s", attempt + 1, e)
                 # Wait before retry
                 if attempt < self.max_retries - 1:
-                    messages.append({"role": "user", "content": e})
+                    messages.append({"role": "user", "content": str(e)})
                     logger.debug("Retrying in %s seconds...", self.retry_delay)
                     time.sleep(self.retry_delay)
         # All retries exhausted

@@ -3,7 +3,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .LLMClientStructured import LLMClientStructured
+from ..llm_client.LLMClientStructured import LLMClientStructured
+from ..utility.message_builder import sanitize_messages
 from pydantic import ValidationError
 
 import logging
@@ -89,8 +90,12 @@ class TaskProposerLLMClient(LLMClientStructured):
             "completion_tokens": 0,
             "total_tokens": 0,
         }
+        # The prompt goes in a USER message (with a minimal system preamble),
+        # not a lone system message — some providers (e.g. Cohere via OCI)
+        # reject requests with no user message at all.
         messages = [
-            {"role": "system", "content": self.reform_prompt_constraint(prompt)}
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": self.reform_prompt_constraint(prompt)},
         ]
         completion_args = {
             "model": "primary",  # Router handles the actual model selection
@@ -106,6 +111,7 @@ class TaskProposerLLMClient(LLMClientStructured):
             try:
                 logger.debug("Attempt %d/%d...", attempt + 1, self.max_retries)
 
+                completion_args["messages"] = sanitize_messages(messages)
                 response = self.router.completion(**completion_args)
                 usage = response["usage"]
                 usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
@@ -197,31 +203,182 @@ class TaskProposerLLMClient(LLMClientStructured):
         return {}, usage_total
 
 
-if __name__ == "__main__":
-    ### testing main
-    import pandas as pd
-    import prompting
-    from prompting import DatasetDescription
+# Fields of PairTaskSelection whose values must exist in the Q-side schema
+# vs the R-side schema.
+_Q_SIDE_FIELDS = ("q_columns", "q_key", "q_target")
+_R_SIDE_FIELDS = ("r_columns", "r_key", "r_target")
 
-    #### we fetch the dataframes
-    folder = r"D:\uk_small\uk_small_copy\datasets\csv"
-    path = Path("litellm.yaml")
-    D1 = "2019-March-return__3f436d14-4e17-476c-a3e4-66d18e7f6c90"
-    # Load CSVs
-    df1 = pd.read_csv(Path(folder) / f"{D1}.csv")
-    df1["Amount"] = df1["Amount"].str.replace(",", "").astype(float)
 
-    ### define the tables aliases
-    TABLE1 = f"df_{D1.split('__')[0].replace('-', '_')}"
-    # Create table descriptions
-    descriptor = DatasetDescription()
-    table = descriptor.update(TABLE1, df1.shape[0], df1.shape[1], "", "", df1.head(3))
+class PairTaskSelectorLLMClient(LLMClientStructured):
+    """
+    Structured client selecting discovery operations for one concrete
+    (Q, R) dataset pair: validates each side's columns against its own
+    schema and requires numeric correlation targets on both sides.
+    """
 
-    # Load prompt
-    prompt = prompting._load_prompt("prompt.md", "Analyze", table=table)
-    client = LLMClientTableAnalyzer(Path("litellm.yaml"))
-    ### testing queries
-    print(prompt)
-    result = client.complete(prompt)
-    print(result)
+    def __init__(self, config_path: Path):
+        super().__init__(config_path, "pair_task_selector")
+
+    def _value_validation_error(
+        self, content: dict, q_schema: list, r_schema: list
+    ) -> tuple[bool, str | None]:
+        """Route each field to the schema of its side (q_* → Q, r_* → R)."""
+        hallucinated: dict[str, set] = {"Q": set(), "R": set()}
+
+        def check(value, schema, side):
+            if isinstance(value, list):
+                hallucinated[side].update(c for c in value if c not in schema)
+            elif isinstance(value, str) and value not in schema:
+                hallucinated[side].add(value)
+
+        def walk(obj):
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if key in _Q_SIDE_FIELDS:
+                        check(value, q_schema, "Q")
+                    elif key in _R_SIDE_FIELDS:
+                        check(value, r_schema, "R")
+                    else:
+                        walk(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    walk(item)
+
+        walk(content)
+
+        if hallucinated["Q"] or hallucinated["R"]:
+            parts = []
+            if hallucinated["Q"]:
+                parts.append(
+                    f"Columns not in dataset Q: {sorted(hallucinated['Q'])}\n"
+                    f"Dataset Q columns: {q_schema}"
+                )
+            if hallucinated["R"]:
+                parts.append(
+                    f"Columns not in dataset R: {sorted(hallucinated['R'])}\n"
+                    f"Dataset R columns: {r_schema}"
+                )
+            formatted_error = (
+                "❌ Hallucination ERROR - Your response contains columns that "
+                "do not exist.\n\n" + "\n\n".join(parts) + "\n\n"
+                "Please generate ONLY a valid JSON object using q_-prefixed "
+                "fields with Q's real columns and r_-prefixed fields with R's "
+                "real columns.\n"
+            )
+            return True, formatted_error
+
+        return False, None
+
+    def _correlation_validation_error(
+        self, result: dict, q_column_typings: dict, r_column_typings: dict
+    ) -> str | None:
+        """Correlation targets must be numeric on their respective sides."""
+        for task in result.get("join_correlation_tasks", []):
+            for target, typings, side in (
+                (task.get("q_target"), q_column_typings, "Q"),
+                (task.get("r_target"), r_column_typings, "R"),
+            ):
+                if target and not typings.get(target, False):
+                    return (
+                        "❌ Correlation ERROR - Non-numerical column used.\n\n"
+                        f"The result: {result}\n\n"
+                        f"The column '{target}' of dataset {side} is not "
+                        "numerical. Correlation can only be computed on "
+                        "numerical columns (Int*, UInt*, Float*).\n"
+                    )
+        return None
+
+    def complete(
+        self,
+        prompt: str,
+        q_schema: list,
+        r_schema: list,
+        q_column_typings: dict,
+        r_column_typings: dict,
+        **kwargs,
+    ) -> Any:
+        usage_total = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": self.reform_prompt_constraint(prompt)},
+        ]
+        completion_args = {
+            "model": "primary",
+            "messages": messages,
+            "temperature": self.temperature,
+            **kwargs,
+        }
+        last_content = None
+        last_error = None
+
+        for attempt in range(self.max_retries):
+            try:
+                logger.debug("Attempt %d/%d...", attempt + 1, self.max_retries)
+
+                completion_args["messages"] = sanitize_messages(messages)
+                response = self.router.completion(**completion_args)
+                usage = response["usage"]
+                usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
+                usage_total["completion_tokens"] += usage.get("completion_tokens", 0)
+                usage_total["total_tokens"] += usage.get("total_tokens", 0)
+                content = response["choices"][0]["message"]["content"]
+                last_content = content
+                cleaned_content = self._clean_json_response(content)
+
+                try:
+                    json_data = json.loads(cleaned_content)
+                    result = self.response_model.model_validate(json_data)
+                    result = result.model_dump()
+
+                    invalid, error_msg = self._value_validation_error(
+                        result, q_schema, r_schema
+                    )
+                    if not invalid:
+                        error_msg = self._correlation_validation_error(
+                            result, q_column_typings, r_column_typings
+                        )
+                        invalid = error_msg is not None
+                    if invalid:
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "user", "content": error_msg})
+                        continue
+
+                    logger.debug("Success on attempt %d", attempt + 1)
+                    return result, usage_total
+                except json.JSONDecodeError as e:
+                    last_error = e
+                    error_msg = self._format_json_error(cleaned_content, e)
+                    logger.warning("JSON parsing error on attempt %d", attempt + 1)
+                    if attempt < self.max_retries - 1:
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "user", "content": error_msg})
+                        time.sleep(self.retry_delay)
+                        continue
+                except ValidationError as e:
+                    last_error = e
+                    error_msg = self._format_validation_error(e)
+                    logger.warning("Validation error on attempt %d", attempt + 1)
+                    if attempt < self.max_retries - 1:
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "user", "content": error_msg})
+                        time.sleep(self.retry_delay)
+                        continue
+
+            except Exception as e:
+                last_error = e
+                logger.error("Error on attempt %d: %s", attempt + 1, e)
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay)
+
+        logger.error(
+            "Failed after %d attempts. Last error: %s", self.max_retries, last_error
+        )
+        if last_content:
+            logger.debug("Last response preview:\n%s...", last_content[:300])
+
+        return {}, usage_total
 

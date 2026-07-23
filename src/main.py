@@ -3,7 +3,9 @@ from conf import OrQAConfig
 
 import argparse
 import importlib
+#import logging
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -17,8 +19,12 @@ STEP_CHOICES = (
     "normalize-metadata",
     "index",
     "candidates-discovery",
-    "generate-statements"
+    "generate-query-candidates",
+    "generate-statements",
+    "mcp_search",
 )
+
+MCP_MODE_CHOICES = ("stdio", "port", "build")
 
 
 @dataclass(frozen=True)
@@ -126,6 +132,17 @@ def build_parser() -> argparse.ArgumentParser:
         choices=STEP_CHOICES,
         help="One or more workflow steps to execute, in the order provided.",
     )
+    parser.add_argument(
+        "--mode",
+        choices=MCP_MODE_CHOICES,
+        default="stdio",
+        help=(
+            "Transport for the mcp_search step: 'stdio' for clients that "
+            "spawn the server, 'port' to listen on the port set in the "
+            "city's workflow yaml, 'build' to only materialize the index "
+            "and exit."
+        ),
+    )
     return parser
 
 
@@ -175,11 +192,11 @@ def resolve_data_path(spec: TargetSpec) -> Path:
     return Path(data_dir) / spec.relative_data_path
 
 
-def load_cfg(spec: TargetSpec) -> OrQAConfig:
+def load_cfg(spec: TargetSpec, out=None) -> OrQAConfig:
     from dotenv import load_dotenv
 
     dotenv_path = _PROJECT_ROOT / ".env"
-    print(f"Loading .env file from {dotenv_path}")
+    print(f"Loading .env file from {dotenv_path}", file=out or sys.stdout)
     load_dotenv(dotenv_path)
 
     if not spec.workflow_path.exists():
@@ -198,7 +215,7 @@ def _import_callable(dotted_path: str):
     return getattr(module, attr_name)
 
 
-def _step_callable_path(step: str, spec: TargetSpec) -> str:
+def _step_callable_path(step: str, spec: TargetSpec, cfg) -> str:
     if step == "crawl":
         return f"orqa.crawling:crawl_{spec.target_id}"
     if step == "clean":
@@ -209,22 +226,46 @@ def _step_callable_path(step: str, spec: TargetSpec) -> str:
         }
         return cleaning_functions[spec.backend]
 
+    # The workflow yaml (tasks.candidates_discovery.method) decides which
+    # discovery pipeline runs and which artifact lineage all steps use.
+    discovery_method = cfg.candidates_discovery.method
+    if step == "index" and discovery_method != "blend":
+        raise ValueError(
+            "The 'index' step builds the BLEND index, but this workflow "
+            "sets tasks.candidates_discovery.method: semantic. Set the "
+            "method to 'blend' to use the classical pipeline."
+        )
+    if step == "candidates-discovery":
+        if discovery_method == "semantic":
+            # embeddings + HNSW + Valentine
+            return "orqa.embedding_discovery.pipeline:candidates_discovery"
+        # BLEND index + SLOTH/Valentine verification
+        return "orqa.candidates_generation:candidates_discovery"
+
     step_paths = {
         "normalize-metadata": "orqa.normalize_metadata:normalize_metadata",
         "index": "orqa.indexing:create_blend_index",
-        "candidates-discovery": "orqa.candidates_generation:candidates_discovery",
+        "generate-query-candidates": "orqa.query_candidates:generate_query_candidates",
         "generate-statements": "orqa.statement_generation:generate_statements",
+        "mcp_search": "orqa.benchmark.server:run_mcp_search",
     }
     return step_paths[step]
 
 
-def run_steps(cfg, spec: TargetSpec, steps: Sequence[str]) -> None:
+def run_steps(
+    cfg, spec: TargetSpec, steps: Sequence[str], mcp_mode: str = "stdio"
+) -> None:
     for step in steps:
-        step_callable = _import_callable(_step_callable_path(step, spec))
-        step_callable(cfg)
+        step_callable = _import_callable(_step_callable_path(step, spec, cfg))
+        if step == "mcp_search":
+            step_callable(cfg, mode=mcp_mode)
+        else:
+            step_callable(cfg)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    #logging.basicConfig(level=logging.INFO, format="%(message)s")
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -233,17 +274,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
+    # In stdio mode stdout carries the MCP JSON-RPC stream, so all
+    # diagnostics must go to stderr.
+    out = (
+        sys.stderr
+        if "mcp_search" in args.steps and args.mode == "stdio"
+        else sys.stdout
+    )
+
     try:
-        cfg = load_cfg(spec)
+        cfg = load_cfg(spec, out=out)
 
-        print(f" LOADED PATHS ".center(100, "="))
-        print(f"Root data directory: {cfg.data_path}")
-        print(f"Prompts folder: {cfg.prompts_path}")
-        print(f"LLM configurations folder: {cfg.llm_config_path}")
-        print(f"Crawled datasets folder: {cfg.crawled_datasets_path}")
-        print(f"Processed datasets folder: {cfg.datasets_path}")
+        print(f" LOADED PATHS ".center(100, "="), file=out)
+        print(f"Discovery method: {cfg.candidates_discovery.method}", file=out)
+        print(f"Root data directory: {cfg.data_path}", file=out)
+        print(f"Prompts folder: {cfg.prompts_path}", file=out)
+        print(f"Skills folder: {cfg.skills_path}", file=out)
+        print(f"LLM configurations folder: {cfg.llm_config_path}", file=out)
+        print(f"Crawled datasets folder: {cfg.crawled_datasets_path}", file=out)
+        print(f"Processed datasets folder: {cfg.datasets_path}", file=out)
 
-        run_steps(cfg, spec, args.steps)
+        run_steps(cfg, spec, args.steps, mcp_mode=args.mode)
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         parser.exit(status=1, message=f"{exc}\n")
 

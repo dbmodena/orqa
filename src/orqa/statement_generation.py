@@ -8,7 +8,10 @@ from typing import AsyncGenerator
 
 import pandas as pd
 
-from .agent.agent import StatementGenerationAgent, SingleTableStatementGenerationAgent
+from .agent.agent import TableAnalysisAgent
+from .agent.agents.StatementAgent import StatementAgent
+from .agent.agents.SingleStatementAgent import SingleStatementAgent
+from .benchmark.questions import get_entry, store_entry
 from .utils import load_datasets_metadata,load_normalized_datasets_metadata, load_dataset_info, save_json, load_json, prepare_dataframe
 from conf import OrQAConfig
 from dataclasses import dataclass, field
@@ -24,157 +27,6 @@ def _compute_timeout(max_tokens: int) -> float:
     """
     buckets = math.ceil(max_tokens / _TOKENS_PER_BUCKET)
     return buckets * _TIMEOUT_SECONDS_PER_5K_TOKENS
-
-
-def load_tasks(tasks_file: Path) -> dict:
-    """Load tasks_results.json and index by (Q, R, task)."""
-    tasks = {}
-    with open(tasks_file) as f:
-        for line in f:
-            if line.strip():
-                spec = json.loads(line)
-                tasks[(spec["Q"], spec["R"], spec["task"])] = spec
-    return tasks
-
-
-# ── Match builders ────────────────────────────────────────────────────────────
-
-def _is_string_column(df: pd.DataFrame, col: str) -> bool:
-    """Return True only when the column exists and holds object/string dtype."""
-    if col not in df.columns:
-        return False
-    return pd.api.types.is_string_dtype(df[col]) or pd.api.types.is_object_dtype(df[col])
-
-
-def _resolve_case_insensitive(
-    task_spec: dict,
-    dfs: dict[str, pd.DataFrame],
-    left_alias: str,
-    right_alias: str,
-) -> bool:
-    """
-    Return True only when case_insensitive was requested AND every join key
-    involved is actually a string column.  Numeric / date keys must never get
-    .str.lower() / LOWER().
-    """
-    if not task_spec.get("case_insensitive", False):
-        return False
-    left_on  = task_spec.get("q_columns", [])
-    right_on = task_spec.get("r_columns", [])
-    df_l = dfs.get(left_alias)
-    df_r = dfs.get(right_alias)
-    if df_l is None or df_r is None:
-        return False   # can't verify → be conservative
-    return (
-        all(_is_string_column(df_l, c) for c in left_on)
-        and all(_is_string_column(df_r, c) for c in right_on)
-    )
-
-
-def _make_union_match(task_spec, df_q, df_r, alias_q, alias_r):
-    q_columns = task_spec.get("q_columns", [])
-    r_columns = task_spec.get("r_columns", [])
-    involved = {alias_q: set(q_columns), alias_r: set(r_columns)}
-    col_str = f"{q_columns} / {r_columns}" if q_columns or r_columns else "All columns"
-    return {
-        "description": f"UNION: {alias_q} ∪ {alias_r} ON {col_str}",
-        "match_spec": {
-            "type": "union",
-            "left": alias_q,
-            "right": alias_r,
-            "left_cols": q_columns,
-            "right_cols": r_columns,
-        },
-        "pandas_expr": f"concat([{alias_q}[{q_columns}], {alias_r}[{r_columns}]], ignore_index=True)",
-        "columns": {k: list(v) for k, v in involved.items()},
-    }
-
-
-def _make_join_match(task_spec, df_r, alias_q, alias_r, df_q=None):
-    q_keys = task_spec.get("q_columns", [])
-    r_keys = task_spec.get("r_columns", [])
-    involved = {alias_q: set(q_keys), alias_r: set(r_keys)}
-    conditions = " AND ".join(
-        f"{alias_q}.{q_keys[i]} = {alias_r}.{r_keys[i]}" for i in range(len(q_keys))
-    )
-    ci = _resolve_case_insensitive(
-        task_spec,
-        {alias_q: df_q, alias_r: df_r} if df_q is not None else {alias_r: df_r},
-        alias_q,
-        alias_r,
-    )
-    return {
-        "description": f"JOIN: {alias_q} ⋈ {alias_r} ON {conditions}",
-        "match_spec": {
-            "type": "merge",
-            "how": "inner",
-            "left": alias_q,
-            "right": alias_r,
-            "left_on": q_keys,
-            "right_on": r_keys,
-            "case_insensitive": ci,
-            "relationship": task_spec.get("relationship", ""),
-        },
-        "pandas_expr": (
-            f"merge(left={alias_q}, right={alias_r}, "
-            f"left_on={q_keys}, right_on={r_keys}, "
-            f"suffixes=('_{alias_q}', '_{alias_r}'))"
-        ),
-        "columns": {k: list(v) for k, v in involved.items()},
-    }
-
-
-def _make_join_correlation_match(task_spec, df_q, df_r, alias_q, alias_r):
-    q_key    = task_spec["q_key"]
-    r_key    = task_spec["r_key"]
-    q_target = task_spec["q_target"]
-    r_target = task_spec["r_target"]
-    involved = {alias_q: {q_key, q_target}, alias_r: {r_key, r_target}}
-    ci = _resolve_case_insensitive(
-        {"case_insensitive": task_spec.get("case_insensitive", False),
-         "q_columns": [q_key], "r_columns": [r_key]},
-        {alias_q: df_q, alias_r: df_r},
-        alias_q,
-        alias_r,
-    )
-    return {
-        "description": (
-            f"JOIN-CORRELATION: merge {alias_q} ⋈ {alias_r} "
-            f"ON {alias_q}.{q_key} = {alias_r}.{r_key}"
-            + (" [case-insensitive]" if ci else "")
-            + f", then correlate {alias_q}.{q_target} with {alias_r}.{r_target}"
-        ),
-        "match_spec": {
-            "type": "merge_correlation",
-            "how": "inner",
-            "left": alias_q,
-            "right": alias_r,
-            "left_on": [q_key],
-            "right_on": [r_key],
-            "case_insensitive": ci,
-            "relationship": task_spec.get("relationship", ""),
-            "correlation_cols": {alias_q: q_target, alias_r: r_target},
-        },
-        "pandas_expr": (
-            f"{alias_q}.merge({alias_r}, "
-            f"left_on={alias_q}['{q_key}'].str.lower(), "
-            f"right_on={alias_r}['{r_key}'].str.lower(), "
-            f"suffixes=('_{alias_q}', '_{alias_r}'))"
-            f"[['{q_target}_{alias_q}', '{r_target}_{alias_r}']].corr()"
-        ),
-        "columns": {k: list(v) for k, v in involved.items()},
-    }
-
-
-def make_match(task_spec, df_q, df_r, alias_q, alias_r):
-    task = task_spec["task"]
-    if task == "U":
-        return _make_union_match(task_spec, df_q, df_r, alias_q, alias_r)
-    if task == "J":
-        return _make_join_match(task_spec, df_r, alias_q, alias_r, df_q=df_q)
-    if task == "JC":
-        return _make_join_correlation_match(task_spec, df_q, df_r, alias_q, alias_r)
-    return None
 
 
 # ── Match formatting ──────────────────────────────────────────────────────────
@@ -399,87 +251,6 @@ def format_matches_for_prompt(
     return _format_matches_pandas(match_specs, dfs=dfs, involved_cols=involved_cols, sample_n=sample_n)
 
 
-# ── Match processing ──────────────────────────────────────────────────────────
-
-def process_path(path: dict, tasks: dict, csv_folder: Path) -> dict | None:
-    datasets   = path["datasets"]
-    operations = path["operation_type"]
-    aliases    = {f"Table_{i}": datasets[i] for i in range(len(datasets))}
-    all_columns = {f"Table_{i}": set() for i in range(len(datasets))}
-    path_matches     = []
-    path_pandas      = []
-    path_match_specs = []
-
-    for i in range(len(datasets) - 1):
-        pair_matches = []
-        pair_pandas  = []
-        pair_specs   = []
-
-        df_i  = pd.read_csv(csv_folder / f"{datasets[i]}.csv",     low_memory=False)
-        df_i1 = pd.read_csv(csv_folder / f"{datasets[i+1]}.csv",   low_memory=False)
-
-        for op in operations:
-            key          = (datasets[i], datasets[i+1], op)
-            reversed_key = False
-            if key not in tasks:
-                key          = (datasets[i+1], datasets[i], op)
-                reversed_key = True
-            if key not in tasks:
-                continue
-
-            if reversed_key:
-                result = make_match(tasks[key], df_i1, df_i, f"Table_{i+1}", f"Table_{i}")
-            else:
-                result = make_match(tasks[key], df_i,  df_i1, f"Table_{i}",  f"Table_{i+1}")
-
-            if result:
-                pair_matches.append(result["description"])
-                pair_pandas.append(result["pandas_expr"])
-                pair_specs.append(result["match_spec"])
-                for alias, cols in result["columns"].items():
-                    all_columns[alias].update(cols)
-
-        if not pair_matches:
-            print(f"Filtered: no match found for Table_{i} ↔ Table_{i+1}.")
-            return None
-
-        path_matches.extend(pair_matches)
-        path_pandas.extend(pair_pandas)
-        path_match_specs.extend(pair_specs)
-
-    return {
-        "aliases":          aliases,
-        "SQL_matches":      path_matches,
-        "PANDAS_matches":   path_pandas,
-        "match_specs":      path_match_specs,
-        "columns_by_table": {k: list(v) for k, v in all_columns.items()},
-    }
-
-
-def process_all_candidates(
-    candidates_file: Path, tasks_file: Path,
-    csv_folder: Path, output_file: Path,
-) -> list[dict]:
-    """Process all candidate paths and write matches.json."""
-    print("Loading...")
-    tasks = load_tasks(tasks_file)
-    with open(candidates_file) as f:
-        candidates = json.load(f)
-    print(f"✓ {len(tasks)} tasks, {len(candidates)} datasets")
-
-    results = []
-    for dataset_id, path_groups in candidates.items():
-        for group in path_groups:
-            for path in group["paths"]:
-                record = process_path(path, tasks, csv_folder)
-                if record:
-                    results.append({"dataset_id": dataset_id, **record})
-
-    save_json(results, output_file)
-    print(f"✓ Saved {len(results)} results to {output_file}")
-    return results
-
-
 # ── Statement generation ──────────────────────────────────────────────────────
 
 def _build_match_inputs(
@@ -512,23 +283,34 @@ def _build_match_inputs(
     return dataset_paths, aliases, metadatas, involved_cols, dfs
 
 def _is_single_table_candidate(match: dict) -> bool:
-    """Check if a candidate has a single dataset and no cross-table match definitions."""
+    """Check if a candidate has a single dataset and no cross-table relationships."""
     aliases = match.get("aliases", {})
     if len(aliases) != 1:
         return False
-    has_sql    = bool(match.get("SQL_matches"))
-    has_pandas = bool(match.get("PANDAS_matches"))
-    return not has_sql and not has_pandas
+    has_relationships = bool(
+        match.get("relationships")
+        or match.get("match_specs")       # legacy chain-format files
+        or match.get("SQL_matches")
+        or match.get("PANDAS_matches")
+    )
+    return not has_relationships
 
 
 def _sample_single_table_datasets(
     datasets_path: Path,
     count: int,
     extension: str = "csv",
+    seed: int = 0,
 ) -> list[Path]:
-    """Return up to ``count`` randomly sampled dataset paths."""
-    all_files = list(datasets_path.glob(f"*.{extension}"))
-    return random.sample(all_files, min(count, len(all_files)))
+    """
+    Return up to ``count`` randomly sampled dataset paths.
+
+    The glob result is sorted and the sampler seeded with the workflow
+    seed, so every run (and every sibling workflow sharing the yaml seed)
+    selects the same datasets.
+    """
+    all_files = sorted(datasets_path.glob(f"*.{extension}"))
+    return random.Random(seed).sample(all_files, min(count, len(all_files)))
 
 
 def _get_formatted_match(
@@ -539,30 +321,65 @@ def _get_formatted_match(
 ) -> str:
     """
     Return a formatted match string for the given kind (SQL or PANDAS).
-    Uses structured match_specs when available; falls back to legacy string lists.
+    Uses the structured ``relationships`` list when available (falling back to
+    the legacy ``match_specs`` key, then to the legacy string lists).
     ``dfs`` and ``involved_cols`` are forwarded to the PANDAS formatter only.
     """
-    if "match_specs" in match and match["match_specs"]:
+    specs = match.get("relationships") or match.get("match_specs")
+    if specs:
         return format_matches_for_prompt(
-            match["match_specs"], kind=kind, dfs=dfs, involved_cols=involved_cols
+            specs, kind=kind, dfs=dfs, involved_cols=involved_cols
         )
     return "\n".join(match.get(f"{kind}_matches", []))
 
 
 def _already_succeeded(results: dict, kind: str, idx: str) -> bool:
-    """Return True if any model already has a 'success' entry for this idx and kind."""
-    for model_data in results.values():
-        entry = model_data.get(kind, {}).get(idx)
-        if entry and entry.get("status") == "success":
-            return True
-    return False
+    """Return True if the queries file has a 'success' entry for this id and kind."""
+    entry = get_entry(results, kind, idx)
+    return bool(entry) and entry.get("_meta", {}).get("status") == "success"
+
+
 def _already_processed(results: dict, kind: str, idx: str) -> bool:
-    """Return True if any model already has a 'success' entry for this idx and kind."""
-    for model_data in results.values():
-        entry = model_data.get(kind, {}).get(idx)
-        if entry:
-            return True
-    return False
+    """Return True if the queries file already has an entry for this id and kind."""
+    return get_entry(results, kind, idx) is not None
+
+
+def _store_generation(
+    results: dict,
+    kind: str,
+    entry_id: str,
+    content: dict,
+    aliases: dict,
+    generation_time: float,
+) -> str:
+    """
+    Store one candidate's generation output in the shared hierarchy
+    (kind -> single_table|multi_table -> query id -> question number),
+    with the run-wide fields under "_meta". Returns the entry status.
+    """
+    result = content["result"]
+    queries = result.get("queries") or []
+    meta = {
+        "model": content["model"].split("/")[-1],
+        # A structural pre-generation failure carries its own status (e.g.
+        # "insufficient_rows", "unjustifiable_group") set by the agent;
+        # otherwise the status is derived from whether queries survived.
+        "status": result.get("status") or ("success" if queries else "failure"),
+        "tokens": content["token_usage"],
+        "tables": aliases,
+        "errors": content["errors"],
+        "generation_time": generation_time,
+        "avg_cols": content["avg_cols"],
+    }
+    if content.get("proposed_columns") is not None:
+        meta["proposed_columns"] = content["proposed_columns"]
+    if content.get("query_plan"):
+        meta["query_plan"] = content["query_plan"]
+    extra = {k: v for k, v in result.items() if k not in ("queries", "status")}
+    if extra:
+        meta["result_extra"] = extra
+    store_entry(results, kind, entry_id, queries, meta)
+    return meta["status"]
 
 def create_statements(
     config_path: Path,
@@ -576,7 +393,7 @@ def create_statements(
     enable_single_table: bool = False,
     single_table_query_count: int = 0,
     languages: list= ["English"],
-    allow_tabpfn: bool = False,
+    seed: int = 0,
 ) -> list[dict]:
     bad_tokens = bad_tokens or []
 
@@ -586,8 +403,79 @@ def create_statements(
     all_matches: list = load_json(candidates_file)
     results = load_json(output_file) if output_file.exists() else {}
 
-    cross_agent = StatementGenerationAgent(config_path, kind, bad_tokens, languages=languages, allow_tabpfn=allow_tabpfn)
+    # Table analyses (description + keywords) are cached per table id and
+    # model in the candidates-discovery folder, so a table already seen by an
+    # earlier candidate/run is fetched from disk instead of re-analysed.
+    analysis_cache_path = candidates_file.parent / "table_analysis_cache.json"
 
+    # ── Stage 0: pre-generation table analysis ────────────────────────────
+    # Every table this run will touch (all cross-table candidate datasets plus
+    # the deterministically sampled single tables — same seed as the loop
+    # below, so the samples are identical) is analysed HERE, before any
+    # statement generation. The generation agents then read every description/
+    # keyword set straight from the cache, fully decoupling table analysis
+    # from the statement-generation orchestrator.
+    involved_paths = [
+        csv_folder / f"{dataset}.csv"
+        for match in all_matches
+        for dataset in match.get("aliases", {}).values()
+    ]
+    if enable_single_table and single_table_query_count > 0:
+        involved_paths.extend(
+            _sample_single_table_datasets(csv_folder, single_table_query_count, seed=seed)
+        )
+    TableAnalysisAgent(
+        config_path,
+        analysis_cache_path,
+        languages=languages,
+        bad_tokens=bad_tokens,
+        max_cols=max_cols,
+        seed=seed,
+    ).analyze_tables(involved_paths, datasets_metadata)
+
+    cross_agent = StatementAgent(
+        config_path, kind, bad_tokens, languages=languages, seed=seed,
+        analysis_cache_path=analysis_cache_path,
+    )
+
+
+# ── Single-table generation ───────────────────────────────────────────────
+    if enable_single_table and single_table_query_count > 0:
+        print(f"\nStarting single-table generation ({single_table_query_count} datasets)...")
+        sampled = _sample_single_table_datasets(csv_folder, single_table_query_count, seed=seed)
+        single_agent = SingleStatementAgent(
+            config_path, kind, bad_tokens, languages=languages, seed=seed,
+            analysis_cache_path=analysis_cache_path,
+        )
+
+        for st_idx, csv_path in enumerate(sampled):
+            dataset_name = csv_path.stem
+            aliases = {"Table_0": dataset_name}
+            str_idx = f"st_{st_idx}"
+
+            if _already_processed(results, kind, str_idx):
+                print(f"[st_{st_idx}] Already processed — skipping.")
+                continue
+
+            start = __import__("time").perf_counter()
+
+            content = single_agent.generate_statements(
+                csv_path, aliases, kind,
+                datasets_metadata.get(dataset_name),
+                max_cols, sample_size=5,
+            )
+
+            generation_time = __import__("time").perf_counter() - start
+
+            actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
+            cooldown = _compute_timeout(actual_tokens)
+            print(f"[st_{st_idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
+            __import__("time").sleep(cooldown)
+
+            _store_generation(results, kind, str_idx, content, aliases, generation_time)
+            save_json(results, output_file)
+            sys.stdout.flush()
+            
     # ── Cross-table generation ────────────────────────────────────────────────
     for idx, match in enumerate(all_matches):
         #if _is_single_table_candidate(match):
@@ -620,69 +508,11 @@ def create_statements(
         print(f"[{idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
         __import__("time").sleep(cooldown)
 
-        result = content["result"]
-        model  = content["model"].split("/")[-1]
-
-        results.setdefault(model, {}).setdefault(kind, {})[str_idx] = {
-            "status":          "success" if result.get("queries") else "failure",
-            "proposed_columns":content["proposed_columns"],
-            "data":            result,
-            "tokens":          content["token_usage"],
-            "tables":          aliases,
-            "errors":          content["errors"],
-            "generation_time": generation_time,
-            "avg_cols":        content["avg_cols"],
-        }
+        _store_generation(results, kind, str_idx, content, aliases, generation_time)
         save_json(results, output_file)
         sys.stdout.flush()
 
-    # ── Single-table generation ───────────────────────────────────────────────
-    if enable_single_table and single_table_query_count > 0:
-        print(f"\nStarting single-table generation ({single_table_query_count} datasets)...")
-        sampled = _sample_single_table_datasets(csv_folder, single_table_query_count)
-        single_agent = SingleTableStatementGenerationAgent(
-            config_path, kind, bad_tokens, languages=languages, allow_tabpfn=allow_tabpfn
-        )
-
-        for st_idx, csv_path in enumerate(sampled):
-            dataset_name = csv_path.stem
-            aliases = {"Table_0": dataset_name}
-            str_idx = f"st_{st_idx}"
-
-            if _already_processed(results, kind, str_idx):
-                print(f"[st_{st_idx}] Already processed — skipping.")
-                continue
-
-            start = __import__("time").perf_counter()
-
-            content = single_agent.generate_statements(
-                csv_path, aliases, kind,
-                datasets_metadata.get(dataset_name),
-                max_cols, sample_size=5,
-            )
-
-            generation_time = __import__("time").perf_counter() - start
-
-            actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
-            cooldown = _compute_timeout(actual_tokens)
-            print(f"[st_{st_idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
-            __import__("time").sleep(cooldown)
-
-            result = content["result"]
-            model  = content["model"].split("/")[-1]
-
-            results.setdefault(model, {}).setdefault(kind, {})[str_idx] = {
-                "status":          "success" if result.get("queries") else "failure",
-                "proposed_columns":content.get("proposed_columns"),
-                "data":            result,
-                "tokens":          content["token_usage"],
-                "tables":          aliases,
-                "errors":          content["errors"],
-                "generation_time": generation_time,
-                "avg_cols":        content["avg_cols"],
-            }
-            save_json(results, output_file)
-            sys.stdout.flush()
+    
 
     print(f"\nResults saved to {output_file}")
     return results
@@ -734,12 +564,111 @@ async def stream_generate_statements(
     enable_single_table      = cfg.statement_generation.enable_single_table
     single_table_query_count = cfg.statement_generation.single_table_query_count
 
-    # ── Cross-table generation ────────────────────────────────────────────────
-    cross_agent = StatementGenerationAgent(
+    analysis_cache_path = (
+        cfg.statement_generation.query_candidates_path.parent
+        / "table_analysis_cache.json"
+    )
+
+    # ── Stage 0: pre-generation table analysis (see create_statements) ────
+    # Analyse every involved table up front so the generation agents below
+    # only ever READ descriptions/keywords from the cache.
+    def _pre_analyze() -> None:
+        involved = [
+            cfg.datasets_path / f"{dataset}.csv"
+            for match in all_matches
+            for dataset in match.get("aliases", {}).values()
+        ]
+        if enable_single_table and single_table_query_count:
+            involved.extend(
+                _sample_single_table_datasets(
+                    cfg.datasets_path, single_table_query_count, "csv", cfg.seed
+                )
+            )
+        TableAnalysisAgent(
+            cfg.llm_config_path / "litellm.yaml",
+            analysis_cache_path,
+            bad_tokens=cfg.statement_generation.bad_tokens,
+            max_cols=cfg.candidates_discovery.limit_to_n_columns,
+            seed=cfg.seed,
+        ).analyze_tables(involved, metadata)
+
+    try:
+        await loop.run_in_executor(None, _pre_analyze)
+    except Exception as exc:
+        yield {"type": "error", "message": str(exc)}
+        return
+
+    progress_idx = 0  # Track overall progress across single + cross table
+    st_total = 0  # Will be set if single-table generation runs
+
+    # ── Single-table generation FIRST (random CSV sampling) ───────────────────────────
+    if enable_single_table and single_table_query_count:
+        sampled = await loop.run_in_executor(
+            None, _sample_single_table_datasets,
+            cfg.datasets_path, single_table_query_count, "csv", cfg.seed,
+        )
+        st_total = len(sampled)
+
+        single_agent = SingleStatementAgent(
+            cfg.llm_config_path / "litellm.yaml",
+            kind,
+            cfg.statement_generation.bad_tokens,
+            seed=cfg.seed,
+            analysis_cache_path=analysis_cache_path,
+        )
+        for st_idx, csv_path in enumerate(sampled):
+            dataset_name = csv_path.stem
+            aliases = {"Table_0": dataset_name}
+
+            def _process_single(csv_path=csv_path, aliases=aliases):
+                content = single_agent.generate_statements(
+                    csv_path, aliases, kind,
+                    metadata.get(csv_path.stem),
+                    cfg.candidates_discovery.limit_to_n_columns, sample_size=5,
+                )
+                return content
+
+            try:
+                content = await loop.run_in_executor(None, _process_single)
+            except Exception as exc:
+                yield {"type": "error", "message": str(exc)}
+                return
+
+            result = content["result"]
+
+            if result.get("queries"): successes += 1
+            else:                     failures  += 1
+
+            status = _store_generation(
+                results, kind, f"st_{st_idx}", content, aliases, content["time_elapsed"]
+            )
+
+            await loop.run_in_executor(None, save_json, results, output_file)
+
+            actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
+            cooldown = _compute_timeout(actual_tokens)
+            print(f"[st_{st_idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
+            await asyncio.sleep(cooldown)
+
+            progress_idx += 1
+            yield {
+                "type":        "progress",
+                "idx":         progress_idx,
+                "total":       total + st_total,
+                "successes":   successes,
+                "failures":    failures,
+                "status":      status,
+                "aliases":     list(aliases.values()),
+                "query_count": len(result.get("queries", [])),
+            }
+
+    # ── Cross-table generation THEN ────────────────────────────────────────────────
+    cross_agent = StatementAgent(
         cfg.llm_config_path / "litellm.yaml",
         kind,
         cfg.statement_generation.bad_tokens,
-        allow_tabpfn=cfg.statement_generation.allow_tabpfn,
+        seed=cfg.seed,
+        analysis_cache_path=analysis_cache_path,
     )
     for idx, match in enumerate(all_matches):
         #if idx < resume_from:
@@ -754,7 +683,7 @@ async def stream_generate_statements(
                 dataset_paths, aliases, kind,
                 formatted_match,
                 involved_cols, metadatas,
-                cfg.statement_generation.max_cols, sample_size=5,
+                cfg.candidates_discovery.limit_to_n_columns, sample_size=5,
             )
             return content, aliases
 
@@ -765,21 +694,13 @@ async def stream_generate_statements(
             return
 
         result = content["result"]
-        status = "success" if result.get("queries") else "failure"
-        model  = content["model"].split("/")[-1]
 
         if result.get("queries"): successes += 1
         else:                     failures  += 1
 
-        results.setdefault(model, {}).setdefault(kind, {})[str(idx)] = {
-            "status":          status,
-            "data":            result,
-            "tokens":          content["token_usage"],
-            "tables":          aliases,
-            "errors":          content["errors"],
-            "generation_time": content["time_elapsed"],
-            "avg_cols":        content["avg_cols"],
-        }
+        status = _store_generation(
+            results, kind, str(idx), content, aliases, content["time_elapsed"]
+        )
 
         await loop.run_in_executor(None, save_json, results, output_file)
 
@@ -788,10 +709,11 @@ async def stream_generate_statements(
         print(f"[{idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
         await asyncio.sleep(cooldown)
 
+        progress_idx += 1
         yield {
             "type":        "progress",
-            "idx":         idx + 1,
-            "total":       total,
+            "idx":         progress_idx,
+            "total":       total + st_total,
             "successes":   successes,
             "failures":    failures,
             "status":      status,
@@ -799,101 +721,23 @@ async def stream_generate_statements(
             "query_count": len(result.get("queries", [])),
         }
 
-    # ── Single-table generation (random CSV sampling) ─────────────────────────
-    if enable_single_table and single_table_query_count:
-        sampled = await loop.run_in_executor(
-            None, _sample_single_table_datasets,
-            cfg.datasets_path, single_table_query_count, "csv",
-        )
-        st_total = len(sampled)
-
-        single_agent = SingleTableStatementGenerationAgent(
-            cfg.llm_config_path / "litellm.yaml",
-            kind,
-            cfg.statement_generation.bad_tokens,
-            allow_tabpfn=cfg.statement_generation.allow_tabpfn,
-        )
-        for st_idx, csv_path in enumerate(sampled):
-            dataset_name = csv_path.stem
-            aliases = {"Table_0": dataset_name}
-
-            def _process_single(csv_path=csv_path, aliases=aliases):
-                content = single_agent.generate_statements(
-                    csv_path, aliases, kind,
-                    metadata.get(csv_path.stem),
-                    cfg.statement_generation.max_cols, sample_size=5,
-                )
-                return content
-
-            try:
-                content = await loop.run_in_executor(None, _process_single)
-            except Exception as exc:
-                yield {"type": "error", "message": str(exc)}
-                return
-
-            result = content["result"]
-            status = "success" if result.get("queries") else "failure"
-            model  = content["model"].split("/")[-1]
-
-            if result.get("queries"): successes += 1
-            else:                     failures  += 1
-
-            results.setdefault(model, {}).setdefault(kind, {})[f"st_{st_idx}"] = {
-                "status":          status,
-                "data":            result,
-                "tokens":          content["token_usage"],
-                "tables":          aliases,
-                "errors":          content["errors"],
-                "generation_time": content["time_elapsed"],
-                "avg_cols":        content["avg_cols"],
-            }
-
-            await loop.run_in_executor(None, save_json, results, output_file)
-
-            actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
-            cooldown = _compute_timeout(actual_tokens)
-            print(f"[st_{st_idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
-            await asyncio.sleep(cooldown)
-
-            yield {
-                "type":        "progress",
-                "idx":         total + st_idx + 1,
-                "total":       total + st_total,
-                "successes":   successes,
-                "failures":    failures,
-                "status":      status,
-                "aliases":     list(aliases.values()),
-                "query_count": len(result.get("queries", [])),
-            }
-
-    yield {"type": "done", "successes": successes, "failures": failures, "total": total}
-
 
 # ── Entry point (CLI via main.py) ─────────────────────────────────────────────
-from orqa.candidates_generation import generate_random_walks
-
 
 def generate_statements(cfg: OrQAConfig) -> None:
-    #generate_random_walks(cfg)
-    #process_all_candidates(
-    #    cfg.candidates_discovery.candidates_path,
-    #    cfg.candidates_discovery.tasks_results_path,
-    #    cfg.datasets_path,
-    #    cfg.statement_generation.query_candidates_path,
-    #)
     metadata = load_normalized_datasets_metadata(cfg.normalized_metadata_filepath)
-    for lang in ["SQL", "PANDAS"]:
+    for lang in ["PANDAS","SQL"]:
         create_statements(
             cfg.llm_config_path.joinpath("litellm.yaml"),
             cfg.datasets_path,
             cfg.statement_generation.query_candidates_path,
             cfg.statement_generation.queries_path,
             lang,
-            cfg.statement_generation.max_cols,
+            cfg.candidates_discovery.limit_to_n_columns,
             datasets_metadata=metadata,
             bad_tokens=cfg.statement_generation.bad_tokens,
             enable_single_table=cfg.statement_generation.enable_single_table,
             single_table_query_count=cfg.statement_generation.single_table_query_count,
             languages=cfg.statement_generation.detected_languages,
-            allow_tabpfn=cfg.statement_generation.allow_tabpfn
+            seed=cfg.seed,
         )

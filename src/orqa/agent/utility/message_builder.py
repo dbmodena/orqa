@@ -6,41 +6,36 @@ Each agent has a defined message template that is rebuilt (not appended to)
 on each cycle, preventing context window overflow and ensuring clean, focused
 prompts.
 
-- ValidatorMessageBuilder: 2 or 3 blocks (system + [assistant] + user)
 - ClientMessageBuilder: 2 blocks (system + generation prompt)
 - JudgeMessageBuilder: 2 blocks (system + single query evaluation)
+- sanitize_messages: last-line guard applied at every router call site.
 """
 
+# Substituted for any empty/whitespace-only message content. Some providers
+# hard-reject zero-token messages (e.g. OCI 400: "message must be at least 1
+# token long or tool results must be specified").
+_EMPTY_CONTENT_PLACEHOLDER = "(empty message)"
 
-class ValidatorMessageBuilder:
-    """Builds the fixed 2-message array for correction LLM calls.
 
-    Each correction call sends exactly:
-      1. System message (role: system) — minimal generic instruction
-      2. User message (role: user) — full correction prompt with all context
+def sanitize_messages(messages: list[dict], placeholder: str = _EMPTY_CONTENT_PLACEHOLDER) -> list[dict]:
+    """Return a copy of ``messages`` in which no message has empty content.
 
-    Each call is stateless: no previous responses are threaded between cycles.
+    A few code paths can legitimately produce an empty message — an empty
+    first-attempt payload, or a model's own empty response echoed back as an
+    ``assistant`` message on a JSON-repair retry — and some providers reject
+    the whole request over it. Non-string content is coerced to ``str`` and
+    empty/whitespace-only content is replaced with a short placeholder, so the
+    request is always transport-valid regardless of which path built it.
     """
-
-    def build(
-        self,
-        system_content: str,
-        user_content: str,
-    ) -> list[dict]:
-        """Returns exactly 2 message blocks: [system, user].
-
-        Args:
-            system_content: The minimal system instruction.
-            user_content: The full rendered correction prompt containing
-                fix rules, schemas, queries+errors, and pydantic constraint.
-
-        Returns:
-            A list of exactly 2 message dicts with 'role' and 'content' keys.
-        """
-        return [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
-        ]
+    sanitized = []
+    for m in messages:
+        content = m.get("content")
+        if not isinstance(content, str):
+            content = "" if content is None else str(content)
+        if not content.strip():
+            content = placeholder
+        sanitized.append({**m, "content": content})
+    return sanitized
 
 
 class ClientMessageBuilder:

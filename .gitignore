@@ -27,3 +27,4 @@ _orqa
 !tests/
 tests/*
 !tests/test_main_cli.py
+.claude

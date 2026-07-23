@@ -24,7 +24,7 @@ PANDAS_KEYWORDS = {
     "sum", "mean", "avg", "min", "max", "count", "nunique", "rank",
     "sort_values", "sort_index", "drop_duplicates", "fillna", "dropna",
     "apply", "map", "filter", "query", "where", "assign", "pivot", "melt",
-    "stack", "unstack", "explode", "resample", "rolling", "expanding",
+    "stack", "unstack", "explode", "resample", "rolling", "expanding", "fit","predict"
 }
 
 
@@ -217,6 +217,47 @@ def prepare_normalized_metadata_for_prompt(record: dict) -> dict:
     }
 
 
+def select_columns(
+    all_columns: list,
+    limit_to_n_columns: int,
+    involved_cols: list | None = None,
+) -> list:
+    """
+    Pick at most ``limit_to_n_columns`` columns out of ``all_columns``:
+    any ``involved_cols`` (known join/union columns, matched case-
+    insensitively) are force-included first, then the remaining budget is
+    filled with the rest of the columns in their original file order.
+
+    With no ``involved_cols`` this is simply "the first N columns" —
+    deterministic and reproducible across runs/phases for the same table.
+    """
+    col_map = {str(c).strip().lower(): c for c in all_columns}
+    resolved_cols = [
+        col_map[str(c).strip().lower()]
+        for c in (involved_cols or [])
+        if str(c).strip().lower() in col_map
+    ]
+
+    remaining_budget = max(0, limit_to_n_columns - len(resolved_cols))
+    other_cols = [c for c in all_columns if c not in resolved_cols]
+    return resolved_cols + other_cols[:remaining_budget]
+
+
+def polars_column_details(df: pl.DataFrame) -> tuple[str, dict]:
+    """
+    Build the per-column dtype/null/unique-count text block and the
+    numeric-typing map for an ALREADY column-limited polars DataFrame —
+    callers are responsible for narrowing ``df`` to the columns that
+    matter before calling this (no truncation happens here).
+    """
+    column_typings = {}
+    coldetails = ""
+    for col in df.columns:
+        coldetails += f"\n- {col} {df[col].dtype}: {df[col].null_count()} nulls, {df[col].n_unique()} unique values."
+        column_typings[col] = df[col].dtype.is_numeric()
+    return coldetails, column_typings
+
+
 def load_dataset_info(
     dataset_path: Path,
     polars_opts: dict = {},
@@ -229,21 +270,15 @@ def load_dataset_info(
     Returns a dict ready to be unpacked as kwargs for load_prompt.
     """
     df = pl_read_dataset(dataset_path, polars_opts)
+    df = df.select(select_columns(df.columns, limit_to_n_columns))
 
-    # Build detailed column information string
-    column_typings = {}
-    coldetails = ""
-    for col in df.columns:
-        coldetails += f"\n- {col} {df[col].dtype}: {df[col].null_count()} nulls, {df[col].n_unique()} unique values."
-        column_typings[col] = df[col].dtype.is_numeric()
+    coldetails, column_typings = polars_column_details(df)
 
     sample = df.sample(min(sample_size, df.height), seed=seed)
 
     with pl.Config(
         tbl_formatting="MARKDOWN",
         tbl_hide_dataframe_shape=True,
-        tbl_cols=limit_to_n_columns,
-        # tbl_width_chars=300,
     ):
         sample = str(sample)
 
@@ -331,34 +366,91 @@ def _is_valid_column_name(col) -> bool:
     return True
 
 
+def _coerce_numeric_like_columns(
+    df: pd.DataFrame, threshold: float = 0.9
+) -> pd.DataFrame:
+    """Convert object columns that are numeric-in-disguise to real numerics.
+
+    Open-data columns frequently mix numeric values with formatting
+    ("1,314", "34.10%", "$500") or stray non-numeric tokens ("R", "s"),
+    which leaves the column as dtype object and makes row values type-
+    inconsistent — joins and comparisons then crash on type mismatches.
+    A column whose non-null values are >= ``threshold`` parseable as
+    numbers (after stripping thousands separators, '%' and '$') is
+    converted with ``errors='coerce'``: the column gets one consistent
+    dtype and the stray tokens become NaN in place, instead of their rows
+    being dropped. Percent values keep their face value ("34.1%" -> 34.1).
+
+    Below-threshold columns are genuinely categorical/text and are left
+    untouched.
+    """
+    for col in df.columns:
+        if df[col].dtype != object:
+            continue
+        non_null = df[col].dropna()
+        if non_null.empty:
+            continue
+        cleaned = (
+            non_null.astype(str)
+            .str.strip()
+            .str.replace(",", "", regex=False)
+            .str.rstrip("%")
+            .str.lstrip("$")
+        )
+        parsed = pd.to_numeric(cleaned, errors="coerce")
+        if parsed.notna().mean() >= threshold:
+            df[col] = parsed.reindex(df.index)
+    return df
+
+
 def prepare_dataset(
     dataset_path: Path,
     involved_cols: list[str],
     limit_to_n_columns: int = 20,
     sample_size: int = 5,
-    bad_tokens: list = []
+    bad_tokens: list = [],
+    limit_to_n_rows: Optional[int] = None,
+    seed: int = 0,
 ) -> tuple[dict, dict]:
+    # ``na_values=bad_tokens`` already converts aliased-NaN tokens from open
+    # data ('R', 'None', ...) into real NaN at read time, so they can never
+    # appear as join/filter values downstream. No global ``df.dropna()`` here:
+    # dropping every row with a null in ANY column emptied wide open-data
+    # tables outright (nulls in never-used columns killed rows the selected
+    # columns needed), which starved generation and validation of data.
+    # Nulls are instead handled per-column below, and rows are only dropped
+    # where a null actually breaks something: the mandatory link columns.
     df = pd_read_dataset(dataset_path, opts={"csv": {"na_values": bad_tokens, "low_memory": False}, "parquet": {"na_values": bad_tokens, "low_memory": False}})
-    df = df.dropna()
+
+    if limit_to_n_rows is not None:
+        df = df.head(limit_to_n_rows)
 
     # ── drop columns with illegal / purely-numeric names ──────────────────────
     valid_columns = [c for c in df.columns if _is_valid_column_name(c)]
     df = df[valid_columns]
     # ──────────────────────────────────────────────────────────────────────────
 
-    col_map = {c.strip().lower(): c for c in df.columns}
+    selected_cols = select_columns(df.columns.tolist(), limit_to_n_columns, involved_cols)
+    df = df[selected_cols].copy()
+
+    # Clean only the columns that survived selection (cleaning before
+    # selection would let nulls/typing in discarded columns affect kept rows).
+    df = _coerce_numeric_like_columns(df)
+
+    # Rows with a null join key can never match: drop them here so merges on
+    # the mandatory link columns don't crash or silently mismatch. This is the
+    # only row-level null handling — single-table runs (no involved_cols) keep
+    # every row.
+    col_map = {str(c).strip().lower(): c for c in df.columns}
     resolved_cols = [
         col_map[str(c).strip().lower()]
         for c in involved_cols
         if str(c).strip().lower() in col_map
     ]
+    if resolved_cols:
+        df = df.dropna(subset=resolved_cols)
 
-    remaining_budget = max(0, limit_to_n_columns - len(resolved_cols))
-    other_cols = [c for c in df.columns if c not in resolved_cols]
-    selected_cols = resolved_cols + other_cols[:remaining_budget]
-    df = df[selected_cols]
-
-    dataset_info, column_typings = extract_dataset_info(df, sample_size=sample_size)
+    dataset_info, column_typings = extract_dataset_info(df, sample_size=sample_size, seed=seed)
     dataset_info["dataset_name"] = dataset_path.stem
     dataset_info["id"] = dataset_path.stem
 

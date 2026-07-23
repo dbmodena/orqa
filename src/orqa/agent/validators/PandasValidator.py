@@ -1,3 +1,6 @@
+import ast
+import builtins
+import numpy as np
 import pandas as pd
 import polars as pl
 import functools
@@ -8,12 +11,230 @@ from typing import Any
 from .QueryValidator import QueryValidator
 import re
 
+# Pre-injected into the sandbox namespace (see _exec) alongside pd/pl so
+# TabPFN-skill code runs even on a cycle where its own
+# `from tabpfn_client import ...` line got dropped (e.g. sharing a physical
+# line with a disallowed import that _clean_pandas stripped).
+from tabpfn_client import TabPFNClassifier, TabPFNRegressor
+
 UNAUTHORIZED_COMMANDS = [
     'read_csv', 'read_excel', 'read_json', 'read_parquet', 'print',
     'read_sql', 'read_table', 'read_html', 'read_pickle',
     'to_csv', 'to_excel', 'to_json', 'to_parquet', 'to_pickle',
     'open(', 'os.', 'sys.', 'exec(', 'eval('
 ]
+
+# Modules generated code is allowed to `import` directly inside the sandbox
+# (see _check_imports / _exec). Mirrors the data-analysis stack the
+# sandbox already pre-injects (pd/pl) plus the safe stdlib modules and
+# tabpfn_client for skill code. Anything outside this set (os, sys,
+# subprocess, socket, shutil, ...) raises ImportError instead of silently
+# being stripped.
+ALLOWED_IMPORT_MODULES = {
+    "pandas", "polars", "numpy", "tabpfn_client",
+    "math", "statistics", "decimal", "fractions", "random",
+    "datetime", "collections", "itertools", "functools", "operator",
+    "re", "json", "string", "warnings", "typing",
+}
+
+
+def _check_imports(tree: ast.AST) -> None:
+    """Enforce ALLOWED_IMPORT_MODULES on the generated code's own import
+    statements, statically.
+
+    Enforcement must NOT happen at runtime via a restricted ``__import__`` in
+    the sandbox builtins: C/Cython library code that lazily imports a module
+    (e.g. pandas' ``Timestamp.strftime`` does ``import time``) resolves
+    ``__import__`` from the nearest *Python* frame — which is the generated
+    code's frame — so a runtime hook rejects imports the generated code never
+    wrote. Checking the AST scopes the policy to what the code actually says.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            # Relative imports (level > 0) have no resolvable top-level
+            # module inside exec'd code — reject them outright.
+            names = [node.module] if node.module and not node.level else [""]
+        else:
+            continue
+        for name in names:
+            if name.split('.')[0] not in ALLOWED_IMPORT_MODULES:
+                raise ImportError(
+                    f"Import of {name!r} is not allowed in generated code. "
+                    f"Allowed modules: {', '.join(sorted(ALLOWED_IMPORT_MODULES))}"
+                )
+
+# Matches the variable-naming convention every skill markdown's Generation
+# section teaches for a hypothetical-scenario input row (`scenario = ...`,
+# `hypothetical = ...`) — see _check_scenario_categorical_values. Deliberately
+# narrow: a bare `pd.DataFrame({...})` used to build the final labeled
+# `result` (e.g. a "Total" summary row) must never trip this, only the
+# purpose-built prediction input.
+_SCENARIO_VAR_RE = re.compile(r"scenario|hypothetical", re.IGNORECASE)
+
+# A column with more distinct values than this looks like free text or a
+# near-unique identifier, not a closed categorical vocabulary — skip it
+# rather than risk a false positive on a legitimately open-ended field.
+_SCENARIO_CHECK_MAX_CARDINALITY = 500
+
+
+def _check_scenario_categorical_values(
+    tree: ast.AST, dataframes: list, table_names: list
+) -> None:
+    """Reject a hypothetical scenario whose categorical value doesn't match
+    the real data's actual spelling/encoding (e.g. ``'Queens'`` when the
+    table encodes boroughs as ``'QN'``).
+
+    Scoped tightly to ``scenario``/``hypothetical`` = ``pd.DataFrame(...)``
+    assignments — the exact "construct a scenario row" pattern every skill
+    markdown's Generation section teaches — never to filter/comparison
+    expressions elsewhere in the code (which correctly reuse the real
+    encoding constantly, e.g. ``df[df['borough'] == 'QN']``) or to the final
+    ``result`` construction (a labeled summary row like
+    ``pd.DataFrame({'borough': ['Total'], ...})`` must never trip this).
+
+    A mismatch here doesn't raise inside pandas: ``pd.get_dummies`` on an
+    unseen category produces a dummy column the training-time
+    ``feature_cols`` never had, and a later
+    ``reindex(columns=feature_cols, fill_value=0)`` silently drops it and
+    zero-fills every real dummy for that field — the code executes fine and
+    returns a plausible-looking answer that never actually used the value
+    the question named.
+    """
+    observed: dict = {}
+    for df in dataframes:
+        for col in df.columns:
+            if col in observed or df[col].dtype != object:
+                continue
+            try:
+                uniques = df[col].dropna().unique()
+            except Exception:
+                continue
+            if 0 < len(uniques) <= _SCENARIO_CHECK_MAX_CARDINALITY:
+                observed[col] = {str(v).strip().lower() for v in uniques}
+
+    if not observed:
+        return
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        target_names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if not any(_SCENARIO_VAR_RE.search(name) for name in target_names):
+            continue
+        call = node.value
+        if not (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "DataFrame"
+            and call.args
+        ):
+            continue
+
+        arg = call.args[0]
+        dict_literals = (
+            [arg] if isinstance(arg, ast.Dict)
+            else [e for e in arg.elts if isinstance(e, ast.Dict)] if isinstance(arg, ast.List)
+            else []
+        )
+        for d in dict_literals:
+            for key_node, value_node in zip(d.keys, d.values):
+                if not (isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)):
+                    continue
+                col = key_node.value
+                if col not in observed:
+                    continue
+                # Accept a bare string literal or a single-element list/tuple
+                # of one (`{'borough': ['Queens']}`).
+                v = value_node
+                if isinstance(v, (ast.List, ast.Tuple)) and len(v.elts) == 1:
+                    v = v.elts[0]
+                if not (isinstance(v, ast.Constant) and isinstance(v.value, str)):
+                    continue
+                literal = v.value
+                if literal.strip().lower() not in observed[col]:
+                    raise ValueError(
+                        f"Scenario sets {col!r} to {literal!r}, but that exact "
+                        f"value never appears in the real {col!r} column — the "
+                        "actual observed values use a different spelling/case "
+                        "or encoding (e.g. an abbreviation). A hypothetical "
+                        "scenario's categorical values must be copied verbatim "
+                        "from the table's real data (see the table sample/"
+                        "column statistics) — otherwise pd.get_dummies + "
+                        "reindex(fill_value=0) silently drops this value and "
+                        "zero-fills every real category for it, so the "
+                        "prediction never actually used what the question "
+                        "asked for."
+                    )
+
+
+# R² at/above this threshold means the "prediction" is really arithmetic
+# (e.g. total_enrollment = grade_k + grade_1 + ... + grade_8) — a plain OLS
+# fit already reconstructs the target almost exactly, so no genuinely
+# uncertain relationship is being modeled at all. See
+# _RegressionTargetDeterminismGuard.
+_LINEAR_DETERMINISM_R2_THRESHOLD = 0.999
+
+
+def _check_regression_target_not_deterministic(X, y) -> None:
+    """Raise if ``y`` is (near-)exactly a linear function of ``X``'s columns.
+
+    Catches a `regression`/`causal` step whose target is really an algebraic
+    composite of its own features (a total that's literally the sum of the
+    other columns, a rate that's literally a ratio of two others) —
+    genuinely no model is needed there, TabPFN would just be re-deriving
+    arithmetic with sampling noise on top. Checked via a cheap OLS fit
+    BEFORE the real (network) TabPFN call, so a deterministic target never
+    even reaches the API.
+
+    Fails open (returns without raising) on anything that doesn't look like
+    a plain numeric fit — this check exists to catch one specific pattern,
+    not to second-guess every possible input shape.
+    """
+    try:
+        X_arr = np.asarray(X, dtype=float)
+        y_arr = np.asarray(y, dtype=float).reshape(-1)
+    except (TypeError, ValueError):
+        return
+    if X_arr.ndim != 2 or X_arr.shape[0] <= X_arr.shape[1] or X_arr.shape[0] < 3:
+        return  # not enough rows to meaningfully test for determinism
+
+    X_aug = np.column_stack([X_arr, np.ones(X_arr.shape[0])])
+    try:
+        coef, *_ = np.linalg.lstsq(X_aug, y_arr, rcond=None)
+    except np.linalg.LinAlgError:
+        return
+    y_pred = X_aug @ coef
+    ss_tot = float(np.sum((y_arr - y_arr.mean()) ** 2))
+    if ss_tot <= 0:
+        return  # constant target — a different problem, not this check's concern
+    r2 = 1.0 - float(np.sum((y_arr - y_pred) ** 2)) / ss_tot
+    if r2 >= _LINEAR_DETERMINISM_R2_THRESHOLD:
+        raise ValueError(
+            f"The regression target is a near-exact linear function of its "
+            f"own features (R²={r2:.4f} from a plain least-squares fit) — "
+            "e.g. a total that is literally the sum of the other columns, or "
+            "a rate that is literally a ratio of two others. That's "
+            "arithmetic, not a prediction: no genuinely uncertain "
+            "relationship is being modeled. Replace the ML step with a "
+            "plain `derive` (e.g. df[feature_cols].sum(axis=1)) that "
+            "computes the target directly, or choose a target that isn't "
+            "already a formula over its own features."
+        )
+
+
+class _DeterminismGuardedTabPFNRegressor(TabPFNRegressor):
+    """Drop-in ``TabPFNRegressor`` that checks target determinism before
+    every real ``fit`` — see ``_check_regression_target_not_deterministic``.
+    Injected into the sandbox namespace in place of the raw class (see
+    ``_exec``) so this applies regardless of which skill (`regression` or
+    `causal`'s S-/T-learner) constructs the estimator."""
+
+    def fit(self, X, y, *args, **kwargs):
+        _check_regression_target_not_deterministic(X, y)
+        return super().fit(X, y, *args, **kwargs)
+
 
 PANDAS_CARTESIAN_PATTERNS = [
     # 1. Explicit cross merge — always a cartesian product.
@@ -168,8 +389,16 @@ class PandasValidator(QueryValidator):
             'int': int, 'float': float, 'str': str, 'bool': bool,
             'list': list, 'dict': dict, 'set': set, 'tuple': tuple,
             'True': True, 'False': False, 'None': None,
+            # Real __import__: import policy is enforced statically by
+            # _check_imports before execution. A restricted hook here breaks
+            # library-internal lazy imports (see _check_imports docstring).
+            '__import__': builtins.__import__,
         }
-        local_ns = {'pd': pd, 'pl': pl, '__builtins__': safe_builtins}
+        local_ns = {
+            'pd': pd, 'pl': pl, '__builtins__': safe_builtins,
+            'TabPFNClassifier': TabPFNClassifier,
+            'TabPFNRegressor': _DeterminismGuardedTabPFNRegressor,
+        }
         for df, name in zip(dataframes, table_names):
             local_ns[name] = df
 
@@ -178,27 +407,49 @@ class PandasValidator(QueryValidator):
         sys.stderr = StringIO()
 
         try:
-            statements = [s.strip() for s in query.split(';') if s.strip()]
-            if not statements:
+            # Execute the query as ordinary multi-line Python — the same
+            # execution model as the judge-time executor
+            # (QueryExecutor._inject_result + exec) and the benchmark executor
+            # (_run_pandas), so code that passes validation can never fail
+            # downstream on syntax. The old statement-at-a-time model
+            # (split on ';', compile each) accepted flattened compound
+            # statements ("a = 1; if x: b = 2") that a whole-source parse
+            # rejects, which surfaced as judge-time
+            # "invalid syntax (<string>, line 1)" failures.
+            tree = ast.parse(query)
+            if not tree.body:
                 return None
+            _check_imports(tree)
+            _check_scenario_categorical_values(tree, dataframes, table_names)
 
-            for stmt in statements[:-1]:
-                exec(compile(stmt, '<string>', 'exec'), local_ns)
-
-            last = statements[-1]
-            try:
-                result = eval(last, local_ns)
-            except SyntaxError:
-                exec(compile(last, '<string>', 'exec'), local_ns)
-                result = None
-                for val in reversed(list(local_ns.values())):
-                    if isinstance(val, (pd.DataFrame, pd.Series)):
-                        result = val
-                        break
+            last = tree.body[-1]
+            if isinstance(last, ast.Expr):
+                # Run everything before the last expression, then eval it as
+                # the query's result.
+                if tree.body[:-1]:
+                    head = ast.Module(body=tree.body[:-1], type_ignores=[])
+                    exec(compile(head, '<string>', 'exec'), local_ns)
+                result = eval(
+                    compile(ast.Expression(body=last.value), '<string>', 'eval'),
+                    local_ns,
+                )
+            else:
+                exec(compile(tree, '<string>', 'exec'), local_ns)
+                # Resolve the value the same way the judge-time executor does
+                # (QueryExecutor._assignment_base_name): take the base name of
+                # the last statement's assignment target — bare (`x = ...`) or
+                # in-place (`x[...] = ...` / `x.col = ...`) — rather than
+                # scanning the namespace for any DataFrame/Series, so static
+                # validation and judge-time execution agree on what a query's
+                # "result" is.
+                target_name = self._assignment_base_name(last)
+                result = local_ns.get(target_name) if target_name else None
                 if result is None:
                     raise ValueError(
-                        "Last statement produced no DataFrame.\n"
-                        "End with a bare variable name, not an assignment (e.g. 'result_df' not 'result_df = ...').\n"
+                        "Last statement did not resolve to a value.\n"
+                        "End with a bare variable name (not an assignment), or "
+                        "with `<name> = ...` / `<name>[...] = ...` so that name "
+                        "can be resolved.\n"
                         f"Available tables: {', '.join(table_names)}"
                     )
 
@@ -211,10 +462,39 @@ class PandasValidator(QueryValidator):
             return result
 
         except Exception as e:
-            raise self._normalize_pandas_error(e)
+            raise self._normalize_pandas_error(e, source=query)
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
+
+    @staticmethod
+    def _assignment_base_name(node: ast.AST) -> "str | None":
+        """Return the base variable name an assignment ultimately targets.
+
+        Unwraps Subscript/Attribute chains (``result["col"] = ...`` -> "result",
+        ``df.loc[...] = ...`` -> "df") so both a bare rewrite and an in-place
+        mutation are recognized by name. Returns ``None`` for non-assignment
+        nodes. Mirrors ``QueryExecutor._assignment_base_name`` so static
+        validation and judge-time execution resolve a query's output the same
+        way.
+        """
+        def _base(t: ast.AST) -> ast.AST:
+            while isinstance(t, (ast.Subscript, ast.Attribute)):
+                t = t.value
+            return t
+
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            return None
+
+        for t in targets:
+            base = _base(t)
+            if isinstance(base, ast.Name):
+                return base.id
+        return None
 
     # ------------------------------------------------------------------
     # Connectivity check
@@ -362,13 +642,10 @@ class PandasValidator(QueryValidator):
             return
 
         lines = [l.strip() for l in re.split(r'[;\n]', original) if l.strip()]
-        has_imports  = any('import' in l.lower() for l in lines)
         has_banned   = any(any(cmd in l for cmd in UNAUTHORIZED_COMMANDS) for l in lines)
         has_comments = all(re.sub(r'#.*$', '', l).strip() == '' for l in lines) if lines else False
 
         reasons = []
-        if has_imports:
-            reasons.append("  - import statements removed (pd, pl are pre-imported; no delays needed)")
         if has_banned:
             banned_found = [cmd for cmd in UNAUTHORIZED_COMMANDS if any(cmd in l for l in lines)]
             reasons.append(f"  - unauthorized commands removed: {', '.join(banned_found)}")
@@ -390,6 +667,17 @@ class PandasValidator(QueryValidator):
         ]
 
     def _clean_pandas(self, query_code: str) -> str:
+        """Normalise generated code while PRESERVING its line structure.
+
+        Code must stay ordinary multi-line Python end-to-end: the validator
+        (_exec), the judge-time executor (QueryExecutor) and the benchmark
+        executor all exec the whole source, and QueryValidator writes the
+        cleaned code back into ``query["code"]`` — so what is saved in the
+        final JSON is byte-identical to what was validated. The old
+        ';'-flattening destroyed any code with control flow (``if x:; y``)
+        and made per-statement validation disagree with whole-source
+        execution downstream.
+        """
         if not query_code:
             return ''
 
@@ -406,20 +694,74 @@ class PandasValidator(QueryValidator):
         query = re.sub(r'\\\s+\n', '\\\n', query)
         query = re.sub(r'\\\n\s*', ' ', query)
 
-        newline_parts = query.splitlines()
-        newline_parts = [l for l in newline_parts if 'import' not in l.lower()]
-        newline_parts = [re.sub(r'#.*$', '', l).strip() for l in newline_parts]
-        newline_parts = [l for l in newline_parts if l]
-        rejoined = ' '.join(newline_parts)
-        statements = [s.strip() for s in rejoined.split(';')]
-        cleaned = [s for s in statements if not any(cmd in s for cmd in UNAUTHORIZED_COMMANDS)]
-        cleaned = [s for s in cleaned if s]
-        return '; '.join(cleaned).strip()
+        # Strip comments but keep each line's indentation intact.
+        lines = [re.sub(r'#.*$', '', l).rstrip() for l in query.splitlines()]
+        lines = [l for l in lines if l.strip()]
+
+        # Imports are kept (not stripped): the static AST check
+        # (see _check_imports / _exec) enforces ALLOWED_IMPORT_MODULES
+        # before execution instead, so generated code can
+        # `import numpy as np` or `from tabpfn_client import ...`
+        # directly rather than relying solely on pre-injected names.
+        cleaned_lines = [
+            l for l in lines
+            if not any(cmd in l for cmd in UNAUTHORIZED_COMMANDS)
+        ]
+        cleaned = '\n'.join(cleaned_lines)
+
+        if cleaned_lines != lines:
+            # Dropping an unauthorized line can break structure (e.g. empty an
+            # `if` body). If the filtered code no longer parses while the
+            # unfiltered code does, removal isn't safe — reject with feedback
+            # instead of saving silently-mutilated code.
+            try:
+                ast.parse(cleaned)
+            except SyntaxError:
+                try:
+                    ast.parse('\n'.join(lines))
+                except SyntaxError:
+                    return cleaned  # was already broken — let _exec report it
+                dropped = [
+                    l.strip() for l in lines
+                    if any(cmd in l for cmd in UNAUTHORIZED_COMMANDS)
+                ]
+                raise ValueError(
+                    "Unauthorized command(s) inside a control-flow block "
+                    "cannot be removed safely:\n"
+                    + "\n".join(f"  - {d}" for d in dropped[:3])
+                    + "\nRewrite the query without: "
+                    + ", ".join(UNAUTHORIZED_COMMANDS)
+                )
+        return cleaned
 
     # ------------------------------------------------------------------
     # Error normalisation
     # ------------------------------------------------------------------
-    def _normalize_pandas_error(self, e: Exception) -> Exception:
+    @staticmethod
+    def _syntax_error_snippet(
+        source: str, lineno: "int | None", offset: "int | None", context: int = 2
+    ) -> str:
+        """Numbered source lines around a SyntaxError, with a caret at the
+        offending column — so the correction LLM can find the exact spot
+        instead of counting lines inside a JSON-escaped code string."""
+        if not source or not lineno:
+            return ""
+        lines = source.splitlines()
+        if not (1 <= lineno <= len(lines)):
+            return ""
+
+        start = max(1, lineno - context)
+        end = min(len(lines), lineno + context)
+        rendered = []
+        for i in range(start, end + 1):
+            marker = ">>" if i == lineno else "  "
+            prefix = f"{marker} {i:>4} | "
+            rendered.append(f"{prefix}{lines[i - 1]}")
+            if i == lineno and offset:
+                rendered.append(" " * (len(prefix) + offset - 1) + "^")
+        return "\n".join(rendered)
+
+    def _normalize_pandas_error(self, e: Exception, source: str = "") -> Exception:
         msg = str(e).lower()
         raw = str(e).strip('"').strip("'")
 
@@ -561,9 +903,20 @@ class PandasValidator(QueryValidator):
             return TypeError(f"{raw}\nType error — check column dtypes and operation compatibility.")
 
         if isinstance(e, (SyntaxError, IndentationError, TabError)):
-            return SyntaxError(
-                f"Syntax error: {raw}\nSeparate multiple statements with semicolons (;) or newlines."
+            lineno = getattr(e, "lineno", None)
+            offset = getattr(e, "offset", None)
+            detail = getattr(e, "msg", None) or raw
+            location = f" at line {lineno}" if lineno else ""
+            snippet = self._syntax_error_snippet(source, lineno, offset)
+            parts = [f"Syntax error{location}: {detail}"]
+            if snippet:
+                parts.append(f"Offending code:\n{snippet}")
+            parts.append(
+                "Write ordinary multi-line Python: one statement per line, "
+                "standard indentation for control-flow blocks. Do NOT join "
+                "statements with semicolons."
             )
+            return SyntaxError("\n".join(parts))
 
         # Fallback: wrap unknown exception types with type name and ≤200 chars
         wrapped_msg = self._wrap_unknown_exception(e)

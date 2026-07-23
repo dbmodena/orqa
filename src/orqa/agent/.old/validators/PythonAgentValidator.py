@@ -38,7 +38,7 @@ import pandas as pd
 import polars as pl
 from pydantic import BaseModel
 
-from .PandasValidator import PandasValidator
+from ...validators.PandasValidator import PandasValidator
 
 logger = logging.getLogger(__name__)
 

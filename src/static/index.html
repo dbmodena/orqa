@@ -3,40 +3,11 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>OrQA · Pipeline</title>
+<title>OrQA · Query Browser</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐳</text></svg>"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="/static/style.css"/>
-<style>
-/* ── Kind indicator ── */
-.kind-indicator {
-  display: flex; align-items: center; gap: 12px;
-  margin-top: 16px; padding: 12px 18px;
-  background: var(--accent-pale);
-  border: 1px solid #b3d4c8;
-  border-radius: 8px;
-  font-size: 13px;
-}
-.kind-indicator svg { flex-shrink: 0; color: var(--accent); opacity: .75; }
-.kind-indicator-body {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-}
-.kind-indicator-label { color: var(--text-mid); font-size: 13px; }
-.kind-pill {
-  font-family: 'DM Mono', monospace;
-  font-size: 13px; font-weight: 700; letter-spacing: .06em;
-  color: var(--accent); background: #fff;
-  border: 1.5px solid var(--accent);
-  border-radius: 5px; padding: 1px 10px;
-}
-.kind-indicator code {
-  font-family: 'DM Mono', monospace; font-size: 11px;
-  color: var(--text-muted); background: var(--tag-bg);
-  padding: 1px 6px; border-radius: 3px;
-}
-/* ── Language tag on query cards ── */
-.tag-lang { background: var(--accent-pale); color: var(--accent); font-weight: 700; }
-</style>
 </head>
 <body>
 
@@ -44,21 +15,39 @@
 <header class="topbar">
   <div class="topbar-inner">
     <div class="brand">
-      <svg class="brand-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect x="2"  y="18" width="12" height="12" rx="3" fill="var(--accent)" opacity="0.9"/>
-        <rect x="18" y="10" width="12" height="12" rx="3" fill="var(--accent)" opacity="0.65"/>
-        <rect x="18" y="26" width="12" height="12" rx="3" fill="var(--accent)" opacity="0.65"/>
-        <rect x="34" y="18" width="12" height="12" rx="3" fill="var(--accent)" opacity="0.9"/>
-        <path d="M14 24h4" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/>
-        <path d="M30 16l4 8-4 8" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-        <path d="M14 24l3-8" stroke="var(--accent-soft)" stroke-width="1.5" stroke-linecap="round" opacity="0.6"/>
-        <path d="M14 24l3 8"  stroke="var(--accent-soft)" stroke-width="1.5" stroke-linecap="round" opacity="0.6"/>
+      <svg class="brand-icon brand-orca" viewBox="0 0 64 44" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <!-- stylized orca: dark body, dorsal fin, tail flukes -->
+        <path d="M4 27
+                 C 8 17, 18 12, 28 12
+                 C 29 7, 31 3.5, 35 2
+                 C 34.5 7, 33 10.5, 31.5 12.4
+                 C 40 13, 48 15, 53 15.6
+                 C 55 11, 58.5 8.5, 62 8
+                 C 61 12, 59.5 14.5, 57.6 16.4
+                 C 60 18.6, 61.4 21, 62 24
+                 C 58.4 23.2, 55.6 21.4, 53.8 19.4
+                 C 48 25, 38 31, 28 31.6
+                 C 16 32, 7.4 30, 4 27 Z"
+              fill="var(--text)"/>
+        <!-- pectoral flipper -->
+        <path d="M22 29 C 24 33, 23.4 37, 19 39 C 19.4 35, 20 31.6, 22 29 Z" fill="var(--text)"/>
+        <!-- white eye patch -->
+        <ellipse cx="19.5" cy="17.5" rx="4.6" ry="2" fill="#fff" transform="rotate(-16 19.5 17.5)"/>
+        <!-- white belly -->
+        <path d="M4 27 C 12 30.4, 22 31, 30 30.2 C 24 33, 12 32.4, 4 27 Z" fill="#fff" opacity=".92"/>
+        <!-- water line -->
+        <path d="M6 40 q 5 -3.5 10 0 t 10 0 t 10 0 t 10 0 t 10 0"
+              stroke="var(--accent-soft)" stroke-width="1.8" stroke-linecap="round" fill="none" opacity=".65"/>
       </svg>
       <div class="brand-text">
         <span class="brand-label">OrQA</span>
-        <span class="brand-sub">Open Data Query Pipeline</span>
+        <span class="brand-sub">Query Browser &amp; Executor</span>
       </div>
     </div>
+    <nav class="topnav" id="topNav" style="display:none">
+      <button class="topnav-btn active" id="navBrowse" onclick="showPage('browse')">Browse</button>
+      <button class="topnav-btn" id="navStats" onclick="showPage('stats')">Stats</button>
+    </nav>
     <div class="topbar-meta" id="topbarMeta">—</div>
   </div>
 </header>
@@ -66,9 +55,9 @@
 <!-- ── Hero ── -->
 <section class="hero">
   <div class="hero-inner">
-    <p class="hero-eyebrow">Statement Generation &amp; Response</p>
-    <h1 class="hero-title">Pipeline Control</h1>
-    <p class="hero-desc">Select a data source, verify required files, then run statement generation and query response in sequence.</p>
+    <p class="hero-eyebrow">Generated Queries</p>
+    <h1 class="hero-title">Browse &amp; Execute</h1>
+    <p class="hero-desc">Dive beneath the surface of every generated query — pick a data source, follow the full judge history, and re-run the code against the real datasets.</p>
   </div>
 </section>
 
@@ -79,82 +68,20 @@
   <div class="source-grid" id="sourceGrid"></div>
 
   <div id="workArea" style="display:none">
-
-    <div class="section-label" style="margin-top:40px">File Readiness</div>
-    <div class="readiness-panel" id="readinessPanel"></div>
-
-    <!-- ── THIS is what was missing ── -->
-    <div class="kind-indicator" id="kindIndicator" style="display:none">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-        <path d="M2 4h12M2 8h8M2 12h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-      </svg>
-      <div class="kind-indicator-body">
-        <span class="kind-indicator-label">Generating</span>
-        <span class="kind-pill" id="kindPill">—</span>
-        <span class="kind-indicator-label">queries &nbsp;·&nbsp; <code>cfg.statement_generation.kind</code></span>
-      </div>
-    </div>
-
-    <!-- Banner -->
-    <div class="exists-banner" id="existsBanner" style="display:none" data-state="complete">
-      <div class="exists-icon" id="existsIcon"></div>
-      <div class="exists-body">
-        <div class="exists-title" id="existsTitle"></div>
-        <div class="exists-sub"   id="existsSub"></div>
-      </div>
-      <div class="exists-actions" id="existsActions"></div>
-    </div>
-
-    <!-- Confirm dialog -->
-    <div class="confirm-backdrop" id="confirmBackdrop" style="display:none" onclick="closeConfirm()"></div>
-    <div class="confirm-dialog"   id="confirmDialog"   style="display:none">
-      <div class="confirm-title">Confirm generation</div>
-      <div class="confirm-body" id="confirmBody"></div>
-      <div class="confirm-actions">
-        <button class="btn btn-ghost"  onclick="closeConfirm()">Cancel</button>
-        <button class="btn btn-danger" id="confirmOkBtn">Yes, proceed</button>
-      </div>
-    </div>
-
-    <!-- Run row -->
-    <div class="run-row" id="runRow">
-      <button class="btn btn-run" id="runBtn" disabled onclick="onRunClick()">
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-          <path d="M2.5 1.5l8 4.5-8 4.5V1.5z" fill="currentColor"/>
-        </svg>
-        Run
-      </button>
-      <span class="run-hint" id="runHint">Select a source to begin</span>
-    </div>
-
-    <!-- Generation panel -->
-    <div class="gen-panel" id="genPanel" style="display:none">
-      <div class="gen-panel-hdr">
-        <span class="gen-panel-title">Statement Generation</span>
-        <span class="gen-status" id="genStatus">initialising…</span>
-      </div>
-      <div class="progress-wrap">
-        <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
-        <div class="progress-meta">
-          <span id="progressTxt">0 / 0 matches</span>
-          <span>
-            <span class="c-ok"  id="succCount">0 ✓</span>
-            <span class="c-err" id="failCount">0 ✗</span>
-          </span>
-        </div>
-      </div>
-      <div class="log-box" id="logBox"></div>
-    </div>
-
-    <div class="done-flash" id="doneFlash" style="display:none"></div>
-
-    <!-- Queries -->
     <div id="queriesSection" style="display:none">
-      <div class="section-label" style="margin-top:40px">Generated Queries</div>
+      <div class="section-label" style="margin-top:40px">Queries</div>
       <div class="filter-bar">
         <input  type="text" id="searchBox"  placeholder="Search questions…" oninput="renderQueries()"/>
-        <select id="langFilter" onchange="renderQueries()">
-          <option value="">All languages</option>
+        <select id="kindFilter" onchange="renderQueries()">
+          <option value="">All kinds</option>
+        </select>
+        <select id="skillFilter" onchange="renderQueries()">
+          <option value="">All skills</option>
+          <option value="__plain__">Plain (no skill)</option>
+          <option value="classification">classification</option>
+          <option value="regression">regression</option>
+          <option value="timeseries">timeseries</option>
+          <option value="causal">causal</option>
         </select>
         <select id="diffFilter" onchange="renderQueries()">
           <option value="">All difficulties</option>
@@ -162,16 +89,11 @@
           <option value="medium">Medium</option>
           <option value="hard">Hard</option>
         </select>
-        <select id="respFilter" onchange="renderQueries()">
-          <option value="">All responses</option>
-          <option value="done">Has response</option>
-          <option value="pending">Pending</option>
-        </select>
         <span class="q-count" id="qCount"></span>
       </div>
       <div id="queriesList"></div>
     </div>
-
+    <div id="emptyState" class="banner" style="display:none">No generated queries found for this source.</div>
   </div><!-- /workArea -->
 </main>
 
@@ -180,7 +102,7 @@
 <div class="modal" id="resultModal" style="display:none">
   <div class="modal-hdr">
     <div>
-      <div class="modal-eyebrow" id="modalEyebrow">Query Result</div>
+      <div class="modal-eyebrow" id="modalEyebrow">Query</div>
       <div class="modal-question" id="modalQuestion"></div>
     </div>
     <button class="modal-close" onclick="closeModal()">✕</button>

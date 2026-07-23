@@ -3,8 +3,12 @@ from typing import List, Dict, Tuple, Any
 import difflib
 import json
 import logging
+import pickle
+import queue as queue_module
 import re
 import multiprocessing as mp
+import numbers
+import numpy as np
 import pandas as pd
 
 from orqa.utils import prepare_dataframe
@@ -59,29 +63,75 @@ TERM_SUGGESTIONS = {
 logger = logging.getLogger(__name__)
 
 
+# Cap on error text shipped back from the sandbox: exception messages can
+# embed whole DataFrame reprs, and the text ends up verbatim in LLM feedback.
+_SANDBOX_ERROR_MAX_CHARS = 2000
+
+
+def _sandbox_error_text(e: BaseException) -> str:
+    msg = str(e) or type(e).__name__
+    if len(msg) > _SANDBOX_ERROR_MAX_CHARS:
+        msg = msg[:_SANDBOX_ERROR_MAX_CHARS] + " … [truncated]"
+    return msg
+
+
 def _sandbox_worker(queue: mp.Queue, fn, args: tuple) -> None:
     """Execute *fn* inside the sandbox process.
 
     The parent process enforces a timeout via p.join(timeout=...).
     No OS-level memory limit is applied.
+
+    Every outcome — including BaseException escapes like a generated
+    ``raise SystemExit`` and results the queue cannot pickle — must be
+    reported through the queue: an empty queue makes the parent report a
+    misleading "sandbox crashed" error.
     """
     try:
-        queue.put(("ok", fn(*args)))
-    except MemoryError as e:
+        result = fn(*args)
+    except MemoryError:
         queue.put((
             "error",
             "MemoryError",
-            f"Query ran out of memory. "
+            "Query ran out of memory. "
             "Likely cause: large intermediate result or cartesian product.\n"
             "Fix: pre-filter rows, select only needed columns, or add stricter join conditions."
         ))
-    except Exception as e:
-        queue.put(("error", type(e).__name__, str(e)))
+        return
+    except BaseException as e:
+        # BaseException on purpose: generated code can raise SystemExit /
+        # KeyboardInterrupt, which `except Exception` would let kill the
+        # worker silently (empty queue -> bogus "segfault" report upstream).
+        queue.put(("error", type(e).__name__, _sandbox_error_text(e)))
+        return
+
+    # mp.Queue pickles in a background feeder thread, so an unpicklable
+    # result raises AFTER put() returns and the item is silently lost.
+    # Pre-pickle here so the failure is caught and reported as feedback.
+    try:
+        payload = pickle.dumps(result)
+    except MemoryError:
+        queue.put((
+            "error",
+            "MemoryError",
+            "Query result too large to return from the sandbox.\n"
+            "Fix: aggregate or filter the result down before returning it."
+        ))
+        return
+    except BaseException as e:
+        queue.put((
+            "error",
+            "TypeError",
+            f"Query result of type {type(result).__name__!r} cannot be "
+            f"returned from the sandbox ({_sandbox_error_text(e)}).\n"
+            "End the query with a DataFrame, Series, or plain Python value."
+        ))
+        return
+    queue.put(("ok", payload))
 
 
 class QueryValidator(ABC):
 
-    DEFAULT_TIMEOUT   = 180
+    DEFAULT_TIMEOUT   = 300
     DEFAULT_MEM_LIMIT = 512
 
     def __init__(
@@ -185,11 +235,34 @@ class QueryValidator(ABC):
     # ------------------------------------------------------------------
     # Sandbox
     # ------------------------------------------------------------------
+    # Exception types the sandbox worker may report back by name. Anything
+    # unknown becomes RuntimeError (message text is preserved either way).
+    _SANDBOX_EXC_TYPES = {
+        "KeyError": KeyError, "ValueError": ValueError, "TypeError": TypeError,
+        "MemoryError": MemoryError, "SyntaxError": SyntaxError,
+        "IndentationError": SyntaxError, "TabError": SyntaxError,
+        "TimeoutError": TimeoutError, "NameError": NameError,
+        "AttributeError": AttributeError, "IndexError": IndexError,
+        "ZeroDivisionError": ZeroDivisionError, "OverflowError": OverflowError,
+        "RecursionError": RecursionError, "ImportError": ImportError,
+        "ModuleNotFoundError": ImportError, "ArithmeticError": ArithmeticError,
+        "FloatingPointError": ArithmeticError, "UnicodeDecodeError": ValueError,
+        "UnicodeEncodeError": ValueError, "StopIteration": RuntimeError,
+        "SystemExit": RuntimeError, "KeyboardInterrupt": RuntimeError,
+        "MergeError": ValueError, "ParserError": ValueError,
+        "OutOfBoundsDatetime": ValueError, "InvalidIndexError": KeyError,
+        "DataError": ValueError, "SpecificationError": ValueError,
+        "DuplicateLabelError": ValueError, "IndexingError": IndexError,
+        # duckdb exceptions the SQL validator doesn't translate itself.
+        "OutOfMemoryException": MemoryError, "CatalogException": KeyError,
+        "SyntaxException": SyntaxError,
+    }
+
     def _run_in_sandbox(self, fn, args: tuple = ()) -> Any:
-        queue = mp.Queue()
+        result_queue = mp.Queue()
         p = mp.Process(
             target=_sandbox_worker,
-            args=(queue, fn, args),
+            args=(result_queue, fn, args),
             daemon=True,
         )
         p.start()
@@ -206,28 +279,179 @@ class QueryValidator(ABC):
                 "or pre-aggregate before joining."
             )
 
-        if queue.empty():
+        # Never trust queue.empty() right after join(): the feeder thread may
+        # still be flushing the worker's item. Block briefly on get() instead.
+        try:
+            message = result_queue.get(timeout=5)
+        except queue_module.Empty:
             exit_code = p.exitcode
+            hint = (
+                " Exit code -9 usually means the OS killed it (out of memory)."
+                if exit_code == -9 else ""
+            )
             raise RuntimeError(
                 f"Sandbox process exited unexpectedly without returning a result "
-                f"(exit code: {exit_code}).\n"
-                "The query may have caused a segfault or been killed by the OS."
+                f"(exit code: {exit_code}).{hint}\n"
+                "The query may have crashed the interpreter or been killed by the OS.\n"
+                "Fix: reduce the data processed — pre-filter rows, select fewer "
+                "columns, or aggregate earlier."
             )
 
-        status, *rest = queue.get()
+        status, *rest = message
         if status == "error":
             exc_type_name, exc_msg = rest[0], rest[1]
-            exc_type = {
-                "KeyError": KeyError, "ValueError": ValueError, "TypeError": TypeError,
-                "MemoryError": MemoryError, "SyntaxError": SyntaxError,
-                "TimeoutError": TimeoutError, "NameError": NameError,
-                "AttributeError": AttributeError, "IndexError": IndexError,
-                "ZeroDivisionError": ZeroDivisionError, "OverflowError": OverflowError,
-                "MergeError": ValueError, "ParserError": ValueError,
-                "OutOfBoundsDatetime": ValueError, "InvalidIndexError": KeyError,
-            }.get(exc_type_name, RuntimeError)
+            exc_type = self._SANDBOX_EXC_TYPES.get(exc_type_name, RuntimeError)
+            if exc_type is RuntimeError and exc_type_name not in self._SANDBOX_EXC_TYPES:
+                exc_msg = f"{exc_type_name}: {exc_msg}"
             raise exc_type(exc_msg)
-        return rest[0]
+
+        # The worker ships the result pre-pickled (see _sandbox_worker).
+        try:
+            return pickle.loads(rest[0])
+        except Exception as exc:
+            raise RuntimeError(
+                f"Sandbox result could not be decoded: {exc}\n"
+                "End the query with a DataFrame, Series, or plain Python value."
+            )
+
+    # ------------------------------------------------------------------
+    # Expected-result-type enforcement (plan contract)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _describe_result_shape(result: Any) -> str:
+        """Human-readable one-liner of what the executed result actually is,
+        for the mismatch feedback message."""
+        try:
+            if isinstance(result, pd.DataFrame):
+                return (
+                    f"a DataFrame with {result.shape[0]} row(s) and "
+                    f"{result.shape[1]} column(s) ({', '.join(map(str, result.columns[:6]))}"
+                    f"{', …' if result.shape[1] > 6 else ''})"
+                )
+            if isinstance(result, pd.Series):
+                return f"a Series of {len(result)} value(s) (dtype {result.dtype})"
+            if isinstance(result, bool):
+                return f"a boolean ({result})"
+            if isinstance(result, numbers.Number):
+                return f"a single number ({result})"
+            if isinstance(result, str):
+                shown = result if len(result) <= 60 else result[:60] + "…"
+                return f"a string ({shown!r})"
+            if isinstance(result, (list, tuple)):
+                return f"a {type(result).__name__} of {len(result)} element(s)"
+        except Exception:
+            pass
+        return f"a {type(result).__name__}"
+
+    @classmethod
+    def _matches_expected_result_type(cls, result: Any, expected: str) -> bool:
+        """True when ``result``'s shape satisfies the plan's declared
+        ``expected_result_type``.
+
+        Deliberately generous at the borders so the check catches GROSS
+        mismatches (a 50-row table where one number was promised; a bare
+        number where a per-group table was promised) without burning
+        correction cycles on packaging trivia:
+          * a 1x1 DataFrame / 1-element Series wrapping a scalar counts as
+            that scalar type;
+          * an indexed Series counts as 'table' (a per-group aggregate
+            legitimately comes back as a Series);
+          * a single-column DataFrame counts as 'list'.
+        Polars frames/series are duck-typed via shape/len rather than
+        imported here.
+        """
+        def _unwrap_scalar(r: Any) -> Any:
+            # 1x1 DataFrame or 1-element Series/list -> the inner value.
+            try:
+                if isinstance(r, pd.DataFrame) and r.shape == (1, 1):
+                    return r.iloc[0, 0]
+                if isinstance(r, pd.Series) and len(r) == 1:
+                    return r.iloc[0]
+                if isinstance(r, (list, tuple)) and len(r) == 1:
+                    return r[0]
+            except Exception:
+                pass
+            return r
+
+        is_df = isinstance(result, pd.DataFrame) or (
+            hasattr(result, "shape") and hasattr(result, "columns")
+        )
+        is_series = (not is_df) and (
+            isinstance(result, pd.Series)
+            or (hasattr(result, "dtype") and hasattr(result, "__len__") and not isinstance(result, str))
+        )
+
+        if expected == "table":
+            return is_df or is_series
+        if expected == "list":
+            if is_series or isinstance(result, (list, tuple)):
+                return True
+            if is_df:
+                try:
+                    return result.shape[1] == 1
+                except Exception:
+                    return False
+            return False
+
+        scalar = _unwrap_scalar(result)
+        # np.bool_ covers numpy's boolean scalar under BOTH numpy 1.x
+        # (numpy.bool_) and 2.x (numpy.bool) — it is not a subclass of
+        # Python bool, so isinstance(scalar, bool) alone misses it.
+        is_bool = isinstance(scalar, (bool, np.bool_))
+        if expected == "boolean":
+            # bool first: bool is a subclass of int, so the number branch
+            # would otherwise swallow it.
+            return is_bool
+        if expected == "number":
+            if is_bool:
+                return False
+            return isinstance(scalar, numbers.Number) or (
+                hasattr(scalar, "item") and isinstance(getattr(scalar, "item", lambda: None)(), numbers.Number)
+            )
+        if expected == "text":
+            return isinstance(scalar, str)
+        return True  # unknown/absent declaration — nothing to enforce
+
+    def _check_expected_result_type(self, query: dict, result: Any) -> None:
+        """Enforce the plan's declared result contract on the executed result.
+
+        Raises ``ValueError`` with a correction-ready message when the
+        result's shape contradicts ``expected_result_type`` — the message is
+        what the coding agent sees in its correction prompt, so it names the
+        contract, what actually came back, and what to change.
+        """
+        expected = str(query.get("expected_result_type") or "").strip().lower()
+        if expected not in ("table", "list", "number", "text", "boolean"):
+            return  # no declared contract (older plans) — nothing to enforce
+        if self._matches_expected_result_type(result, expected):
+            return
+
+        description = str(query.get("expected_result_description") or "").strip()
+        described = f'\nThe plan describes the expected result as: "{description}"' if description else ""
+        raise ValueError(
+            "RESULT TYPE MISMATCH — the executed result does not have the "
+            "shape the approved plan promised.\n"
+            f"Expected result type (from the plan): '{expected}'.{described}\n"
+            f"The code actually returned: {self._describe_result_shape(result)}.\n"
+            "Fix the CODE's final result — do not change the question or the "
+            "plan: "
+            + {
+                "number": "end with the single numeric value itself (e.g. "
+                          "`result = float(total)`), not a DataFrame of "
+                          "context columns around it.",
+                "boolean": "end with the single True/False answer itself "
+                           "(e.g. `result = bool(condition)`), not a "
+                           "DataFrame or a count.",
+                "text": "end with the single string value itself (e.g. the "
+                        "winning category's name), not a table containing it.",
+                "list": "end with one Series / single-column selection of "
+                        "the values, not a multi-column DataFrame or a "
+                        "single scalar.",
+                "table": "end with the tabular result (a DataFrame, or a "
+                         "per-group Series), not a lone scalar value.",
+            }[expected]
+        )
 
     # ------------------------------------------------------------------
     # Main validation loop
@@ -243,7 +467,9 @@ class QueryValidator(ABC):
         for idx, q in enumerate(result["queries"]):
             actual_query = q
             try:
-                dataframes, ordered_names = self.prefilter_dataframes(actual_query['tables'])
+                dataframes, ordered_names = self.prefilter_dataframes(
+                    actual_query['tables'], q.get("code") or ""
+                )
                 raw_code = q.get("code") or ""
                 if not raw_code.strip():
                     raise ValueError("query 'code' field is missing or empty")
@@ -263,6 +489,11 @@ class QueryValidator(ABC):
                 # rejecting it here generates spurious correction cycles and token waste.
                 if self._is_empty_result(result_data) and self._empty_result_is_error(ordered_names):
                     raise ValueError(self._build_empty_result_feedback())
+                # Plan contract: the executed result must have the shape the
+                # approved plan declared (expected_result_type). Checked after
+                # the empty-result gate so an empty result gets its own, more
+                # specific feedback rather than a shape complaint.
+                self._check_expected_result_type(actual_query, result_data)
                 if not self._check_table_usage(query_code, sanitized_names):
                     raise ValueError(self._build_unused_tables_feedback())
                 if not self._check_tables_field_coverage(actual_query):
@@ -319,7 +550,7 @@ class QueryValidator(ABC):
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
-    def prefilter_dataframes(self, tables):
+    def prefilter_dataframes(self, tables, code: str = ""):
         df_by_name = dict(zip(self.table_names, self.dataframes))
         # Build reverse map: file-path/UUID → canonical table name (e.g. "xahu-rkwn" → "Table_0")
         # so that tables[].name entries still holding raw dataset IDs are resolved correctly.
@@ -368,9 +599,26 @@ class QueryValidator(ABC):
                         f"columns_involved has unknown columns in '{name}': {missing}.{suggestion_msg}\n"
                         "Check for typos or stale references."
                     )
-                dataframes.append(dataframe[[c for c in cols if c in dataframe.columns]])
-            else:
-                dataframes.append(dataframe)
+                # Reconcile the declaration with the code instead of slicing
+                # the frame to it: executing on a columns_involved-sliced frame
+                # turned every real-but-undeclared column reference into a fake
+                # runtime KeyError — with a suggestion list computed from the
+                # UNSLICED frame, so the feedback ("Closest columns: X" for a
+                # KeyError on X itself) sent correction loops in circles.
+                # Execution always gets the full prepared frame; columns the
+                # code references that exist but were not declared are added
+                # to columns_involved so the saved metadata stays truthful.
+                if code:
+                    referenced = set(
+                        re.findall(r"['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]", code)
+                    )
+                    undeclared = [
+                        c for c in dataframe.columns
+                        if c in referenced and c not in cols
+                    ]
+                    if undeclared:
+                        table["columns_involved"] = list(cols) + undeclared
+            dataframes.append(dataframe)
             ordered_names.append(name)
         return dataframes, ordered_names
 
@@ -446,7 +694,7 @@ class QueryValidator(ABC):
             lines.append("Missing: " + ", ".join(sorted(self.tables_field_missing)))
         if self.tables_field_extra:
             lines.append("Unknown (remove): " + ", ".join(sorted(self.tables_field_extra)))
-        lines.append("Each entry needs: 'name' (exact alias), 'reason', 'join_justification'.")
+        lines.append("Each entry needs: 'name' (exact alias) and 'columns_involved' (minimal columns used).")
         return "\n".join(lines)
 
     def _build_unused_tables_feedback(self) -> str:

@@ -10,6 +10,7 @@ pandas:
 
 
 
+# BLEND options (classical candidates-discovery pipeline)
 blend:
   xash_size: 128
   max_cell_length: 128
@@ -66,23 +67,39 @@ tasks:
     verbose: True
 
   candidates_discovery:
+    # discovery pipeline: 'blend' (BLEND+SLOTH) or 'semantic' (embeddings+HNSW)
+    method: blend
     n_random_dataset_seeds: 20
     min_dataset_height: 10
     limit_to_n_columns: 15
     sample_size: 3
-    top_k_results_per_task: 10
-    qcr_hash_size: 128
     n_paths_for_dataset: 5
     max_path_length: 5
-    overlap_ratio_threshold: 50
     sm_macro_avg_threshold: 0.5
     sm_micro_avg_threshold: 0.5
+    # Embedding + clustering discovery
+    top_k_neighbors: 10
+    cosine_similarity_threshold: 0.3
+    correlation_threshold: 0.5
+    correlation_method: pearson
+    embedding_batch_size: 64
+    target_cluster_size: 40
+    cluster_overlap_margin: 0.1
+    max_cluster_size: 60
+    sm_matcher: coma
+    tokens_budget: 1000000
+    max_datasets_to_process: 100
   query_generation:
     kind: "SQL"
-    max_cols: 10
-    allow_tabpfn: false
     bad_tokens: ['s','None','R','NaN']
     max_response_tokens: 300
     max_memory_usage: 512
     max_pool_time: 60
     languages: ["French","English"]
+
+  # MCP dataset-search server (step: mcp_search)
+  mcp_search:
+    backend: elasticsearch
+    elasticsearch_url: http://localhost:9200
+    host: 127.0.0.1
+    port: 8762

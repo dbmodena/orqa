@@ -52,7 +52,11 @@ def schema_matching(
     """
     if verbose:
         print("Computing Schema Matching...")
-    matches: dict[Any, float] = valentine_match(Q, R, matcher, "Q", "R")
+    # Table names must be at least two characters: valentine builds column
+    # guids by indexing the second character of the name, so single-letter
+    # labels crash it. The labels are stripped from the keys right below,
+    # so they never surface to callers.
+    matches: dict[Any, float] = valentine_match(Q, R, matcher, "Q_table", "R_table")
     matches = {(x, y): s for ((_, x), (_, y)), s in matches.items()}
     if verbose:
         print("Done.")

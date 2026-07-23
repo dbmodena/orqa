@@ -14,7 +14,6 @@ from orqa.utils import pl_read_dataset
 DOCUMENT_TYPE = "csv"
 THRESHOLD = 0.5
 MAX_WORKERS = 5
-OVERLAP_RATIO_THRESHOLD = 0.5
 ROUND = 3
 
 
@@ -23,33 +22,39 @@ def _get_metrics(edge_data: dict) -> dict:
     return edge_data.get("metrics", edge_data)
 
 
-def overlap_ratio_only_predicate(edge_data: dict, overlap_threshold: float) -> bool:
-    try:
-        return _get_metrics(edge_data)["overlap_ratio"] >= overlap_threshold
-    except Exception:
-        return False
+def _overlap_ok(metrics: dict, overlap_threshold: Optional[float]) -> bool:
+    """Overlap clause of the walk predicates.
+
+    Edges from the classical (BLEND+SLOTH) pipeline carry ``overlap_ratio``
+    and are gated against the threshold; edges from the semantic pipeline
+    don't have the metric — they were value-gated at emission — so the
+    clause passes for them.
+    """
+    if overlap_threshold is None or "overlap_ratio" not in metrics:
+        return True
+    return metrics["overlap_ratio"] >= overlap_threshold
 
 
-def macro_avg_predicate(edge_data: dict, overlap_threshold: float, macro_threshold: float) -> bool:
-    try:
-        m = _get_metrics(edge_data)
-        return (
-            m["overlap_ratio"] >= overlap_threshold
-            and m["sm_macro_avg"] >= macro_threshold
-        )
-    except Exception:
-        return False
-
-
-def micro_avg_predicate(edge_data: dict, overlap_threshold: float, micro_threshold: float) -> bool:
+def macro_avg_predicate(
+    edge_data: dict, overlap_threshold: Optional[float], macro_threshold: float
+) -> bool:
     try:
         m = _get_metrics(edge_data)
-        return (
-            m["overlap_ratio"] >= overlap_threshold
-            and m["sm_micro_avg"] >= micro_threshold
-        )
+        return _overlap_ok(m, overlap_threshold) and m["sm_macro_avg"] >= macro_threshold
     except Exception:
         return False
+
+
+def micro_avg_predicate(
+    edge_data: dict, overlap_threshold: Optional[float], micro_threshold: float
+) -> bool:
+    try:
+        m = _get_metrics(edge_data)
+        return _overlap_ok(m, overlap_threshold) and m["sm_micro_avg"] >= micro_threshold
+    except Exception:
+        return False
+
+
 def compute_overlap_metrics(
     left_table: list[list[Any]],
     right_table: list[list[Any]],
@@ -58,35 +63,24 @@ def compute_overlap_metrics(
 ) -> dict:
     """
     Analyze a single pair of tables that are already in list of lists format.
-    Returns statistics about the overlap computed with respect to the left table only (overlap ratio).
-
-    :param left_table: The left table as list of columns
-    :param right_table: The right table as list of columns
-    :param verbose: Whether to print detailed information
-    :return dictionary containing result, metrics, and statistics
+    Returns statistics about the overlap computed with SLOTH (classical
+    pipeline only — the semantic pipeline never calls this).
     """
     metrics = []
 
-    # Run SLOTH
     result, metrics = sloth(left_table, right_table, metrics=metrics, verbose=verbose)
 
     if not result or not result[0] or not metrics:
         return {
             "overlap_area": 0,
-            "r_involved_area": 0,
             "overlap_ratio": 0.0,
             "num_columns_involved": 0,
-            "num_rows_in_r": 0,
             "num_rows_overlapping": 0,
         }
 
-    # Extract from metrics (already calculated by SLOTH)
-    overlap_area = metrics[-2]  # Area from metrics
-    num_rows_overlapping = metrics[-3]  # Height from metrics
-    num_columns_involved = metrics[-4]  # Width from metrics
-
-    # Extract mapping from result
-    mapping, overlap_rows = result[0]
+    overlap_area = metrics[-2]
+    num_rows_overlapping = metrics[-3]
+    num_columns_involved = metrics[-4]
 
     left_area = len(left_table) * len(left_table[0])
     right_area = len(right_table) * len(right_table[0])
@@ -111,92 +105,105 @@ def process_edge(
     matcher_kwargs: Optional[dict] = None,
     verbose: bool = False,
 ) -> tuple[int, str, str, str, list, dict, list] | None:
-    """Helper function to process a single edge in parallel"""
+    """Compute SLOTH overlap + schema-matching metrics for one candidate edge.
+
+    Classical (BLEND) pipeline path. Candidates from the semantic pipeline
+    carry their metrics inline and short-circuit here without any I/O.
+    """
     q_node = entry["Q"]
     r_node = entry["R"]
     task = entry["task"]
 
-    metrics = {}
-
     if q_node == r_node:
         return None
+
+    if "metrics" in entry:
+        # Already verified at emission time — nothing to recompute.
+        r_columns = (
+            [entry["r_key"], entry["r_target"]]
+            if task == "JC"
+            else entry.get("r_columns", [])
+        )
+        return (
+            entry_idx,
+            q_node,
+            r_node,
+            task,
+            r_columns,
+            entry["metrics"],
+            entry.get("matches", []),
+        )
 
     Q = pl_read_dataset(datasets_folder / f"{q_node}.csv", read_opts)
     R = pl_read_dataset(datasets_folder / f"{r_node}.csv", read_opts)
 
     q_columns = r_columns = None
     q_key = r_key = None
-    _q_target = r_target = None
 
     match task:
         case "U":
             q_columns = entry["q_columns"]
-            r_columns = []
+            r_columns = entry.get("r_columns") or []
         case "J" | "MJ":
             q_columns = entry["q_columns"]
             r_columns = entry["r_columns"]
-
-            #r_columns = [R.columns[idx] for idx in r_columns]
-            #if r_columns and isinstance(r_columns[0], int):
-            #    r_columns = [R.columns[idx] for idx in r_columns]
         case "JC":
             q_key = entry["q_key"]
-            _q_target = entry["q_target"]
 
-            r_key = R.columns[entry["r_key"]]
-            r_target = R.columns[entry["r_target"]]
+            # BLEND emits r_key/r_target as column indices; the semantic
+            # pipeline emits names. Accept both.
+            r_key = entry["r_key"]
+            r_target = entry["r_target"]
+            if isinstance(r_key, int):
+                r_key = R.columns[r_key]
+            if isinstance(r_target, int):
+                r_target = R.columns[r_target]
 
             q_columns = [q_key]
             r_columns = [r_key]
         case _:
             raise ValueError(f"Unknown task: {task}")
 
+    metrics = {}
+
     try:
-        # Prepare datasets for SLOTH
         q_columns_values = [Q.get_column(col).to_list() for col in q_columns]
         r_columns_values = [
             R.get_column(col).to_list()
             for col in (r_columns if r_columns else R.columns)
         ]
 
-        # we force an overlap with at least #(left_table_involved_columns) width
         overlap_t = time.time()
-        metrics = compute_overlap_metrics(
+        overlap_metrics = compute_overlap_metrics(
             q_columns_values,
             r_columns_values,
             min_width=len(q_columns),
             verbose=verbose,
         )
+        metrics.update(overlap_metrics)
     except Exception as e:
         print(f"Error while processing edge with SLOTH: {e}")
         metrics["overlap_ratio"] = -1
-    else:
-        metrics["overlap_time"] = round(overlap_t, ROUND)
+        overlap_t = time.time()
     finally:
-        overlap_t = time.time() - overlap_t
-        metrics["overlap_time"] = overlap_t
+        metrics["overlap_time"] = round(time.time() - overlap_t, ROUND)
 
+    match_t = time.time()
     try:
-        # Prepare datasets for Schema Matching
-        Q = Q.to_pandas()
-        R = R.to_pandas()
-
-        matcher_kwargs = {} if matcher_kwargs is None else matcher_kwargs
-        matcher = instantiate_matcher(matcher_name, **matcher_kwargs)
-
-        match_t = time.time()
+        matcher = instantiate_matcher(matcher_name, **(matcher_kwargs or {}))
         matches, macro_avg, micro_avg = schema_matching(
             matcher,
             task,
-            Q,
-            R,
+            Q.to_pandas(),
+            R.to_pandas(),
             q_columns,
             r_columns,
             q_key,
             r_key,
         )
     except Exception as e:
-        print(f"Error wile processing edge with Schema Matcher {matcher_name}: {e}")
+        print(f"Error while processing edge with Schema Matcher {matcher_name}: {e}")
+        matches = {}
         metrics["sm_macro_avg"] = -1
         metrics["sm_micro_avg"] = -1
         metrics["sm_n_matches"] = -1
@@ -204,12 +211,10 @@ def process_edge(
         metrics["sm_macro_avg"] = round(macro_avg, ROUND)
         metrics["sm_micro_avg"] = round(micro_avg, ROUND)
         metrics["sm_n_matches"] = len(matches)
-        metrics["sm_time"] = round(match_t, ROUND)
     finally:
-        match_t = time.time() - match_t
-        metrics["sm_time"] = match_t
+        metrics["sm_time"] = round(time.time() - match_t, ROUND)
 
-    if task == "U":
+    if task == "U" and not r_columns:
         r_columns = [c2 for (_, c2) in matches.keys()]
     if task == "JC":
         r_columns = [r_key, r_target]
@@ -224,17 +229,28 @@ def process_edge(
     )
 
 
-def overlap_ratio_predicate(node: dict) -> bool:
-    return node["overlap_ratio"] >= OVERLAP_RATIO_THRESHOLD
-
-
 class DatasetMatchesGraph:
     def __init__(self):
         self._G = nx.MultiDiGraph()
 
+    def add_precomputed(self, candidates: list[dict]):
+        """Add candidate edges whose metrics were computed at emission time.
+
+        No I/O and no matching: each candidate dict carries a ``metrics``
+        mapping that becomes the edge attributes.
+        """
+        for entry in candidates:
+            if entry["Q"] == entry["R"]:
+                continue
+            self._G.add_node(entry["Q"])
+            self._G.add_node(entry["R"])
+            self._G.add_edge(
+                entry["Q"], entry["R"], task=entry["task"], **entry.get("metrics", {})
+            )
+
     def add(
         self,
-        blend_matches: list[dict],
+        candidate_matches: list[dict],
         datasets_folder: Path,
         read_opts: dict,
         matcher_name: str,
@@ -242,7 +258,7 @@ class DatasetMatchesGraph:
         max_workers: Optional[int] = None,
         verbose: bool = False,
     ):
-        for entry in blend_matches:
+        for entry in candidate_matches:
             self._G.add_node(entry["Q"])
             self._G.add_node(entry["R"])
 
@@ -258,15 +274,15 @@ class DatasetMatchesGraph:
                     matcher_kwargs,
                     verbose,
                 )
-                for idx, entry in enumerate(blend_matches)
+                for idx, entry in enumerate(candidate_matches)
             }
 
             for future in tqdm(
                 as_completed(futures),
                 desc="Adding edges to the graph",
-                total=len(blend_matches),
+                total=len(candidate_matches),
             ):
-                entry_idx = task = r_columns = None #fix
+                entry_idx = task = r_columns = None
                 try:
                     result = future.result(60)
                     if result:
@@ -274,13 +290,13 @@ class DatasetMatchesGraph:
                             result
                         )
                         if task != "JC":
-                            blend_matches[entry_idx]["r_columns"] = r_columns
+                            candidate_matches[entry_idx]["r_columns"] = r_columns
                         else:
-                            blend_matches[entry_idx]["r_key"] = r_columns[0]
-                            blend_matches[entry_idx]["r_target"] = r_columns[1]
+                            candidate_matches[entry_idx]["r_key"] = r_columns[0]
+                            candidate_matches[entry_idx]["r_target"] = r_columns[1]
 
-                        blend_matches[entry_idx]["matches"] = matches
-                        blend_matches[entry_idx]["metrics"] = metrics
+                        candidate_matches[entry_idx]["matches"] = matches
+                        candidate_matches[entry_idx]["metrics"] = metrics
                         self._G.add_edge(q_node, r_node, task=task, **metrics)
                 except Exception as e:
                     print(f"Error within main process: {e} {entry_idx} {task} {r_columns}")
@@ -298,7 +314,6 @@ class DatasetMatchesGraph:
             for u, v, data in self._G.edges(src, data=True):
                 # with data=True, g.edges return a tuple with
                 # three values, and the third is the data-dict of the node
-                print(data)
                 if data.get("label") in edge_labels and predicate(data):
                     next_node = v if u == src else u
 
@@ -332,7 +347,7 @@ class DatasetMatchesGraph:
         :param num_hops: Number of hops to perform before stopping the search.
         :raises ValueError: If the input node is not found in the graph.
         """
-        
+
         if not predicate:
             return self._G
         if node not in self._G:
@@ -361,10 +376,6 @@ class DatasetMatchesGraph:
 
         return sub_g
 
-    
-    
-
-    
     def generate_random_walks(
         self,
         dataset_id: str,
@@ -379,13 +390,13 @@ class DatasetMatchesGraph:
         label_configs = [
             {
                 "edge_labels": ["U"],
-                "weight": "macro_avg" if macro_avg_threshold is not None else None,
-                "predicate": partial(macro_avg_predicate,overlap_threshold=overlap_ratio_threshold, macro_threshold=macro_avg_threshold) if macro_avg_threshold is not None else None,
+                "weight": "sm_macro_avg" if macro_avg_threshold is not None else None,
+                "predicate": partial(macro_avg_predicate, overlap_threshold=overlap_ratio_threshold, macro_threshold=macro_avg_threshold) if macro_avg_threshold is not None else None,
             },
             {
                 "edge_labels": ["J", "JC"],
-                "weight": "micro_avg" if micro_avg_threshold is not None else None,
-                "predicate": partial(micro_avg_predicate,overlap_threshold=overlap_ratio_threshold, micro_threshold=micro_avg_threshold) if micro_avg_threshold is not None else None,
+                "weight": "sm_micro_avg" if micro_avg_threshold is not None else None,
+                "predicate": partial(micro_avg_predicate, overlap_threshold=overlap_ratio_threshold, micro_threshold=micro_avg_threshold) if micro_avg_threshold is not None else None,
             },
         ]
 
@@ -427,10 +438,28 @@ class DatasetMatchesGraph:
                 walk_tuple = tuple(acyclic_walk)  # convert list to tuple for hashing
                 if walk_tuple not in seen_walks:
                     seen_walks.add(walk_tuple)
+                    # One task label ("U"/"J"/"JC") per hop, so callers can
+                    # render the walk as an actual path (table1 -(join)->
+                    # table2 -(union)-> table3) instead of just the
+                    # unordered set of tables it touched.
+                    steps = []
+                    for u, v in zip(acyclic_walk, acyclic_walk[1:]):
+                        edge_data = (
+                            sub_graph.get_edge_data(u, v)
+                            or sub_graph.get_edge_data(v, u)
+                            or {}
+                        )
+                        task = (
+                            next(iter(edge_data.values()))["task"]
+                            if edge_data
+                            else edge_labels[0]
+                        )
+                        steps.append(task)
                     random_walks.append(
                         {
                             "operation_type": edge_labels,
                             "datasets": acyclic_walk,
+                            "steps": steps,
                         }
                     )
 

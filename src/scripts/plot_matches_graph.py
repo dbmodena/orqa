@@ -7,7 +7,7 @@ sys.path.append("..")
 import matplotlib.pyplot as plt
 import networkx as nx
 
-from orqa.candidates_generation import get_seed_datasets
+from orqa.embedding_discovery.pipeline import get_seed_datasets
 from conf import load_config
 
 import networkx as nx

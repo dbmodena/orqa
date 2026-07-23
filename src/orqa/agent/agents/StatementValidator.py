@@ -8,11 +8,18 @@ Flow
 ----
 Each cycle:
   1. If judge feedback is present on cycle 1: skip static validation,
-     send all pending queries + feedback directly to the LLM.
+     send each pending query + its feedback to the LLM.
   2. Otherwise: run static validator, collect passing into `approved`,
-     send failing + their errors to the LLM.
-  3. The LLM returns corrected queries.  These completely replace `pending`.
-     Matching is positional — LLM-returned IDs are never trusted.
+     send each failing query + its error to the LLM.
+  3. Every correction call is for exactly ONE query — never batched — run
+     concurrently on a bounded thread pool (mirrors
+     ``JudgementResponseAgent._judge_all_concurrent``). Each query is matched
+     back to its result by a pre-recorded index, not by anything in the
+     response, so a query can never be misattributed regardless of which
+     call completes first or how the model behaves. This also means one
+     query's correction failing (retries exhausted) only affects that query
+     — it falls back to its own unchanged original — instead of aborting the
+     whole cycle for every other query too.
   4. On the final cycle, any still-failing queries are dropped.
 
 LLM call contract
@@ -20,8 +27,8 @@ LLM call contract
 * Messages are stateless per call: [system, user] only.
 * On a Pydantic/JSON parse failure the parent retry pattern is used:
   append [assistant, user(error)] and retry — but only for format errors.
-* If all Pydantic retries are exhausted, return [] so the caller keeps
-  whatever `approved` queries it already has.
+* If all Pydantic retries are exhausted for a query, that query's original
+  (unchanged) dict is kept — never the whole cycle's queries.
 
 Error lifetime — two tiers
 --------------------------
@@ -42,19 +49,25 @@ Tier 2 — prompt errors  (`errors_by_id` local to each cycle):
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from .utility.alias_substitution import AliasSubstitution
-from .utility.error_formatter import ErrorFormatter
-from .utility.message_builder import ValidatorMessageBuilder
+from ..utility.alias_substitution import AliasSubstitution
+from ..utility.message_builder import sanitize_messages
+from ..prompting import build_skill_sections
+from ..utility.error_formatter import ErrorFormatter
 from .StatementClient import LLMClientStructured
-from .prompting import PandasValidatorCorrectionPrompt, SQLValidatorCorrectionPrompt
-from .validators.SQLValidator import SQLValidator
-from .validators.PandasValidator import PandasValidator
+from ..prompting import PandasValidatorCorrectionPrompt, SQLValidatorCorrectionPrompt
+from ..validators.SQLValidator import SQLValidator
+from ..validators.PandasValidator import PandasValidator
 
 logger = logging.getLogger(__name__)
+
+# Bounded worker pool for concurrent one-query-at-a-time correction calls.
+# Mirrors JUDGE_CONCURRENCY in agent.py — same rationale, same order of magnitude.
+CORRECTION_CONCURRENCY = 6
 
 
 class LLMStatementValidator(LLMClientStructured):
@@ -82,9 +95,20 @@ class LLMStatementValidator(LLMClientStructured):
         aliases: dict,
         table_schemas: str,
         judge_feedback: list | None = None,
+        plan_by_client_id: dict | None = None,
     ) -> tuple[list, dict, list]:
         """
         Validate and correct *queries*, retrying up to MAX_VALIDATION_RETRIES times.
+
+        Args:
+            plan_by_client_id: Maps each query's opaque ``client_id`` (assigned
+                at generation, preserved unchanged through every copy this
+                method makes) to the plan it was generated from. Used to
+                re-inject that plan's skill markdown (see
+                ``build_skill_sections``) into every correction prompt —
+                static-validation or judge-feedback — so a correction cycle
+                never loses track of a skill the query is supposed to follow.
+                ``None``/omitted disables this (no skill re-injection).
 
         Returns:
             (approved_queries, token_usage, error_strings)
@@ -140,24 +164,32 @@ class LLMStatementValidator(LLMClientStructured):
             if has_judge_feedback and cycle == 1:
                 logger.info(
                     "[Validator] Cycle %d/%d: judge-feedback path — "
-                    "%d queries → LLM (no static validation)",
+                    "%d queries → LLM, one call per query (no static validation)",
                     cycle, self.MAX_VALIDATION_RETRIES, len(pending),
                 )
-                user_content = self._build_judge_feedback_prompt(
-                    pending, remapped_feedback, table_schemas
-                )
-                corrected, tokens, errors = self._call_correction_llm(
-                    pending, user_content
+                feedback_by_id = {
+                    str(fb.get("id")): fb for fb in remapped_feedback
+                }
+                skill_sections_by_id = _skill_sections_by_id(pending, plan_by_client_id)
+                prompts = []
+                for q in pending:
+                    qid = str(q.get("id"))
+                    fb = feedback_by_id.get(qid, {})
+                    error = fb.get("error", "")
+                    suggestion = fb.get("suggestion", "")
+                    error_text = f"{error}\n  Suggestion: {suggestion}" if suggestion else (
+                        error or "(no judge feedback available)"
+                    )
+                    prompts.append(self._build_one_correction_prompt(
+                        q, error_text, "Judge Feedback", table_schemas,
+                        skill_sections_by_id.get(qid, []),
+                    ))
+
+                corrected, tokens, errors = self._correct_queries_concurrently(
+                    pending, prompts
                 )
                 _accumulate_usage(usage_total, tokens)
                 all_errors.extend(errors)
-
-                if not corrected:
-                    logger.warning(
-                        "[Validator] Judge-feedback LLM call returned nothing; "
-                        "skipping remaining cycles."
-                    )
-                    break
 
                 _print_query_diff(pending, corrected, cycle, "judge-feedback")
                 pending = corrected
@@ -187,6 +219,18 @@ class LLMStatementValidator(LLMClientStructured):
                     "[Validator] Cycle %d (final): dropping %d still-failing queries.",
                     cycle, len(pending),
                 )
+                dropped_errors_by_id = _positional_errors(failing, static_errors)
+                for q in pending:
+                    qid = q.get("id")
+                    err = dropped_errors_by_id.get(str(qid), "(no specific error)")
+                    code = q.get("code", "(no code)")
+                    logger.warning(
+                        "[Validator]   dropped #%s — %s\n    code: %s",
+                        qid, err, code,
+                    )
+                    all_errors.append(
+                        f"[Validator] Dropped query #{qid}: {err}\n    code: {code}"
+                    )
                 all_errors.append(
                     f"[Validator] {len(pending)} query/queries dropped after "
                     f"{self.MAX_VALIDATION_RETRIES} correction cycle(s)."
@@ -198,27 +242,23 @@ class LLMStatementValidator(LLMClientStructured):
             # Built from the *current* failing queries — no association with
             # queries evicted in previous cycles.  Discarded after prompt build.
             errors_by_id = _positional_errors(failing, static_errors)
+            skill_sections_by_id = _skill_sections_by_id(failing, plan_by_client_id)
 
-            user_content = self._build_static_correction_prompt(
-                failing, errors_by_id, table_schemas
-            )
-            corrected, tokens, errors = self._call_correction_llm(
-                failing, user_content
+            prompts = [
+                self._build_one_correction_prompt(
+                    q,
+                    errors_by_id.get(str(q.get("id")), "(no error)"),
+                    "Static validation error",
+                    table_schemas,
+                    skill_sections_by_id.get(str(q.get("id")), []),
+                )
+                for q in failing
+            ]
+            corrected, tokens, errors = self._correct_queries_concurrently(
+                failing, prompts
             )
             _accumulate_usage(usage_total, tokens)
             all_errors.extend(errors)
-
-            if not corrected:
-                logger.warning(
-                    "[Validator] Static-correction LLM call returned nothing on "
-                    "cycle %d; dropping %d queries.",
-                    cycle, len(failing),
-                )
-                all_errors.append(
-                    f"[Validator] LLM correction failed on cycle {cycle}; "
-                    f"dropping {len(failing)} queries."
-                )
-                break
 
             # Completely replace pending with corrected output.
             # Old queries and their errors_by_id are now evicted — the next
@@ -241,44 +281,95 @@ class LLMStatementValidator(LLMClientStructured):
         return final, usage_total, all_errors
 
     # ------------------------------------------------------------------
-    # LLM call — single entry point for all correction calls
+    # LLM calls — one query per call, run concurrently
     # ------------------------------------------------------------------
 
-    def _call_correction_llm(
+    def _correct_queries_concurrently(
         self,
         source_queries: list[dict],
-        user_content: str,
+        prompts: list[str],
     ) -> tuple[list[dict], dict, list[str]]:
+        """Correct each query with its own isolated LLM call, run concurrently.
+
+        Mirrors ``JudgementResponseAgent._judge_all_concurrent``: every query
+        gets exactly one call (never batched), submitted on a bounded thread
+        pool, and matched back to its result by a pre-recorded index — never
+        by anything in the response. A query can therefore never be
+        misattributed regardless of completion order or model behaviour, and
+        one query's correction failing only affects that query (it falls
+        back to its own unchanged original) rather than the whole cycle.
+
+        Args:
+            source_queries: The queries being corrected, in order.
+            prompts: The fully-rendered user message for each query, same
+                order/length as ``source_queries`` (``prompts[i]`` corrects
+                ``source_queries[i]``).
+
+        Returns:
+            (corrected_queries, usage_dict, error_strings) — corrected_queries
+            is always the same length as source_queries.
         """
-        Send [system, user] to the correction LLM and return corrected queries
-        matched to *source_queries* by position (not by ID).
+        usage_total = _empty_usage()
+        all_errors: list[str] = []
+        if not source_queries:
+            return [], usage_total, all_errors
+
+        results: list[dict] = list(source_queries)
+        max_workers = max(1, min(CORRECTION_CONCURRENCY, len(source_queries)))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_index = {
+                pool.submit(self._call_correction_llm_one, query, prompt): i
+                for i, (query, prompt) in enumerate(zip(source_queries, prompts))
+            }
+
+            for future in as_completed(future_to_index):
+                i = future_to_index[future]
+                try:
+                    corrected_query, tokens, errors = future.result()
+                except Exception as exc:  # noqa: BLE001 — isolate per-query failures
+                    logger.error(
+                        "[Validator] Correction call for query #%s raised: %s",
+                        source_queries[i].get("id"), exc,
+                    )
+                    corrected_query = dict(source_queries[i])
+                    tokens = _empty_usage()
+                    errors = [
+                        f"[Validator] Correction call for query "
+                        f"#{source_queries[i].get('id')} raised "
+                        f"{type(exc).__name__}: {exc}"
+                    ]
+                results[i] = corrected_query
+                _accumulate_usage(usage_total, tokens)
+                all_errors.extend(errors)
+
+        return results, usage_total, all_errors
+
+    def _call_correction_llm_one(
+        self,
+        source_query: dict,
+        user_content: str,
+    ) -> tuple[dict, dict, list[str]]:
+        """
+        Send [system, user] to the correction LLM for exactly ONE query and
+        return the corrected query — or the original, unchanged, if every
+        retry fails.
 
         On Pydantic/JSON parse failure: retry following the parent pattern
         (append [assistant, user(error_message)] to the message list).
-        If all retries fail: return ([], usage, errors) so the caller can
-        keep whatever approved queries it already holds.
-
-        Args:
-            source_queries: The original query dicts being corrected.
-                            Used as positional fallbacks and ID donors.
-            user_content:   The fully rendered user message for this cycle.
 
         Returns:
-            (corrected_queries, usage_dict, error_strings)
+            (corrected_query, usage_dict, error_strings)
         """
         system_content = "You are a helpful assistant."
 
-        # Stateless base — rebuilt fresh for every correction cycle
-        base_messages = [
+        # Stateless base — rebuilt fresh for every correction call.
+        messages = [
             {"role": "system", "content": system_content},
             {"role": "user", "content": user_content},
         ]
-        messages = list(base_messages)
 
         usage = _empty_usage()
-        # Local to this call — only holds Pydantic/parse retry errors.
-        # Appended to the caller's audit trail (all_errors) on return.
-        # Never carried between correction cycles.
         errors: list[str] = []
         last_content = ""
 
@@ -286,51 +377,60 @@ class LLMStatementValidator(LLMClientStructured):
             try:
                 response = self.router.completion(
                     model=self.config["model"],
-                    messages=messages,
+                    messages=sanitize_messages(messages),
                     temperature=self.temperature,
                 )
-                for message in messages:
-                    logger.debug("=" * 50)
-                    logger.debug("%s", message['role'])
-                    logger.debug("%s", message['content'])
-                logger.debug("=" * 50)
                 _accumulate_usage(usage, response["usage"])
 
                 content = response["choices"][0]["message"]["content"]
-                logger.debug("%s", response["choices"][0]["message"]["content"])
-                if content is None:
-                    raise ValueError("LLM returned None content during correction.")
+                if content is None or not str(content).strip():
+                    raise ValueError("LLM returned empty content during correction.")
                 last_content = content
 
                 cleaned   = self._clean_json_response(content)
                 json_data = self._repair_json(cleaned)
                 json_data = self._normalize_response(json_data)
+                # The merge below only consumes `code` and the question bundle;
+                # every other schema-required field (difficulty, tables, ...)
+                # is discarded in favour of the source query anyway. Backfill
+                # missing fields from the source BEFORE validation so a lean
+                # correction (just the fixed code) never fails the full
+                # QuerySet schema over a field nobody reads — demanding the
+                # model regenerate unchanged fields is pure retry overhead.
+                corrected_raw = (
+                    json_data.get("queries") if isinstance(json_data, dict) else None
+                )
+                if corrected_raw and isinstance(corrected_raw[0], dict):
+                    for field, value in source_query.items():
+                        if field not in ("id", "client_id"):
+                            corrected_raw[0].setdefault(field, value)
                 validated = self.response_model.model_validate(json_data)
-                corrected = validated.model_dump().get("queries", [])
+                corrected_list = validated.model_dump().get("queries", [])
+                corrected_item = corrected_list[0] if corrected_list else {}
 
-                # ----------------------------------------------------------
-                # Position-based merge: take LLM code by index, preserve all
-                # other fields (question, difficulty, id) from the source.
-                # If the LLM returns fewer items than sent, keep the source
-                # query unchanged for the missing slots.
-                # ----------------------------------------------------------
-                result: list[dict] = []
-                for i, original in enumerate(source_queries):
-                    if i < len(corrected):
-                        merged = dict(original)
-                        merged["code"] = corrected[i].get(
-                            "code", original.get("code", "")
-                        )
-                        result.append(merged)
-                    else:
-                        logger.warning(
-                            "[Validator] LLM returned only %d/%d queries; "
-                            "keeping original at position %d.",
-                            len(corrected), len(source_queries), i,
-                        )
-                        result.append(dict(original))
+                merged = dict(source_query)
+                merged["code"] = corrected_item.get("code", source_query.get("code", ""))
+                # `question`, `question_keywords`, `translated_question`,
+                # `translated_question_keywords`, `topic`, and `story` are one
+                # linked bundle produced together during planning (see
+                # prompting.models.SQLQueryPlan/PandasQueryPlan). The
+                # correction prompt instructs the LLM to regenerate all of
+                # them consistently whenever it rewrites `question`, or echo
+                # them unchanged otherwise — so trust whatever comes back,
+                # falling back to the original only when a field is
+                # omitted/empty (the LLM not bothering to echo it) rather
+                # than treating that as a deliberate clear.
+                for field, default in (
+                    ("question", ""),
+                    ("question_keywords", []),
+                    ("translated_question", ""),
+                    ("translated_question_keywords", []),
+                    ("topic", ""),
+                    ("story", ""),
+                ):
+                    merged[field] = corrected_item.get(field) or source_query.get(field, default)
 
-                return result, usage, errors
+                return merged, usage, errors
 
             except (json.JSONDecodeError, ValidationError) as e:
                 msg = f"Correction attempt {attempt + 1} parse/validation error: {e}"
@@ -357,68 +457,55 @@ class LLMStatementValidator(LLMClientStructured):
                     time.sleep(self.retry_delay)
 
         errors.append(
-            f"[Validator] All {self.max_retries} correction retries exhausted — "
-            "returning empty result; approved queries preserved."
+            f"[Validator] All {self.max_retries} correction retries exhausted for "
+            f"query #{source_query.get('id')}; keeping original code."
         )
         logger.error(
-            "[Validator] Correction retries exhausted. Last raw content:\n%.1000s",
-            last_content,
+            "[Validator] Correction retries exhausted for query #%s. "
+            "Last raw content:\n%.1000s",
+            source_query.get("id"), last_content,
         )
-        return [], usage, errors
+        return dict(source_query), usage, errors
 
     # ------------------------------------------------------------------
-    # Prompt builders
+    # Prompt builder — one query per prompt, shared by both correction paths
     # ------------------------------------------------------------------
 
-    def _build_static_correction_prompt(
+    def _build_one_correction_prompt(
         self,
-        failing: list[dict],
-        errors_by_id: dict[str, str],
+        query: dict,
+        error_text: str,
+        source_label: str,
         table_schemas: str,
+        skill_sections: list[str],
     ) -> str:
-        """Render the user message for a static-validation correction cycle."""
-        error_formatter = ErrorFormatter()
+        """Render the user message correcting exactly ONE query.
 
-        entries = [
-            {
-                "query_id": q.get("id"),
-                "question": q.get("question", ""),
-                "translated_question": q.get("translated_question", ""),
-                "detected_language": q.get("detected_language", ""),
-                "code": q.get("code", ""),
-                "tables": q.get("tables"),
-                "errors": [errors_by_id.get(str(q.get("id")), "(no error)")],
-                "source_labels": ["Static validation error"],
-            }
-            for q in failing
-        ]
-        queries_with_errors_text = error_formatter.build_correction_prompt(entries, [])
-
-        return self._correction_prompt.update(
-            table_schemas=table_schemas,
-            queries_with_errors=queries_with_errors_text,
-            pydantic_constraint=self.reform_prompt_constraint("").strip(),
-        )
-
-    def _build_judge_feedback_prompt(
-        self,
-        pending: list[dict],
-        judge_feedback: list[dict],
-        table_schemas: str,
-    ) -> str:
-        """Render the user message for a judge-feedback correction cycle.
-
-        Delegates fully to build_judge_feedback_block, which renders each
-        query through format_per_query — identical structure to the static
-        path so the LLM sees complete context (detected_language, question,
-        translated_question, tables, code) alongside the judge error and
-        suggestion.
+        Shared by the static-validation path (``source_label="Static
+        validation error"``) and the judge-feedback path
+        (``source_label="Judge Feedback"``) — the only difference between the
+        two is the error text and its label; the rendered structure (full
+        question/keyword/translation bundle + code + tables + skill context)
+        is identical either way, matching what ``format_per_query`` always
+        produced for a single entry.
         """
         error_formatter = ErrorFormatter()
-
-        queries_with_errors_text = error_formatter.build_judge_feedback_block(
-            pending, judge_feedback
-        )
+        entry = {
+            "query_id": query.get("id"),
+            "question": query.get("question", ""),
+            "translated_question": query.get("translated_question", ""),
+            "detected_language": query.get("detected_language", ""),
+            "question_keywords": query.get("question_keywords", []),
+            "translated_question_keywords": query.get("translated_question_keywords", []),
+            "topic": query.get("topic", ""),
+            "story": query.get("story", ""),
+            "code": query.get("code", ""),
+            "tables": query.get("tables"),
+            "errors": [error_text],
+            "source_labels": [source_label],
+            "skill_sections": skill_sections,
+        }
+        queries_with_errors_text = error_formatter.build_correction_prompt([entry])
 
         return self._correction_prompt.update(
             table_schemas=table_schemas,
@@ -595,6 +682,31 @@ def _positional_errors(
             result[qid] = static_errors[i] if i < len(static_errors) else static_errors[-1]
         else:
             result[qid] = "(no specific error — please review for correctness)"
+    return result
+
+
+def _skill_sections_by_id(
+    queries: list[dict], plan_by_client_id: dict | None
+) -> dict[str, list[str]]:
+    """Map each query's positional ``id`` to its originating plan's skill sections.
+
+    Resolved via ``client_id`` (an opaque token untouched by the positional-id
+    remapping ``validate_and_correct`` does at entry), then rendered through
+    the same ``build_skill_sections`` the generation prompt uses — a single
+    source of truth so a query's skill context is identical whether it's being
+    generated for the first time or corrected.
+    """
+    if not plan_by_client_id:
+        return {}
+    result: dict[str, list[str]] = {}
+    for q in queries:
+        client_id = q.get("client_id")
+        plan = plan_by_client_id.get(client_id) if client_id else None
+        if plan is None:
+            continue
+        sections = build_skill_sections(plan)
+        if sections:
+            result[str(q.get("id"))] = sections
     return result
 
 

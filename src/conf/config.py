@@ -68,7 +68,7 @@ class Crawling:
 @dataclass
 class Indexing:
     """
-    Configuration class for the Indexing stage
+    Configuration class for the Indexing stage (classical BLEND pipeline).
     """
 
     index_folder_path: Path
@@ -81,7 +81,7 @@ class Indexing:
 @dataclass
 class BLENDOpts:
     """
-    Configuration class for BLEND
+    Configuration class for BLEND (classical pipeline).
     """
 
     clean_args: dict
@@ -94,14 +94,15 @@ class CandidatesDiscovery:
     """
     Configuration class for the Candidates Discovery stage.
 
-    An agent evaluates a randomly sampled subset of all the available
-    datasets; for each of them, propose a list of tasks (join, union
-    or join-correlation discovery) based on available metadata and
-    a sample of the dataset's rows.
+    Two alternative pipelines share this config:
 
-    Each proposed task is then validated, to assure whether the
-    proposed columns to work on actually exists and that it returns
-    at least one result.
+    - classical (step ``candidates-discovery``): an agent proposes tasks per
+      dataset, the BLEND index searches candidates, SLOTH + Valentine verify
+      them after the fact.
+    - semantic (step ``candidates-discovery-semantic``): datasets are embedded
+      from their metadata; an HNSW index nominates neighbor pairs, Valentine
+      gates each pair before an agent selects the tasks, and join-correlation
+      tasks are verified with an actual join + correlation computation.
     """
 
     # We store also the seed datasets initially sampled
@@ -111,8 +112,7 @@ class CandidatesDiscovery:
     # possible executable tasks
     proposed_tasks_path: Path
 
-    # Where results computed with BLEND are stored
-    # as a CSV
+    # Where verified candidate tasks are stored (jsonlines)
     tasks_results_path: Path
 
     # The final candidates for the generation
@@ -134,13 +134,6 @@ class CandidatesDiscovery:
     # as snapshot of a dataset
     sample_size: int
 
-    # Candidates per task, i.e. how many results we'll fetch
-    # with the BLEND index
-    top_k_results_per_task: int
-
-    # Hash size for the QCR schema used by BLEND
-    qcr_hash_size: int
-
     # Where to store the matches graph generated from the executed tasks
     matches_graph_path: Path
 
@@ -150,11 +143,81 @@ class CandidatesDiscovery:
     # The maximum path length for each path
     max_path_length: int
 
-    overlap_ratio_threshold: float
-
+    # NOTE: pairs entering the graph already passed the schema gate with
+    # these same thresholds, so the random-walk predicates only bite when
+    # the yaml raises them above the gate values.
     sm_macro_avg_threshold: float
 
     sm_micro_avg_threshold: float
+
+    # Which discovery pipeline this workflow uses: "blend" (classical
+    # BLEND+SLOTH) or "semantic" (embeddings+HNSW+Valentine). Decides both
+    # which implementation the candidates-discovery step runs and which
+    # artifact lineage every step reads/writes (semantic artifacts carry a
+    # _semantic suffix so the two methods never share state).
+    method: Literal["blend", "semantic"] = "blend"
+
+    # ── Classical (BLEND) pipeline ─────────────────────────────────────
+    # Candidates per task, i.e. how many results we'll fetch with BLEND
+    top_k_results_per_task: int = 10
+
+    # Hash size for the QCR schema used by BLEND
+    qcr_hash_size: int = 128
+
+    # SLOTH overlap gate for the random walks (classical edges only; edges
+    # from the semantic pipeline carry no overlap_ratio and pass the clause)
+    overlap_ratio_threshold: float = 50.0
+
+    # ── Semantic (embeddings) pipeline ─────────────────────────────────
+    # Derived paths (set by load_config)
+    embeddings_cache_path: Optional[Path] = None
+
+    # Where the cluster assignments + 2D projection are persisted (see
+    # embedding_discovery.clustering.compute_cluster_projection) — the
+    # dataset-id -> cluster-id mapping and scatter-plot coordinates the
+    # query browser's Stats page reads to render the cluster map.
+    clusters_path: Optional[Path] = None
+
+    # Neighbor nomination: datasets are clustered by metadata embedding
+    # (cosine KMeans); a dataset's candidate pool is its cluster-mates.
+    # n_clusters is derived from target_cluster_size so it scales with the
+    # portal size instead of needing per-city tuning.
+    target_cluster_size: int = 40
+
+    # Soft overlap at cluster boundaries (cosine-similarity units): a point
+    # also joins any OTHER cluster whose centroid it's within this margin
+    # of, so cross-cluster joins/unions/correlations aren't cut off by a
+    # hard partition.
+    cluster_overlap_margin: float = 0.1
+
+    # Safety cap so no single (possibly overlap-inflated) cluster explodes
+    # the number of pairs a dataset must be checked against; oversized
+    # clusters are randomly subsampled (seeded) down to this size.
+    max_cluster_size: int = 60
+
+    # Per-dataset fan-out: at most this many cluster-mates (highest cosine
+    # similarity first, above the threshold) are tried per BFS visit.
+    top_k_neighbors: int = 10
+    cosine_similarity_threshold: float = 0.35
+
+    # Join-correlation verification
+    correlation_threshold: float = 0.5
+    correlation_method: str = "pearson"
+    min_joined_rows_for_correlation: int = 10
+
+    # Embedding computation
+    embedding_batch_size: int = 64
+    embedding_text_max_chars: int = 4000
+
+    # Valentine matcher used for the pair schema gate
+    sm_matcher: str = "coma"
+    sm_matcher_kwargs: dict = field(
+        default_factory=lambda: {"use_instances": False}
+    )
+
+    # Discovery budgets (formerly hardcoded in the pipeline)
+    tokens_budget: int = 1_000_000
+    max_datasets_to_process: int = 100
 
     verbose: bool = field(default=False)
 
@@ -173,8 +236,6 @@ class StatementGeneration:
 
     # The kind of statements to generate: "PANDAS" or "SQL"
     kind: str
-    # Maximum number of columns passed to the agent per dataset
-    max_cols: int
     # Path where the matches files reside
     query_candidates_path: Path
     # Path where the generated queries will reside
@@ -194,11 +255,14 @@ class StatementGeneration:
     # Number of queries to generate per single table (None = fall back to cross-table count)
     single_table_query_count: Optional[int] = None
 
-    # Deliberate opt-in gate for injecting the TabPFN skill during PANDAS
-    # generation. Defaults to disabled so base runs never attempt TabPFN.
-    allow_tabpfn: bool = False
-
-    
+    @property
+    def target_language(self) -> str:
+        """
+        The language of the open data portal (questions, keywords, metadata),
+        e.g. "Spanish" for valencia, "Italian" for bologna, "English" for
+        nyc/uk. First entry of tasks.query_generation.languages.
+        """
+        return (self.detected_languages or ["English"])[0]
 
     def __post_init__(self):
         # Validate enable_single_table is a bool, coerce common truthy/falsy values
@@ -233,16 +297,51 @@ class StatementGeneration:
 
 
 @dataclass
+class MCPSearch:
+    """
+    Configuration for the MCP dataset-search server.
+
+    The server exposes a keyword reverse index built from the normalized
+    metadata, so that an agent can find the CSVs needed to answer a
+    question. With the "elasticsearch" backend the reverse index lives in
+    an Elasticsearch index (created at server startup when missing); with
+    the "builtin" backend it is materialized under <data_path>/index/.
+    """
+
+    # Port used when the server runs in "port" mode (streamable HTTP).
+    port: int
+
+    # Interface to bind in "port" mode.
+    host: str
+
+    # Which reverse index implementation to use.
+    backend: Literal["elasticsearch", "builtin"]
+
+    # Elasticsearch endpoint (elasticsearch backend only). The
+    # ELASTICSEARCH_URL env variable, when set, takes precedence.
+    elasticsearch_url: str
+
+    # Name of the per-city Elasticsearch index, derived from the data path
+    es_index_name: str = field(init=False)
+
+    # Where the materialized index is stored (builtin backend only)
+    index_path: Path = field(init=False)
+    index_filepath: Path = field(init=False)
+
+
+@dataclass
 class OrQAConfig:
     source: Literal["ckan", "socrata", "ods"]
     seed: int
     crawling: Crawling
-    indexing: Indexing
     candidates_discovery: CandidatesDiscovery
     statement_generation: StatementGeneration
+    mcp_search: MCPSearch
 
-    # BLEND options for Indexing and Candidate Discovery
-    blend_opts: BLENDOpts
+    # Classical (BLEND) pipeline configuration; None when the workflow yaml
+    # omits the blend/indexing blocks (semantic-only setups).
+    indexing: Optional[Indexing]
+    blend_opts: Optional[BLENDOpts]
 
     # Dataframe tools configurations for read/write ops
     polars_opts: PolarsOpts = field(init=False)
@@ -270,6 +369,11 @@ class OrQAConfig:
     # in the repository
     prompts_path: Path = field(init=False)
 
+    # Where the per-task-type ML skill markdowns are stored
+    # (classification.md, regression.md, ...). Same as prompts_path:
+    # not under data_path, but in the repository's configuration directory.
+    skills_path: Path = field(init=False)
+
     # Where the LiteLLM and other LLM-related config things
     # are kept
     llm_config_path: Path = field(init=False)
@@ -285,6 +389,14 @@ class OrQAConfig:
 
     statistics_path: Path = field(init=False)
 
+    # Benchmark folder, adjacent to candidates_discovery/ and metadata/.
+    # Every artifact of a benchmark run (questions todo list, per-question
+    # results) lives in the subfolder named after the programming language
+    # kind selected in the workflow yaml (benchmark/pandas, benchmark/sql).
+    benchmark_path: Path = field(init=False)
+    benchmark_results_path: Path = field(init=False)
+    questions_todo_filepath: Path = field(init=False)
+
     def __post_init__(self):
         self.crawled_datasets_path = (
             self.data_path / "datasets" / "crawling" / self.crawling.download_format
@@ -295,11 +407,30 @@ class OrQAConfig:
         self.original_metadata_filepath = self.metadata_path / "metadata.json"
         self.normalized_metadata_filepath = self.metadata_path / "normalized_metadata.json"
 
+        self.mcp_search.index_path = self.data_path / "index"
+        self.mcp_search.index_filepath = (
+            self.mcp_search.index_path / "metadata_index.json"
+        )
+        # e.g. data/orqa/socrata/nyc -> "orqa-socrata-nyc"
+        self.mcp_search.es_index_name = "orqa-{}-{}".format(
+            self.data_path.parent.name, self.data_path.name
+        ).lower()
+
+        self.benchmark_path = self.data_path / "benchmark"
+        self.benchmark_results_path = (
+            self.benchmark_path / self.statement_generation.kind.lower()
+        )
+        self.questions_todo_filepath = (
+            self.benchmark_results_path / "questions_todo.json"
+        )
+
         self.logging_path = self.data_path / "log"
         self.prompts_path = Path(os.environ["ORQA_CONF"]) / "prompts"
+        self.skills_path = Path(os.environ["ORQA_CONF"]) / "skills"
         self.llm_config_path =  Path(os.environ["ORQA_CONF"]) / "llm"
         self.statistics_path = self.data_path / "statistics"
         assert self.prompts_path.exists()
+        assert self.skills_path.exists()
         self.pandas_opts = PandasOpts()
         self.polars_opts = PolarsOpts()
 
@@ -339,9 +470,6 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     # max number of natural language response tokens
     max_response_tokens = parsed["tasks"]["query_generation"]["max_response_tokens"]
 
-    # fetches the max columns to analyze during the statement generation
-    max_cols = parsed["tasks"]["query_generation"]["max_cols"]
-
     # setup the Crawling step
     crawling_task = parsed["tasks"]["crawling"]
 
@@ -368,35 +496,50 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
 
     crawling = Crawling(**crawling_task)
 
-    # setup the Indexing step
-    indexing_task = parsed["tasks"]["indexing"]
-    index_folder_path = data_path / "blend"
-    index_database_path = index_folder_path / "index.db"
-    indexing = Indexing(
-        **indexing_task,
-        index_folder_path=index_folder_path,
-        index_database_path=index_database_path,
-    )
+    # setup the classical (BLEND) pipeline pieces, when configured
+    indexing = None
+    if "indexing" in parsed["tasks"]:
+        index_folder_path = data_path / "blend"
+        indexing = Indexing(
+            **parsed["tasks"]["indexing"],
+            index_folder_path=index_folder_path,
+            index_database_path=index_folder_path / "index.db",
+        )
 
-    parsed["blend"]["clean_args"]["bad_tokens"] = tuple(
-        parsed["blend"]["clean_args"].get("bad_tokens", [])
-    )
-    blend_opts = BLENDOpts(**parsed["blend"])
+    blend_opts = None
+    if "blend" in parsed:
+        parsed["blend"]["clean_args"]["bad_tokens"] = tuple(
+            parsed["blend"]["clean_args"].get("bad_tokens", [])
+        )
+        blend_opts = BLENDOpts(**parsed["blend"])
 
     # setup the Candidates Discovery step
     candidates_discovery_task = parsed["tasks"]["candidates_discovery"]
     cand_disc_directory = data_path / "candidates_discovery"
     cand_disc_directory.mkdir(exist_ok=True)
-    seeds_datasets_path = cand_disc_directory / "seeds_datasets.json"
-    proposed_tasks_path = cand_disc_directory / "proposed_tasks.json"
-    tasks_results_path = cand_disc_directory / "tasks_results.json"
-    matches_graph_path = cand_disc_directory / "matches_graph.gml"
-    final_candidates_path = cand_disc_directory / "final_generation_candidates.json"
+
+    # The workflow yaml decides the discovery method; the semantic method
+    # keeps a fully separate artifact lineage (…_semantic files) so the two
+    # methods never resume from or overwrite each other's state.
+    discovery_method = candidates_discovery_task.get("method", "blend")
+    if discovery_method not in ("blend", "semantic"):
+        raise ValueError(
+            f"tasks.candidates_discovery.method must be 'blend' or "
+            f"'semantic', got {discovery_method!r}"
+        )
+    sfx = "_semantic" if discovery_method == "semantic" else ""
+    seeds_datasets_path = cand_disc_directory / f"seeds_datasets{sfx}.json"
+    proposed_tasks_path = cand_disc_directory / f"proposed_tasks{sfx}.json"
+    tasks_results_path = cand_disc_directory / f"tasks_results{sfx}.json"
+    matches_graph_path = cand_disc_directory / f"matches_graph{sfx}.gml"
+    final_candidates_path = (
+        cand_disc_directory / f"final_generation_candidates{sfx}.json"
+    )
 
     # queries candidates path
-    query_candidates_path = cand_disc_directory / "query_candidates.json"
+    query_candidates_path = cand_disc_directory / f"query_candidates{sfx}.json"
     # generated queries path
-    queries_path = cand_disc_directory / "generated_queries.json"
+    queries_path = cand_disc_directory / f"generated_queries{sfx}.json"
 
     candidates_discovery = CandidatesDiscovery(
         seeds_datasets_path,
@@ -404,6 +547,8 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         tasks_results_path,
         final_candidates_path,
         matches_graph_path=matches_graph_path,
+        embeddings_cache_path=cand_disc_directory / "embeddings.npz",
+        clusters_path=cand_disc_directory / "clusters.json",
         **candidates_discovery_task,
     )
 
@@ -417,10 +562,8 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     detected_languages  = parsed["tasks"]["query_generation"].get(
         "languages", ["English"]
     )
-    allow_tabpfn = parsed["tasks"]["query_generation"].get("allow_tabpfn", False)
     statement_generation = StatementGeneration(
         kind=kind,
-        max_cols=max_cols,
         query_candidates_path=query_candidates_path,
         queries_path=queries_path,
         bad_tokens=bad_tokens,
@@ -428,8 +571,24 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         detected_languages=detected_languages,
         enable_single_table=enable_single_table,
         single_table_query_count=single_table_query_count,
-        allow_tabpfn=allow_tabpfn,
+    )
 
+    # setup the MCP dataset-search server (port comes from the
+    # city's workflow yaml; defaults keep older yamls working)
+    mcp_search_task = parsed["tasks"].get("mcp_search") or {}
+    backend = mcp_search_task.get("backend", "elasticsearch")
+    if backend not in ("elasticsearch", "builtin"):
+        raise ValueError(
+            f"tasks.mcp_search.backend must be 'elasticsearch' or "
+            f"'builtin', got {backend!r}"
+        )
+    mcp_search = MCPSearch(
+        port=int(mcp_search_task.get("port", 8765)),
+        host=str(mcp_search_task.get("host", "127.0.0.1")),
+        backend=backend,
+        elasticsearch_url=str(
+            mcp_search_task.get("elasticsearch_url", "http://localhost:9200")
+        ),
     )
 
     cleaning_task = parsed["tasks"].get("cleaning", {})
@@ -460,11 +619,12 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     orqa_cfg = OrQAConfig(
         source=source,
         seed=seed,
-        blend_opts=blend_opts,
         crawling=crawling,
         indexing=indexing,
+        blend_opts=blend_opts,
         candidates_discovery=candidates_discovery,
         statement_generation=statement_generation,
+        mcp_search=mcp_search,
         filter_filenames_patterns=filter_filenames_patterns,
         filter_column_patterns=filter_column_patterns,
         try_separators=try_separators,
