@@ -1,3 +1,4 @@
+import inspect
 from typing import Any, Literal, Optional
 
 import pandas as pd
@@ -15,6 +16,15 @@ def instantiate_matcher(name: str, **kwargs) -> schema_matchers.BaseMatcher:
             return schema_matchers.JaccardDistanceMatcher(**kwargs)
         case "coma":
             params = {"use_instances": False, "java_xmx": "2048m"} | kwargs
+            # pyproject only pins valentine>=0.4.1 (no upper bound), and
+            # java_xmx was added to Coma.__init__ in a later release than
+            # that floor — an older installed valentine raises
+            # "unexpected keyword argument 'java_xmx'" on this hardcoded
+            # default. Only pass params the installed Coma actually accepts,
+            # so this stays compatible across valentine versions instead of
+            # assuming one exact signature.
+            accepted = set(inspect.signature(schema_matchers.Coma.__init__).parameters)
+            params = {k: v for k, v in params.items() if k in accepted}
             return schema_matchers.Coma(**params)
         case "cupid":
             return schema_matchers.Cupid(**kwargs)
