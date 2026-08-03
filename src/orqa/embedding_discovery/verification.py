@@ -18,6 +18,15 @@ from ..schema_matching.valentine_matcher import instantiate_matcher, schema_matc
 
 logger = logging.getLogger(__name__)
 
+# Cap on the JC verification join's exact (pre-computed) row count — a join
+# key producing more than this many rows is fanning out combinatorially
+# (low-cardinality key shared by many rows on both sides), which both risks
+# Polars' Rust join panicking past its 32-bit row-index limit and is not a
+# meaningful join-key candidate in the first place. Matches the row-count
+# safety cap already used elsewhere in this codebase (see
+# PandasValidator.MAX_RESULT_ROWS).
+MAX_JOIN_ROWS = 5_000_000
+
 
 def verify_pair_schema(
     Q: pd.DataFrame,
@@ -115,6 +124,29 @@ def check_join_correlation(
     # Distinct column names on the R side so self-pair joins can't collide.
     right = pl.DataFrame({"__r_key": R.get_column(r_key), "__r_target": r_targets})
 
+    # A low-cardinality key (few distinct values shared by many rows on both
+    # sides) makes the join below fan out combinatorially — cheap to compute
+    # exactly via a group-by-count on just the key columns, and much cheaper
+    # than attempting the real multi-column join first. Also the right call
+    # semantically: a key producing a massive many-to-many join isn't a
+    # meaningful join key candidate for THIS check anyway, so bailing out
+    # early is correct, not just defensive.
+    left_key = pl.col(q_key).cast(pl.String)
+    right_key = pl.col("__r_key").cast(pl.String)
+    left_counts = left.select(left_key.alias("__key")).group_by("__key").len(name="__n")
+    right_counts = right.select(right_key.alias("__key")).group_by("__key").len(name="__n_r")
+    estimated_rows = (
+        left_counts.join(right_counts, on="__key", how="inner")
+        .select((pl.col("__n") * pl.col("__n_r")).sum())
+        .item()
+    ) or 0
+    if estimated_rows > MAX_JOIN_ROWS:
+        logger.debug(
+            "JC join skipped on %s=%s: estimated %d rows exceeds the %d cap",
+            q_key, r_key, estimated_rows, MAX_JOIN_ROWS,
+        )
+        return None
+
     try:
         joined = left.join(
             right,
@@ -122,7 +154,14 @@ def check_join_correlation(
             right_on=pl.col("__r_key").cast(pl.String),
             how="inner",
         ).drop_nulls(["__q_target", "__r_target"])
-    except Exception as exc:
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:
+        # BaseException on purpose: Polars/Rust join panics (e.g. exceeding
+        # the 32-bit row-index limit on an unexpectedly large fan-out) raise
+        # pyo3_runtime.PanicException, which does NOT subclass Exception —
+        # `except Exception` here silently let that crash the whole
+        # candidates-discovery run instead of just skipping this one pair.
         logger.debug("JC join failed on %s=%s: %s", q_key, r_key, exc)
         return None
 
