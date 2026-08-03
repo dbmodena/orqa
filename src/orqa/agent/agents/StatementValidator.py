@@ -56,7 +56,6 @@ from pydantic import ValidationError
 
 from ..utility.alias_substitution import AliasSubstitution
 from ..utility.message_builder import sanitize_messages
-from ..prompting import build_skill_sections
 from ..utility.error_formatter import ErrorFormatter
 from .StatementClient import LLMClientStructured
 from ..prompting import PandasValidatorCorrectionPrompt, SQLValidatorCorrectionPrompt
@@ -95,20 +94,9 @@ class LLMStatementValidator(LLMClientStructured):
         aliases: dict,
         table_schemas: str,
         judge_feedback: list | None = None,
-        plan_by_client_id: dict | None = None,
     ) -> tuple[list, dict, list]:
         """
         Validate and correct *queries*, retrying up to MAX_VALIDATION_RETRIES times.
-
-        Args:
-            plan_by_client_id: Maps each query's opaque ``client_id`` (assigned
-                at generation, preserved unchanged through every copy this
-                method makes) to the plan it was generated from. Used to
-                re-inject that plan's skill markdown (see
-                ``build_skill_sections``) into every correction prompt —
-                static-validation or judge-feedback — so a correction cycle
-                never loses track of a skill the query is supposed to follow.
-                ``None``/omitted disables this (no skill re-injection).
 
         Returns:
             (approved_queries, token_usage, error_strings)
@@ -170,7 +158,6 @@ class LLMStatementValidator(LLMClientStructured):
                 feedback_by_id = {
                     str(fb.get("id")): fb for fb in remapped_feedback
                 }
-                skill_sections_by_id = _skill_sections_by_id(pending, plan_by_client_id)
                 prompts = []
                 for q in pending:
                     qid = str(q.get("id"))
@@ -182,7 +169,6 @@ class LLMStatementValidator(LLMClientStructured):
                     )
                     prompts.append(self._build_one_correction_prompt(
                         q, error_text, "Judge Feedback", table_schemas,
-                        skill_sections_by_id.get(qid, []),
                     ))
 
                 corrected, tokens, errors = self._correct_queries_concurrently(
@@ -242,7 +228,6 @@ class LLMStatementValidator(LLMClientStructured):
             # Built from the *current* failing queries — no association with
             # queries evicted in previous cycles.  Discarded after prompt build.
             errors_by_id = _positional_errors(failing, static_errors)
-            skill_sections_by_id = _skill_sections_by_id(failing, plan_by_client_id)
 
             prompts = [
                 self._build_one_correction_prompt(
@@ -250,7 +235,6 @@ class LLMStatementValidator(LLMClientStructured):
                     errors_by_id.get(str(q.get("id")), "(no error)"),
                     "Static validation error",
                     table_schemas,
-                    skill_sections_by_id.get(str(q.get("id")), []),
                 )
                 for q in failing
             ]
@@ -477,7 +461,6 @@ class LLMStatementValidator(LLMClientStructured):
         error_text: str,
         source_label: str,
         table_schemas: str,
-        skill_sections: list[str],
     ) -> str:
         """Render the user message correcting exactly ONE query.
 
@@ -485,9 +468,9 @@ class LLMStatementValidator(LLMClientStructured):
         validation error"``) and the judge-feedback path
         (``source_label="Judge Feedback"``) — the only difference between the
         two is the error text and its label; the rendered structure (full
-        question/keyword/translation bundle + code + tables + skill context)
-        is identical either way, matching what ``format_per_query`` always
-        produced for a single entry.
+        question/keyword/translation bundle + code + tables) is identical
+        either way, matching what ``format_per_query`` always produced for a
+        single entry.
         """
         error_formatter = ErrorFormatter()
         entry = {
@@ -503,7 +486,6 @@ class LLMStatementValidator(LLMClientStructured):
             "tables": query.get("tables"),
             "errors": [error_text],
             "source_labels": [source_label],
-            "skill_sections": skill_sections,
         }
         queries_with_errors_text = error_formatter.build_correction_prompt([entry])
 
@@ -682,31 +664,6 @@ def _positional_errors(
             result[qid] = static_errors[i] if i < len(static_errors) else static_errors[-1]
         else:
             result[qid] = "(no specific error — please review for correctness)"
-    return result
-
-
-def _skill_sections_by_id(
-    queries: list[dict], plan_by_client_id: dict | None
-) -> dict[str, list[str]]:
-    """Map each query's positional ``id`` to its originating plan's skill sections.
-
-    Resolved via ``client_id`` (an opaque token untouched by the positional-id
-    remapping ``validate_and_correct`` does at entry), then rendered through
-    the same ``build_skill_sections`` the generation prompt uses — a single
-    source of truth so a query's skill context is identical whether it's being
-    generated for the first time or corrected.
-    """
-    if not plan_by_client_id:
-        return {}
-    result: dict[str, list[str]] = {}
-    for q in queries:
-        client_id = q.get("client_id")
-        plan = plan_by_client_id.get(client_id) if client_id else None
-        if plan is None:
-            continue
-        sections = build_skill_sections(plan)
-        if sections:
-            result[str(q.get("id"))] = sections
     return result
 
 

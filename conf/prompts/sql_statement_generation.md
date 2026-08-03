@@ -1,7 +1,7 @@
 ## SQLGeneration
 Generate **exactly ONE** DuckDB SQL query that implements the single business question given to you below — not a new question you invent, and not a set of three. This call is one of several independent generation calls in the same run, each one bound to its own query plan; you are only ever answering the one plan attached to THIS call.
 
-Below this prompt you will see the **Inputs** (detected languages, aliases, table schemas, verified table relationships), the **Column Statistics** for these tables, and the **Structured Plan** — the ordered decomposition steps for THIS query, including its `question` (the business question you must answer — do not replace it with a different one) and `task_types`.
+Below this prompt you will see the **Inputs** (detected languages, aliases, table schemas, verified table relationships), the **Column Statistics** for these tables, and the **Structured Plan** — the ordered decomposition steps for THIS query, including its `question` (the business question you must answer — do not replace it with a different one).
 
 ### Question rule — use the plan's question, don't invent one
 - The `question` field of the Structured Plan below is the exact business question this query must answer. Copy its intent faithfully into your output's `question`; you may only lightly polish phrasing (grammar, fluency), never its topic, scope, or the metrics/filters it implies.
@@ -18,25 +18,27 @@ Below this prompt you will see the **Inputs** (detected languages, aliases, tabl
 - When joining on string keys, always apply `LOWER()` on both sides: `ON LOWER(t1.key) = LOWER(t2.key)`.
 - Follow the Structured Plan's steps, in order — they are the validated decomposition of this exact question.
 
+### Data quality — tables are RAW
+Tables are loaded exactly as stored: no bad-token→NULL conversion, no numeric coercion, no null-row dropping has been applied upstream. If the Structured Plan includes a `clean` step, implement its `params.actions` literally in SQL using the EXACT literal tokens shown in Column Statistics' `bad_token_counts` (never invented ones): `CASE WHEN col IN ('n/a', 'not available') THEN NULL ELSE col END` to blank a sentinel, `TRY_CAST(col AS DOUBLE)` — never a raw `CAST`, which errors on any stray token — to cast, `WHERE col IS NOT NULL` to drop rows, `COALESCE(col, <value>)` to impute a constant. If a column your query touches shows a non-trivial `bad_token_counts` or a `numeric_parseable_ratio` near 1.0 but no `clean` step covers it, still handle it defensively (`TRY_CAST` instead of `CAST`) rather than letting a stray token crash the query. If an action carries `"treat_as_missing"`, fold those exact values into the same `CASE`/`IN (...)` blanking before whatever the action does next — they're planner-discovered sentinels not already in `bad_token_counts`.
+
+If the Structured Plan includes a `derive` step whose `params.actions` use `"technique": "flag"` or `"bucket"` (preserving an outlier/censoring pattern as its own feature instead of discarding it): implement `flag` as `CASE WHEN col ~ '<pattern>' OR col IN (...) THEN TRUE ELSE FALSE END AS output_column`, and `bucket` as a `CASE WHEN ... THEN 'label' WHEN ... THEN 'label' ELSE ... END AS output_column` mapping the ranges/patterns named in the action's `rule` to their labels — using the exact values/patterns from `numeric_outliers`/`minority_value_groups`, never invented ones.
+
+### Correlate / limit / rank steps
+If the Structured Plan includes a `correlate` step: use DuckDB's `corr(col_a, col_b)` aggregate — Pearson only, so `params.method` will always be `"pearson"` for a SQL plan (never generate Spearman/Kendall SQL). Add `GROUP BY <params.group_by columns>` when `params.group_by` is set, for one coefficient per group instead of one over the whole table; alias the result `AS <params.output_column>` when that key is present.
+
+If the Structured Plan includes a `limit` step: `params.how` (default `"head"`) selects the idiom — `"head"` -> a bare `LIMIT params.n` applied on top of the query's existing row order (typically right after an `ORDER BY` implementing the plan's `sort` step); `"largest"`/`"smallest"` -> `ORDER BY <params.by columns> DESC`/`ASC LIMIT params.n` directly, for a self-contained top/bottom-N with no separate `sort` step. Note: the validator's test-execution path strips and overrides any trailing `LIMIT` with its own `LIMIT 100` safety cap during validation only — this does not change what you should generate; still emit the plan's real `LIMIT params.n`.
+
+If the Structured Plan includes a `rank` step: use the window function matching `params.method` — `"min"` -> `RANK()`, `"dense"` -> `DENSE_RANK()`, `"first"` -> `ROW_NUMBER()` (SQL plans are restricted to these three; never generate `"average"`/`"max"` tie-handling in SQL) — `OVER ([PARTITION BY <params.group_by columns>] ORDER BY <params.by columns> [DESC])`, aliased `AS <params.output_column>`. Omit `PARTITION BY` when `params.group_by` is absent; add `DESC` to `ORDER BY` when `params.ascending` is `false`.
+
 ### Table usage
 A table is justified only if its columns appear in SELECT, WHERE, GROUP BY, or aggregations — not merely in a JOIN key. Using a table solely to restrict rows via a join is **not** justified unless the question explicitly requires cross-table validation (e.g. "find records appearing in both sources"). Touch only the minimal columns actually needed — this was already decided (and judged) during planning, so don't reach for columns beyond what the plan's steps call for.
 
-### Difficulty
-Assign whichever of `easy` / `medium` / `hard` genuinely reflects the complexity of THIS plan's steps — don't force it up or down to hit a particular tier:
-
-| Level | Typically reflects |
-|---|---|
-| Easy | Single-table SELECT, basic WHERE, optional ORDER BY/LIMIT, ≤1 aggregate, no subqueries |
-| Medium | Multi-table JOIN, GROUP BY + HAVING, multiple aggregates, nested filters, or one non-correlated subquery / UNION / INTERSECT / EXCEPT |
-| Hard | Correlated or multi-level subqueries, window functions, complex set ops, CASE, CTEs (incl. recursive), or combinations of several advanced features |
-
 ### Output (conform to the Pydantic schema — `queries` must contain exactly ONE item)
-- `difficulty`: easy / medium / hard
 - `question`: the plan's business question (faithfully preserved, see above)
 - `query`: DuckDB SQL
 - `motivation`: 2–3 sentences in business language explaining (1) the analytical value, (2) what specific columns each table uniquely contributes, (3) why this join/union strategy is correct.
 
-Note: `topic`, `story`, `translated_question`, `detected_language`,
+Note: `difficulty`, `topic`, `story`, `translated_question`, `detected_language`,
 `question_keywords`, `translated_question_keywords`, and `tables` are NOT
 part of this output — the query plan already decided them (table usage,
 justification, and columns were already fixed and judged during planning)

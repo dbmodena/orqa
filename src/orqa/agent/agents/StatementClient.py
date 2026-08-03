@@ -293,8 +293,8 @@ class LLMClientStatementGenerator(LLMClientStructured):
         Every call to :meth:`complete` is scoped to exactly one query plan
         (``precomputed_plan`` — see ``QueryPlanner.plan_batch``) and the prompt
         asks for exactly one query in return. If the model nonetheless returns
-        more than one, keep only the first — the plan/skill this call was
-        given only applies to one query, so any extras aren't traceable to a
+        more than one, keep only the first — the plan this call was given
+        only applies to one query, so any extras aren't traceable to a
         plan of their own and would silently break the one-plan-to-one-query
         contract downstream.
         """
@@ -473,6 +473,10 @@ class LLMClientStatementGenerator(LLMClientStructured):
                     "topic": plan.get("topic", ""),
                     "story": plan.get("story", ""),
                     "tables": plan.get("tables", []),
+                    # Structural-complexity tier, decided at planning time and
+                    # judged by the plan panel (PlanJudgment.difficulty_check)
+                    # — no longer part of the generation LLM's own output.
+                    "difficulty": plan.get("difficulty", ""),
                     # Plan-declared result contract, judged by the plan panel
                     # (PlanJudgment.expected_result_check) and mechanically
                     # enforced against the executed result by the validators

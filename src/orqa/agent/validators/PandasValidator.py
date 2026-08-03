@@ -11,12 +11,6 @@ from typing import Any
 from .QueryValidator import QueryValidator
 import re
 
-# Pre-injected into the sandbox namespace (see _exec) alongside pd/pl so
-# TabPFN-skill code runs even on a cycle where its own
-# `from tabpfn_client import ...` line got dropped (e.g. sharing a physical
-# line with a disallowed import that _clean_pandas stripped).
-from tabpfn_client import TabPFNClassifier, TabPFNRegressor
-
 UNAUTHORIZED_COMMANDS = [
     'read_csv', 'read_excel', 'read_json', 'read_parquet', 'print',
     'read_sql', 'read_table', 'read_html', 'read_pickle',
@@ -26,12 +20,11 @@ UNAUTHORIZED_COMMANDS = [
 
 # Modules generated code is allowed to `import` directly inside the sandbox
 # (see _check_imports / _exec). Mirrors the data-analysis stack the
-# sandbox already pre-injects (pd/pl) plus the safe stdlib modules and
-# tabpfn_client for skill code. Anything outside this set (os, sys,
-# subprocess, socket, shutil, ...) raises ImportError instead of silently
-# being stripped.
+# sandbox already pre-injects (pd/pl) plus the safe stdlib modules.
+# Anything outside this set (os, sys, subprocess, socket, shutil, ...)
+# raises ImportError instead of silently being stripped.
 ALLOWED_IMPORT_MODULES = {
-    "pandas", "polars", "numpy", "tabpfn_client",
+    "pandas", "polars", "numpy",
     "math", "statistics", "decimal", "fractions", "random",
     "datetime", "collections", "itertools", "functools", "operator",
     "re", "json", "string", "warnings", "typing",
@@ -64,176 +57,6 @@ def _check_imports(tree: ast.AST) -> None:
                     f"Import of {name!r} is not allowed in generated code. "
                     f"Allowed modules: {', '.join(sorted(ALLOWED_IMPORT_MODULES))}"
                 )
-
-# Matches the variable-naming convention every skill markdown's Generation
-# section teaches for a hypothetical-scenario input row (`scenario = ...`,
-# `hypothetical = ...`) — see _check_scenario_categorical_values. Deliberately
-# narrow: a bare `pd.DataFrame({...})` used to build the final labeled
-# `result` (e.g. a "Total" summary row) must never trip this, only the
-# purpose-built prediction input.
-_SCENARIO_VAR_RE = re.compile(r"scenario|hypothetical", re.IGNORECASE)
-
-# A column with more distinct values than this looks like free text or a
-# near-unique identifier, not a closed categorical vocabulary — skip it
-# rather than risk a false positive on a legitimately open-ended field.
-_SCENARIO_CHECK_MAX_CARDINALITY = 500
-
-
-def _check_scenario_categorical_values(
-    tree: ast.AST, dataframes: list, table_names: list
-) -> None:
-    """Reject a hypothetical scenario whose categorical value doesn't match
-    the real data's actual spelling/encoding (e.g. ``'Queens'`` when the
-    table encodes boroughs as ``'QN'``).
-
-    Scoped tightly to ``scenario``/``hypothetical`` = ``pd.DataFrame(...)``
-    assignments — the exact "construct a scenario row" pattern every skill
-    markdown's Generation section teaches — never to filter/comparison
-    expressions elsewhere in the code (which correctly reuse the real
-    encoding constantly, e.g. ``df[df['borough'] == 'QN']``) or to the final
-    ``result`` construction (a labeled summary row like
-    ``pd.DataFrame({'borough': ['Total'], ...})`` must never trip this).
-
-    A mismatch here doesn't raise inside pandas: ``pd.get_dummies`` on an
-    unseen category produces a dummy column the training-time
-    ``feature_cols`` never had, and a later
-    ``reindex(columns=feature_cols, fill_value=0)`` silently drops it and
-    zero-fills every real dummy for that field — the code executes fine and
-    returns a plausible-looking answer that never actually used the value
-    the question named.
-    """
-    observed: dict = {}
-    for df in dataframes:
-        for col in df.columns:
-            if col in observed or df[col].dtype != object:
-                continue
-            try:
-                uniques = df[col].dropna().unique()
-            except Exception:
-                continue
-            if 0 < len(uniques) <= _SCENARIO_CHECK_MAX_CARDINALITY:
-                observed[col] = {str(v).strip().lower() for v in uniques}
-
-    if not observed:
-        return
-
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        target_names = [t.id for t in node.targets if isinstance(t, ast.Name)]
-        if not any(_SCENARIO_VAR_RE.search(name) for name in target_names):
-            continue
-        call = node.value
-        if not (
-            isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Attribute)
-            and call.func.attr == "DataFrame"
-            and call.args
-        ):
-            continue
-
-        arg = call.args[0]
-        dict_literals = (
-            [arg] if isinstance(arg, ast.Dict)
-            else [e for e in arg.elts if isinstance(e, ast.Dict)] if isinstance(arg, ast.List)
-            else []
-        )
-        for d in dict_literals:
-            for key_node, value_node in zip(d.keys, d.values):
-                if not (isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)):
-                    continue
-                col = key_node.value
-                if col not in observed:
-                    continue
-                # Accept a bare string literal or a single-element list/tuple
-                # of one (`{'borough': ['Queens']}`).
-                v = value_node
-                if isinstance(v, (ast.List, ast.Tuple)) and len(v.elts) == 1:
-                    v = v.elts[0]
-                if not (isinstance(v, ast.Constant) and isinstance(v.value, str)):
-                    continue
-                literal = v.value
-                if literal.strip().lower() not in observed[col]:
-                    raise ValueError(
-                        f"Scenario sets {col!r} to {literal!r}, but that exact "
-                        f"value never appears in the real {col!r} column — the "
-                        "actual observed values use a different spelling/case "
-                        "or encoding (e.g. an abbreviation). A hypothetical "
-                        "scenario's categorical values must be copied verbatim "
-                        "from the table's real data (see the table sample/"
-                        "column statistics) — otherwise pd.get_dummies + "
-                        "reindex(fill_value=0) silently drops this value and "
-                        "zero-fills every real category for it, so the "
-                        "prediction never actually used what the question "
-                        "asked for."
-                    )
-
-
-# R² at/above this threshold means the "prediction" is really arithmetic
-# (e.g. total_enrollment = grade_k + grade_1 + ... + grade_8) — a plain OLS
-# fit already reconstructs the target almost exactly, so no genuinely
-# uncertain relationship is being modeled at all. See
-# _RegressionTargetDeterminismGuard.
-_LINEAR_DETERMINISM_R2_THRESHOLD = 0.999
-
-
-def _check_regression_target_not_deterministic(X, y) -> None:
-    """Raise if ``y`` is (near-)exactly a linear function of ``X``'s columns.
-
-    Catches a `regression`/`causal` step whose target is really an algebraic
-    composite of its own features (a total that's literally the sum of the
-    other columns, a rate that's literally a ratio of two others) —
-    genuinely no model is needed there, TabPFN would just be re-deriving
-    arithmetic with sampling noise on top. Checked via a cheap OLS fit
-    BEFORE the real (network) TabPFN call, so a deterministic target never
-    even reaches the API.
-
-    Fails open (returns without raising) on anything that doesn't look like
-    a plain numeric fit — this check exists to catch one specific pattern,
-    not to second-guess every possible input shape.
-    """
-    try:
-        X_arr = np.asarray(X, dtype=float)
-        y_arr = np.asarray(y, dtype=float).reshape(-1)
-    except (TypeError, ValueError):
-        return
-    if X_arr.ndim != 2 or X_arr.shape[0] <= X_arr.shape[1] or X_arr.shape[0] < 3:
-        return  # not enough rows to meaningfully test for determinism
-
-    X_aug = np.column_stack([X_arr, np.ones(X_arr.shape[0])])
-    try:
-        coef, *_ = np.linalg.lstsq(X_aug, y_arr, rcond=None)
-    except np.linalg.LinAlgError:
-        return
-    y_pred = X_aug @ coef
-    ss_tot = float(np.sum((y_arr - y_arr.mean()) ** 2))
-    if ss_tot <= 0:
-        return  # constant target — a different problem, not this check's concern
-    r2 = 1.0 - float(np.sum((y_arr - y_pred) ** 2)) / ss_tot
-    if r2 >= _LINEAR_DETERMINISM_R2_THRESHOLD:
-        raise ValueError(
-            f"The regression target is a near-exact linear function of its "
-            f"own features (R²={r2:.4f} from a plain least-squares fit) — "
-            "e.g. a total that is literally the sum of the other columns, or "
-            "a rate that is literally a ratio of two others. That's "
-            "arithmetic, not a prediction: no genuinely uncertain "
-            "relationship is being modeled. Replace the ML step with a "
-            "plain `derive` (e.g. df[feature_cols].sum(axis=1)) that "
-            "computes the target directly, or choose a target that isn't "
-            "already a formula over its own features."
-        )
-
-
-class _DeterminismGuardedTabPFNRegressor(TabPFNRegressor):
-    """Drop-in ``TabPFNRegressor`` that checks target determinism before
-    every real ``fit`` — see ``_check_regression_target_not_deterministic``.
-    Injected into the sandbox namespace in place of the raw class (see
-    ``_exec``) so this applies regardless of which skill (`regression` or
-    `causal`'s S-/T-learner) constructs the estimator."""
-
-    def fit(self, X, y, *args, **kwargs):
-        _check_regression_target_not_deterministic(X, y)
-        return super().fit(X, y, *args, **kwargs)
 
 
 PANDAS_CARTESIAN_PATTERNS = [
@@ -396,8 +219,6 @@ class PandasValidator(QueryValidator):
         }
         local_ns = {
             'pd': pd, 'pl': pl, '__builtins__': safe_builtins,
-            'TabPFNClassifier': TabPFNClassifier,
-            'TabPFNRegressor': _DeterminismGuardedTabPFNRegressor,
         }
         for df, name in zip(dataframes, table_names):
             local_ns[name] = df
@@ -420,7 +241,6 @@ class PandasValidator(QueryValidator):
             if not tree.body:
                 return None
             _check_imports(tree)
-            _check_scenario_categorical_values(tree, dataframes, table_names)
 
             last = tree.body[-1]
             if isinstance(last, ast.Expr):
@@ -701,8 +521,8 @@ class PandasValidator(QueryValidator):
         # Imports are kept (not stripped): the static AST check
         # (see _check_imports / _exec) enforces ALLOWED_IMPORT_MODULES
         # before execution instead, so generated code can
-        # `import numpy as np` or `from tabpfn_client import ...`
-        # directly rather than relying solely on pre-injected names.
+        # `import numpy as np` and similar directly rather than relying
+        # solely on pre-injected names.
         cleaned_lines = [
             l for l in lines
             if not any(cmd in l for cmd in UNAUTHORIZED_COMMANDS)
@@ -812,6 +632,15 @@ class PandasValidator(QueryValidator):
                 attr_name = attr.group(1) if attr else "unknown"
                 return AttributeError(
                     f"{raw}\nSeries has no attribute '{attr_name}' — preceding op may have collapsed DataFrame to Series."
+                )
+            if "dataframe" in msg and "has no attribute" in msg:
+                attr = re.search(r"has no attribute '([^']+)'", str(e))
+                attr_name = attr.group(1) if attr else "unknown"
+                return AttributeError(
+                    f"{raw}\nDataFrame has no attribute '{attr_name}' — preceding op likely already returned a DataFrame, not a Series.\n"
+                    "Common cause: .agg(name=(col, func), ...) called without .groupby() first — named aggregation\n"
+                    "only collapses to a single row via groupby; on a plain DataFrame it does not produce a Series,\n"
+                    "so a trailing .to_frame() (or other Series-only method) fails."
                 )
             return AttributeError(f"{raw}\nBad attribute — check method name and object type at this step.")
 

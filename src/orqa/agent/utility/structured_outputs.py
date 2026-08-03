@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import List, Literal, Union
+from typing import Dict, List, Literal, Union
 from enum import Enum
 
 class DatasetAnalysisResult(BaseModel):
@@ -62,7 +62,7 @@ class TableAnalyses(BaseModel):
 
 
 class QueryLink(BaseModel):
-    type: Literal["join", "union", "correlation", "other"] = Field(
+    type: Literal["join", "union", "join-correlation", "other"] = Field(
         ...,
         description="The relationship type between tables for the query plan."
     )
@@ -74,9 +74,28 @@ class QueryLink(BaseModel):
         ...,
         description="A short description of how these tables are related and why the relationship is needed."
     )
-    columns: List[str] = Field(
+    key_columns: List[Dict[str, str]] = Field(
         default_factory=list,
-        description="Columns that participate in the join or union relationship."
+        description=(
+            "The columns that MECHANICALLY establish this link — the join key "
+            "(type=='join' or 'join-correlation') or the aligned columns "
+            "(type=='union') — one entry per column correspondence: "
+            "{table_alias: column_name, table_alias: column_name}. A composite "
+            "key has one entry per column pair. Column NAMES may differ across "
+            "the two tables (e.g. {'Table_1': 'dbn', 'Table_0': 'school_id'}) — "
+            "never assume they share a name just because both tables are "
+            "listed in `tables`. For type=='join-correlation' this is ONLY the "
+            "join key used to combine the rows — see `correlated_columns` for "
+            "the columns actually being correlated afterward."
+        )
+    )
+    correlated_columns: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description=(
+            "Only set when type == 'join-correlation': the numeric columns "
+            "being correlated AFTER the join in `key_columns` — as "
+            "{table_alias: column_name} pairs, distinct from the join key."
+        )
     )
 
 
@@ -458,13 +477,12 @@ class Query(BaseModel):
             "NOT the operations or technical implementation details."
         )
     )
-    difficulty: str = Field(
-        ...,
-        description=(
-            "The difficulty level of the query: easy, medium, or hard. "
-            "Reflects the complexity of the analytical operations and structure."
-        )
-    )
+    # NOTE: no `difficulty` field here either, for the same reason as
+    # `tables` above. Difficulty is decided exactly once, during PLANNING
+    # (see prompting.models.SQLQueryPlan/PandasQueryPlan.difficulty) and
+    # judged there by PlanJudgment.difficulty_check. StatementClient.complete
+    # stamps the plan's own `difficulty` onto every query generated from it,
+    # the same way it already does for `query_plan`/`question_keywords`/etc.
     code: str = Field(
         ...,
         description=(
@@ -562,16 +580,7 @@ class ViolatedCriterion(str, Enum):
     over_engineering              = "over_engineering"
     silent_filter_bias            = "silent_filter_bias"
     disjointed_query              = "disjointed_query"
-    meaningless_prediction_target = "meaningless_prediction_target"
     trivial                       = "trivial"
-    # The code's implementation of the plan's APPROVED skill technique is
-    # itself wrong/incomplete (e.g. an unencoded categorical feature passed to
-    # TabPFN, lag features built on unsorted data, a causal estimate missing
-    # one of the two counterfactual predictions) — distinct from
-    # `meaningless_prediction_target` (a bad TARGET choice) and from
-    # `partial_implementation` (a QUESTION requirement, not a skill-technique
-    # one). See the injected per-skill "Skill Check" section in judge.md.
-    skill_misuse                  = "skill_misuse"
 
 
 class Judgment(BaseModel):
@@ -584,13 +593,29 @@ class Judgment(BaseModel):
     # Scope: the QUESTION was already reviewed by the plan judge panel — this
     # judgment covers the CODE and the executed RESULT in relation to what the
     # question asks.
+    #
+    # Voting is LAYERED across TWO independent layers, mirroring PlanJudgment
+    # — ``plan_compliance_approval`` (does the code faithfully implement the
+    # plan/question: requirements coverage, no unjustified operations, sound
+    # skill-technique use) and ``present_result_approval`` (is the executed
+    # result actually there and meaningful: non-empty, non-degenerate,
+    # non-trivial). They are voted and aggregated independently (see
+    # JudgePanel._aggregate with vote_fields) precisely so a query whose code
+    # genuinely complies with the plan but whose result is empty is
+    # distinguishable from a query whose CODE is wrong — the former is a
+    # plan-level symptom (escalated to a one-shot plan revision by the
+    # orchestrator, see agent.py's _retry_empty_results), the latter goes
+    # through the normal code-correction loop. ``approved`` is derived, never
+    # voted directly.
     result_check: str = Field(
         ...,
         description=(
             "One or two sentences: does the executed result actually answer "
             "the question — right shape (single figure / ranked list / "
             "per-group table) and non-degenerate values? Quote representative "
-            "value(s) from the result."
+            "value(s) from the result. This is the PRESENT-RESULT layer's "
+            "check text — empty, degenerate, or trivial results belong here, "
+            "never under requirements_check."
         ),
     )
     requirements_check: str = Field(
@@ -601,14 +626,50 @@ class Judgment(BaseModel):
             "JUSTIFIED or UNJUSTIFIED by the question, naming the specific "
             "phrase or implied need that grounds each JUSTIFIED verdict — a "
             "bare label with no grounding is not acceptable. Flag only "
-            "material gaps — omit minor stylistic observations."
+            "material gaps — omit minor stylistic observations. This is the "
+            "PLAN-COMPLIANCE layer's check text — whether the code correctly "
+            "implements what was asked, never whether the result it produced "
+            "is any good."
         ),
     )
     violated_criteria: List[ViolatedCriterion] = Field(
         default_factory=list,
         description=(
             "All triggered criteria. Empty if approved. Reject only when a flaw "
-            "is unambiguous and material."
+            "is unambiguous and material. `unclear_result`/`trivial` belong to "
+            "the PRESENT-RESULT layer; every other criterion "
+            "(`partial_implementation`/`over_engineering`/`silent_filter_bias`/"
+            "`disjointed_query`) belongs to the PLAN-COMPLIANCE layer."
+        ),
+    )
+    plan_compliance_approval: bool = Field(
+        ...,
+        description=(
+            "Vote on the PLAN-COMPLIANCE layer: true when the code correctly "
+            "and completely implements what the question asks — no missing "
+            "core requirement, no unjustified operation, no "
+            "disjointed/unconnected query structure. False when any of "
+            "`partial_implementation`/`over_engineering`/`silent_filter_bias`/"
+            "`disjointed_query` is triggered. Independent of "
+            "present_result_approval: code can "
+            "be a fully correct implementation of the plan and still produce "
+            "an empty or degenerate result (that's a present_result failure, "
+            "not a compliance one)."
+        ),
+    )
+    present_result_approval: bool = Field(
+        ...,
+        description=(
+            "Vote on the PRESENT-RESULT layer: true when the executed result "
+            "actually answers the question — right shape, non-empty, "
+            "not all-null/NaN, not a meaningless constant, no obviously "
+            "corrupt values, and not something any business user could state "
+            "without querying. False when `unclear_result` or `trivial` is "
+            "triggered. Independent of plan_compliance_approval: a compliant, "
+            "correct implementation of the plan can still legitimately "
+            "produce nothing (an over-restrictive filter combination, a "
+            "mismatched join) — that's a present_result failure, not a "
+            "coding mistake, and is handled differently downstream."
         ),
     )
     feedback: str = Field(
@@ -621,8 +682,12 @@ class Judgment(BaseModel):
         ),
     )
     approved: bool = Field(
-        ...,
-        description="True only if all checks pass and violated_criteria is empty.",
+        default=False,
+        description=(
+            "Overall verdict; always plan_compliance_approval AND "
+            "present_result_approval (recomputed server-side, so just set it "
+            "consistently)."
+        ),
     )
     response: str = Field(
         ...,
@@ -646,6 +711,13 @@ class Judgment(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _force_consistent_verdict(self) -> "Judgment":
+        """``approved`` is the AND of the two layer votes, never free —
+        mirrors PlanJudgment._force_consistent_verdicts."""
+        self.approved = self.plan_compliance_approval and self.present_result_approval
+        return self
+
 
 class Judgments(BaseModel):
     queries: List[Judgment] = Field(
@@ -657,25 +729,39 @@ class Judgments(BaseModel):
 class PlanJudgment(BaseModel):
     """Verdict of one panel judge on a single structured query plan.
 
-    The plan judge owns QUESTION quality, TABLE justification, and SKILL
-    justification (the code judge no longer re-judges any of them): is the
-    question concise, pinned to a specific topic, written like an average
-    user seeking insights — do the plan's steps reflect it — does the
-    question genuinely need every provided table — and does the plan's use
-    of an ML skill, or its deliberate absence, match what the question asks
-    for?
+    The plan judge owns QUESTION quality, TABLE justification, the
+    EXPECTED-RESULT declaration, and DIFFICULTY correspondence (the code
+    judge no longer re-judges any of them): is the question concise, pinned
+    to a specific topic, written like an average user seeking insights — do
+    the plan's steps reflect it — does the question genuinely need every
+    provided table — and does the plan's declared `difficulty` genuinely
+    match what its steps structurally do?
     Deliberately small (a few flat fields) because plan panels run on small
     models: the check fields come FIRST so the model reasons before it commits
     to the votes.
 
-    Voting is LAYERED: ``question_approval`` (realistic, average-user,
-    keyword-retrievable question), ``plan_approval`` (steps produce exactly
-    what the question asks), ``table_usage_approval`` (every table justified
-    by the question), and ``skill_approval`` (the plan's skill usage, or lack
-    thereof, is justified by the question) are voted independently, and the
-    panel majority-aggregates each layer on its own — the plan passes only
-    when ALL layer majorities approve (see ``JudgePanel._aggregate`` with
-    ``vote_fields``). ``approved`` is derived, never voted directly.
+    Voting is LAYERED across EIGHT independent layers — ``question_approval``
+    (realistic, average-user, keyword-retrievable question), ``plan_approval``
+    (steps produce exactly what the question asks), ``table_usage_approval``
+    (every table justified by the question), ``expected_result_approval``,
+    ``difficulty_approval`` (the declared `difficulty` matches the steps'
+    structural complexity), ``convergence_approval`` (the steps converge
+    into ONE final result rather than leaving independent branches
+    uncombined), ``metric_combination_approval`` (any figure blended
+    from 2+ tables into one output value is dimensionally sound, never a
+    silent sum across incommensurate units or undifferentiated time
+    periods), and ``topic_linkage_approval`` (the question names the
+    table's specific real-world program/initiative when its identity
+    hinges on one, rather than a generic activity that could just as
+    plausibly belong to some other, unrelated program — AND, when the
+    table is one of several time-vintages of the same subject that
+    open-data portals routinely republish, names the specific period
+    that pins down THIS vintage rather than a vague/absent one that
+    could equally describe a different year's edition) — voted
+    independently, and the panel majority-aggregates each
+    layer on its own — the plan passes only when ALL layer majorities approve
+    (see ``JudgePanel._aggregate`` with ``vote_fields``). ``approved`` is
+    derived, never voted directly.
     """
 
     question_check: str = Field(
@@ -684,7 +770,25 @@ class PlanJudgment(BaseModel):
             "One or two sentences: does the question pinpoint ONE specific "
             "topic in these tables, concisely, phrased like an average "
             "non-technical user seeking an insight? Quote the anchoring "
-            "term(s), or what makes it vague/verbose/technical."
+            "term(s), or what makes it vague/verbose/technical. Also check "
+            "PINPOINTING: does the question's vocabulary narrow to this "
+            "table's specific topic (a domain/category qualifier, a "
+            "program/agency name, a place, a period), or stay generic "
+            "enough to describe many unrelated tables just as well? Judge "
+            "this on the question's own specificity, not just whether "
+            "question_keywords happens to retrieve the table — a generic "
+            "term can retrieve it by luck of that table's own index entry "
+            "while still failing to tell a reader which real-world topic "
+            "it's about. Also check "
+            "TEMPORAL SCOPE: if the table is "
+            "tied to a fixed period (a year, a date range, a snapshot date) "
+            "rather than an ongoing feed, the question must state that "
+            "period, not read as if the data were current. Also check that "
+            "it never narrates a `clean` step's own technical criteria "
+            "(non-numeric/null exclusions, outlier filtering, bad-token "
+            "literals) — that precision belongs in "
+            "expected_result_description, not in what a curious "
+            "non-technical user would ask."
         ),
     )
     alignment_check: str = Field(
@@ -692,7 +796,13 @@ class PlanJudgment(BaseModel):
         description=(
             "One or two sentences: do the plan's steps, in order, produce "
             "exactly what the question asks — nothing core missing, nothing "
-            "unjustified added? Name any missing or unjustified step."
+            "unjustified added? Name any missing or unjustified step. A "
+            "`clean` step's basis must be a genuine data-quality defect "
+            "(missing/corrupted/sentinel), never mere statistical rarity — "
+            "dropping a `numeric_outliers`-flagged value that's otherwise a "
+            "plausible, well-formed number is an unjustified filter, not "
+            "hygiene, especially when it feeds a later `sum`/'total' step "
+            "(it silently understates the true total)."
         ),
     )
     table_check: str = Field(
@@ -722,39 +832,6 @@ class PlanJudgment(BaseModel):
             "dropped."
         ),
     )
-    skill_check: str = Field(
-        ...,
-        description=(
-            "One or two sentences: does the plan's use of an ML/predictive "
-            "skill (task_types: classification, regression, timeseries, "
-            "causal) — or its deliberate absence — match what the question "
-            "asks for? Name the specific mismatch: a skill bolted on where "
-            "the question is a plain aggregation/filter/lookup, a skill "
-            "missing where the question explicitly asks for a prediction, "
-            "forecast, or an intervention's causal effect, or a skill of "
-            "the wrong type for what's asked (e.g. regression where the "
-            "question wants a category). If the system prompt included one "
-            "or more 'Skill Check' sections for this plan's proposed "
-            "skill(s), apply those checks too — they cover failure modes "
-            "specific to that skill that this general description can't."
-        ),
-    )
-    predictor_check: str = Field(
-        ...,
-        description=(
-            "One or two sentences, for a plan with a classification/"
-            "regression/causal step only (always passes for plain plans and "
-            "for timeseries, which predicts from the target's OWN history, "
-            "not other columns): does each named feature/predictor/covariate "
-            "have a plausible, explainable real-world link to the target — "
-            "one a lay person would nod along to — or does the combination "
-            "read as arbitrary numeric/categorical columns bolted together "
-            "because they happened to be in the same table? Name the "
-            "specific implausible pairing if any (e.g. predicting a system-"
-            "wide total from two unrelated single-entity metrics, or one "
-            "age-group's outcome from an unrelated age-group's share)."
-        ),
-    )
     expected_result_check: str = Field(
         ...,
         description=(
@@ -765,6 +842,98 @@ class PlanJudgment(BaseModel):
             "if any: a \"how many...\" question promising a table, a "
             "per-group breakdown promising a single number, or a "
             "description that contradicts the steps' final output."
+        ),
+    )
+    difficulty_check: str = Field(
+        ...,
+        description=(
+            "One or two sentences: the payload's `computed_difficulty` "
+            "block gives `structural_tier`/`data_engineering_tier` already "
+            "computed by CODE from this plan's `steps` (step counts, "
+            "chaining, branching, group/aggregation cardinality) — take "
+            "`structural_tier` as given, never re-derive it. Your only job "
+            "is the two things code cannot decide, both on the "
+            "DATA-ENGINEERING axis: (1) PATTERN DISTINCTNESS — when that "
+            "axis is `medium` from 2+ technique 'flag'/'bucket' derive "
+            "steps, do they actually preserve genuinely DIFFERENT "
+            "messy-data patterns, or double-mark the same signal? (2) "
+            "BUCKET-LOGIC REALISM — when "
+            "`dq_hard_pending_your_confirmation` is true (a bucket step "
+            "already structurally feeds a group/aggregate), does its "
+            "branching (3+ categories) reflect real domain judgment, or an "
+            "arbitrary split? Downgrade the data-engineering tier one "
+            "level for either failure, then compare `max(structural_tier, "
+            "data_engineering_tier)` to the declared `difficulty`. Name the "
+            "concrete mismatch using `computed_difficulty.breakdown`. The "
+            "fix is always in the STEPS, never in relabeling — do not write "
+            "'adjust/change the difficulty to X' anywhere in this check or "
+            "in `suggestions`, even as one of two options alongside a real "
+            "steps-based fix."
+        ),
+    )
+    convergence_check: str = Field(
+        ...,
+        description=(
+            "One or two sentences: do the plan's steps converge into ONE "
+            "final result, or do two or more independently-produced "
+            "branches (each from its own table(s), sharing no combining "
+            "step) get left standing side by side under one question? "
+            "Name the missing combining step if any (a join/union on a "
+            "shared key, a correlation/comparison, or a final synthesis "
+            "step) — always passes (say so briefly) for a single-table or "
+            "single-chain plan."
+        ),
+    )
+    metric_combination_check: str = Field(
+        ...,
+        description=(
+            "One or two sentences, only when a derive/aggregate step blends "
+            "figures from 2+ tables into ONE output value (a 'combined "
+            "total', a blended score): is the combination dimensionally "
+            "sound, or does it silently sum raw values on incommensurate "
+            "units/scales (e.g. a COUNT + a geometric-area SUM + a dollar "
+            "SUM), fold different time periods' figures into one "
+            "undifferentiated total that erases which period contributed "
+            "what, OR sum same-unit figures (e.g. two plain counts) from "
+            "conceptually unrelated categories/processes with no natural "
+            "shared identity — ask whether a domain expert would recognize "
+            "the SUM ITSELF as one coherent, nameable quantity, and treat a "
+            "generic thematic label ('combined civic activity') as NOT "
+            "sufficient evidence it is one (apply the same swap test as "
+            "Check 3: would this exact justification sound equally "
+            "plausible pasted over a different arbitrary trio of columns?). "
+            "Comparing/contrasting/ratio-ing figures ACROSS different time "
+            "periods is NOT a flaw when that comparison is the question's "
+            "own insight and each period's figure stays distinct in the "
+            "output — only an opaque additive sum across periods is. Name "
+            "the specific unsound combination if any — always passes (say "
+            "so briefly) for a plan with no cross-table blended metric."
+        ),
+    )
+    topic_linkage_check: str = Field(
+        ...,
+        description=(
+            "One or two sentences: does the table's own description/"
+            "keywords show its identity hinges on ONE specific NAMED "
+            "program/initiative/agency, narrower than the generic activity "
+            "it falls under? If so, does the question actually name that "
+            "specific program, or does it only describe the generic "
+            "activity in a way that could just as plausibly belong to a "
+            "different, unrelated program? SEPARATELY: is this table one "
+            "of several time-vintages of the same subject that open-data "
+            "portals routinely republish (an annual snapshot, a periodic "
+            "refresh)? If so, does the question state the SPECIFIC period "
+            "that pins this table's vintage down, or only a vague/generic "
+            "time reference ('in recent years', 'historically') or none at "
+            "all, that could equally describe a different year's edition? "
+            "Judge both independently of Check 1 — a question can be "
+            "concise, concrete, and even keyword-retrievable while still "
+            "leaving a reader unable to tell WHICH specific real-world "
+            "program or WHICH time-vintage it's about. Always passes (say "
+            "so briefly) when the table has no single named program "
+            "distinguishing it from its generic category and is not one of "
+            "several time-vintages of the same subject, or when the "
+            "question already names the specific program and period."
         ),
     )
     question_approval: bool = Field(
@@ -792,33 +961,10 @@ class PlanJudgment(BaseModel):
             "false whenever unjustified_tables is non-empty."
         ),
     )
-    skill_approval: bool = Field(
-        ...,
-        description=(
-            "Vote on the SKILL layer (Check 4): true when the plan's use of "
-            "an ML skill, or its deliberate absence, is justified by the "
-            "question — a skill present only where genuinely asked for, and "
-            "absent only where none is needed."
-        ),
-    )
-    predictor_approval: bool = Field(
-        default=True,
-        description=(
-            "Vote on the PREDICTOR layer (Check 5): true when every named "
-            "feature/predictor/covariate has a plausible link to the "
-            "target, OR the plan is plain/timeseries (this layer always "
-            "passes for those). False when classification/regression/"
-            "causal predictors read as arbitrary column-grabbing with no "
-            "stated or obvious real-world mechanism connecting them to the "
-            "target. Independent of Check 4: a plan can genuinely need a "
-            "prediction (skill_approval true) yet use implausible inputs "
-            "for it (predictor_approval false)."
-        ),
-    )
     expected_result_approval: bool = Field(
         default=True,
         description=(
-            "Vote on the EXPECTED-RESULT layer (Check 6): true when the "
+            "Vote on the EXPECTED-RESULT layer (Check 4): true when the "
             "plan's expected_result_type and expected_result_description "
             "match both the question's ask and the steps' final output. "
             "False when the promised shape contradicts either (e.g. a "
@@ -829,13 +975,95 @@ class PlanJudgment(BaseModel):
             "generation attempt."
         ),
     )
+    difficulty_approval: bool = Field(
+        default=True,
+        description=(
+            "Vote on the DIFFICULTY layer (Check 5): true when the declared "
+            "`difficulty` equals `max(computed_difficulty.structural_tier, "
+            "data_engineering_tier)` — the structural half is a given, "
+            "code-computed fact; the data-engineering half may be one tier "
+            "lower than `computed_difficulty` claims if pattern-distinctness "
+            "or bucket-logic-realism (see `difficulty_check`) doesn't hold. "
+            "False on any resulting mismatch. This layer NEVER approves "
+            "changing the difficulty label itself — a mismatch is always "
+            "fixed by adjusting the STEPS to match the label, since in a "
+            "batch the label is a fixed per-slot assignment (one easy, one "
+            "medium, one hard)."
+        ),
+    )
+    convergence_approval: bool = Field(
+        default=True,
+        description=(
+            "Vote on the CONVERGENCE layer (Check 6): true when the plan's "
+            "steps converge into ONE final result — via a join/union on a "
+            "shared key, a correlation or comparison, or a final "
+            "synthesizing step — OR the plan is single-table/single-chain "
+            "(this layer always passes then). False when the plan computes "
+            "two or more genuinely independent results from separate "
+            "branches and never combines them, leaving them reported side "
+            "by side under one question. Independent of Check 3: every "
+            "table can be individually well-justified (table_usage_approval "
+            "true) while nothing ever ties their outputs together "
+            "(convergence_approval false)."
+        ),
+    )
+    metric_combination_approval: bool = Field(
+        default=True,
+        description=(
+            "Vote on the METRIC-COMBINATION layer (Check 7): true when "
+            "either no step blends figures from 2+ tables into one output "
+            "value, OR it does and the combination is dimensionally AND "
+            "conceptually sound. False when a step sums/averages raw "
+            "values on incommensurate units/scales (a count + an area + a "
+            "dollar sum), sums figures from genuinely different time "
+            "periods into one undifferentiated total, OR sums same-unit "
+            "figures (e.g. two plain counts) from unrelated categories/"
+            "processes with no natural shared identity — a generic "
+            "thematic label alone does not establish one. NOT false merely "
+            "because the plan spans multiple time periods or tables — only "
+            "when their figures are summed away into one opaque number "
+            "rather than kept distinct or combined via a dimensionally-"
+            "valid ratio/rate. Independent of Check 6: branches can "
+            "converge via a sound join (convergence_approval true) through "
+            "an unsound additive step (metric_combination_approval false)."
+        ),
+    )
+    topic_linkage_approval: bool = Field(
+        default=True,
+        description=(
+            "Vote on the TOPIC-LINKAGE layer (Check 8): true when the "
+            "table has no single named program/initiative distinguishing "
+            "it from its generic category (or the question names that "
+            "specific program), AND either the table is not one of several "
+            "time-vintages of the same subject or the question states the "
+            "specific period that pins this table's vintage down. False "
+            "when the table's identity hinges on a specific named program/"
+            "initiative/agency but the question only ever describes the "
+            "generic activity it falls under, OR when this table is one of "
+            "several period-vintages of the same subject (an annual "
+            "snapshot, a periodic refresh — per its own description) but "
+            "the question states no period, or only a vague one ('in "
+            "recent years', 'historically') that wouldn't distinguish this "
+            "vintage from a different year's edition — even if that "
+            "phrasing is concrete and retrievable. Independent of Check 1: "
+            "a question can pass question_approval (concise, retrievable, "
+            "no jargon, and even mentioning *some* period so it doesn't "
+            "read as live data) while still failing here, because "
+            "retrievability and live/current phrasing are about whether a "
+            "search index finds the table and whether the tense is right — "
+            "not whether a reader of the question alone would know which "
+            "real-world program or which specific year's edition it's "
+            "about."
+        ),
+    )
     approved: bool = Field(
         default=False,
         description=(
             "Overall verdict; always question_approval AND plan_approval "
-            "AND table_usage_approval AND skill_approval AND "
-            "predictor_approval AND expected_result_approval (recomputed "
-            "server-side, so just set it consistently)."
+            "AND table_usage_approval AND expected_result_approval AND "
+            "difficulty_approval AND convergence_approval AND "
+            "metric_combination_approval AND topic_linkage_approval "
+            "(recomputed server-side, so just set it consistently)."
         ),
     )
 
@@ -843,10 +1071,9 @@ class PlanJudgment(BaseModel):
         ...,
         description=(
             "What is missing or should improve. Approved: one sentence on why "
-            "the question, plan, table usage, skill usage, and predictor "
-            "choice are sound. Rejected: the specific flaw per failed layer, "
-            "quoting the offending question part, step, table justification, "
-            "skill mismatch, or implausible predictor pairing."
+            "the question, plan, and table usage are sound. Rejected: the "
+            "specific flaw per failed layer, quoting the offending question "
+            "part, step, or table justification."
         ),
     )
     suggestions: str = Field(
@@ -856,27 +1083,46 @@ class PlanJudgment(BaseModel):
             "per failed layer — a rewrite of the question and/or the concrete "
             "step fix. For an unjustified table, ALWAYS suggest reframing the "
             "question so the table becomes necessary; NEVER suggest dropping "
-            "the table (the code is required to use every table). For an "
-            "unjustified skill layer, either add/retype the specific "
-            "task_type or reframe the question, whichever actually matches "
-            "the plan's real intent — but for a BOLTED-ON skill, name BOTH "
-            "the removal (drop the task_type/step) AND its concrete plain-"
-            "operation replacement (which group/aggregate/derive step now "
-            "produces the answer over the same rows); dropping the skill "
-            "with no replacement named is not an actionable suggestion. For "
-            "an implausible predictor layer, name which specific feature(s) "
-            "to drop or replace with a column that has a real, stated "
-            "connection to the target — keep the skill, fix the inputs. For "
+            "the table (the code is required to use every table). For "
             "a wrong expected-result layer, state the correct "
             "expected_result_type and/or the corrected description — "
-            "whichever of the declaration or the steps is actually wrong."
+            "whichever of the declaration or the steps is actually wrong. "
+            "For a difficulty mismatch, name the concrete step(s)/table(s) "
+            "to add, remove, or simplify so the plan's actual "
+            "complexity genuinely matches its assigned tier (e.g. 'cut this "
+            "down to a single filter and one aggregate to match `easy`', or "
+            "'add a second grouped aggregation to match `medium`') — NEVER "
+            "suggest changing the `difficulty` value itself; it is a fixed "
+            "per-slot batch assignment, not yours (or the planner's) to "
+            "reassign here. Relabeling is always wrong, even when the steps "
+            "genuinely read as a different tier — the fix is still to "
+            "simplify/compound the STEPS back down to the declared tier, "
+            "never to relabel, and this holds even if you also name a "
+            "legitimate steps-based fix in the SAME sentence — state ONLY "
+            "the steps-based fix, with no relabeling option alongside it. "
+            "For a convergence failure, name "
+            "the specific combining step the plan is missing (a join/union "
+            "on a shared key, a correlation/comparison, or a final "
+            "synthesis step) — never suggest dropping either branch, and "
+            "never suggest changing the question instead of adding the "
+            "missing step. For a metric-combination failure, name the "
+            "specific dimensionally-invalid combination and the fix — "
+            "report the components as separate columns instead of summing "
+            "them, or replace the additive sum with a dimensionally-sound "
+            "rate/ratio/normalized index; never suggest dropping a table "
+            "(that is Check 3's territory, not this one's). For a "
+            "topic-linkage failure, name the table's specific program/"
+            "initiative/agency (from its description or keywords) and say "
+            "the question's own prose must weave it in — not just "
+            "question_keywords — while still reading like an average "
+            "user's question."
         ),
     )
 
     @model_validator(mode="after")
     def _force_consistent_verdicts(self) -> "PlanJudgment":
         """The overall verdict and the table layer are derived, never free:
-        ``approved`` is the AND of the six layer votes, and flagged
+        ``approved`` is the AND of the eight layer votes, and flagged
         unjustified tables force the table layer down — so a judge can't
         e.g. list an unjustified table while voting the layer up."""
         if self.unjustified_tables:
@@ -885,8 +1131,10 @@ class PlanJudgment(BaseModel):
             self.question_approval
             and self.plan_approval
             and self.table_usage_approval
-            and self.skill_approval
-            and self.predictor_approval
             and self.expected_result_approval
+            and self.difficulty_approval
+            and self.convergence_approval
+            and self.metric_combination_approval
+            and self.topic_linkage_approval
         )
         return self

@@ -34,11 +34,29 @@ class QueryExecutor:
     expose to the executor.  Pre-filtering to only those columns would break any
     query that selects additional columns, and was the root cause of
     non-deterministic results across repeated executions.
+
+    ``load_tables`` mirrors ``utils.prepare_dataset``'s column-level cleaning
+    (``utils.clean_columns`` — dropping illegally-named columns only) exactly,
+    via the SAME shared function: the generated code was written against a
+    table analysis/plan built from ``prepare_dataset``'s view, so execution
+    must see the same columns, or code that ran cleanly during
+    generation/judging can fail or silently diverge at execution. Neither
+    view does any bad-token conversion, numeric coercion, or null-row
+    dropping anymore — those are judgment calls the query planner now makes
+    explicitly via a ``clean`` plan step, which the generated code itself
+    must implement (see ``conf/prompts/*_statement_generation.md``). It
+    deliberately does NOT mirror ``prepare_dataset``'s row/column-COUNT
+    limiting (that's a prompt-size concern for the LLM's view) and — unlike
+    an earlier version of this method — does NOT run a blanket
+    ``df.dropna()``: dropping every row with a null in ANY of a wide table's
+    columns emptied tables outright (a null in a column the query never
+    touches killed rows the query needed), which is exactly the
+    "non-deterministic/wrong results" failure mode ``prepare_dataset``'s own
+    docstring already documents avoiding.
     """
 
-    def __init__(self, datasets_path: Path, bad_tokens: list = []):
+    def __init__(self, datasets_path: Path):
         self.datasets_path = Path(datasets_path)
-        self.bad_tokens = bad_tokens
 
     def execute(self, entry: dict, query: dict, query_kind: str) -> pd.DataFrame | None:
         """
@@ -92,11 +110,11 @@ class QueryExecutor:
             df = utils.pd_read_dataset(
                 csv_path,
                 opts={
-                    "csv":     {"na_values": self.bad_tokens, "low_memory": False},
-                    "parquet": {"na_values": self.bad_tokens, "low_memory": False},
+                    "csv":     {"low_memory": False},
+                    "parquet": {"low_memory": False},
                 },
             )
-            df = df.dropna()
+            df = utils.clean_columns(df)
             dataframes[alias] = df
             logger.debug("%s: %s", alias, df.columns)
         return dataframes

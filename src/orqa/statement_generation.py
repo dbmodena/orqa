@@ -4,16 +4,17 @@ import math
 import random
 import sys
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, Optional
 
 import pandas as pd
 
 from .agent.agent import TableAnalysisAgent
 from .agent.agents.StatementAgent import StatementAgent
 from .agent.agents.SingleStatementAgent import SingleStatementAgent
+from .benchmark.index import load_index
 from .benchmark.questions import get_entry, store_entry
 from .utils import load_datasets_metadata,load_normalized_datasets_metadata, load_dataset_info, save_json, load_json, prepare_dataframe
-from conf import OrQAConfig
+from conf import OrQAConfig, JUDGE_MODE_COUNTS
 from dataclasses import dataclass, field
 
 _TIMEOUT_SECONDS_PER_5K_TOKENS: int = 15
@@ -225,6 +226,87 @@ def _format_matches_pandas(
     return "\n\n".join(sections)
 
 
+_LINK_TYPE_MAP = {"merge": "join", "merge_correlation": "join-correlation", "union": "union"}
+
+
+def _relationship_to_link(spec: dict) -> dict:
+    """
+    Convert one query_candidates.json relationship spec into a QueryLink-shaped
+    dict (``type``/``tables``/``key_columns``/``correlated_columns``/
+    ``description`` — see ``structured_outputs.QueryLink``).
+
+    Keeps each pairwise join/union/join-correlation as its OWN link, so
+    ``QueryPlanner._build_constraint_links`` preserves them as separate
+    building blocks instead of synthesising one description that reads like a
+    prescribed chain (Table_1 joined to Table_0, then to Table_2 reads as a
+    linear pipeline even though the two relationships are independent).
+
+    For ``join``/``join-correlation`` links, ``key_columns`` is a list of
+    ``{table_alias: column_name}`` PAIRS rather than a flat deduplicated list
+    — BLEND matches join keys by VALUE overlap, not by name, so the two sides
+    of a key are frequently named differently (e.g. ``Table_1.dbn`` <->
+    ``Table_0.school_id``), and ``left_on``/``right_on`` are reliably
+    same-length, position-aligned lists (verified single/multi-column key
+    search). Flattening them into one list loses which column belongs to
+    which table, and which two columns are actually the same key.
+
+    For ``union`` links, ``left_cols``/``right_cols`` are the LLM-proposed
+    query-side columns vs. whatever the schema matcher found ANYTHING for on
+    the candidate side (see ``query_candidates._make_union_match``) — they're
+    only a real correspondence when ``column_scores`` is populated (schema
+    match cleared the confidence threshold), in which case they're already
+    filtered, ranked, and positionally aligned by that function and are
+    zipped into pairs here, WITH the confidence score attached (union
+    evidence is a schema/name-similarity signal, not a value-overlap
+    guarantee like a join key, so the score matters). When ``column_scores``
+    is empty, no pair was confident enough — each column is listed
+    separately, still tagged with its own table, without claiming a
+    cross-table correspondence that isn't actually known.
+    """
+    left, right = spec.get("left", ""), spec.get("right", "")
+    mtype = spec.get("type", "")
+    correlated_columns: list[dict] = []
+    if mtype == "union":
+        left_cols, right_cols = spec.get("left_cols", []), spec.get("right_cols", [])
+        scores = spec.get("column_scores") or []
+        if scores and len(scores) == len(left_cols) == len(right_cols):
+            columns = [
+                {left: lc, right: rc, "score": f"{s:.2f}"}
+                for lc, rc, s in zip(left_cols, right_cols, scores)
+            ]
+        else:
+            columns = [{left: c} for c in left_cols] + [{right: c} for c in right_cols]
+    else:
+        left_on, right_on = spec.get("left_on", []), spec.get("right_on", [])
+        columns = [{left: lk, right: rk} for lk, rk in zip(left_on, right_on)]
+        if mtype == "merge_correlation":
+            corr = spec.get("correlation_cols") or {}
+            if corr:
+                entry = dict(corr)
+                # Only populated by the semantic pipeline, which actually
+                # computes this at discovery time (query_candidates.py's
+                # _make_join_correlation_match) — omitted (not fabricated)
+                # for classical/BLEND JC tasks, which never measure it.
+                corr_value = spec.get("correlation_value")
+                if corr_value is not None:
+                    entry["correlation"] = f"{corr_value:.2f}"
+                    method = spec.get("correlation_method")
+                    if method:
+                        entry["correlation_method"] = method
+                correlated_columns = [entry]
+    return {
+        "type": _LINK_TYPE_MAP.get(mtype, "other"),
+        "tables": [t for t in (left, right) if t],
+        "key_columns": columns,
+        "correlated_columns": correlated_columns,
+        "description": spec.get("description") or f"{mtype}: {left} - {right}",
+    }
+
+
+def _relationships_to_links(specs: list[dict]) -> list[dict]:
+    return [_relationship_to_link(spec) for spec in specs]
+
+
 def format_matches_for_prompt(
     match_specs: list[dict],
     kind: str = "PANDAS",
@@ -313,6 +395,20 @@ def _sample_single_table_datasets(
     return random.Random(seed).sample(all_files, min(count, len(all_files)))
 
 
+def _cap_matches(all_matches: list, count: Optional[int], seed: int = 0) -> list:
+    """Cap cross-table candidate matches to ``count``, seeded like
+    ``_sample_single_table_datasets`` so runs (and sibling workflows sharing
+    the yaml seed) pick the same subset. ``None`` (or a count at/above the
+    current total, so there is nothing to actually cap) returns
+    ``all_matches`` unchanged and in its original order — sampling would
+    otherwise reshuffle it via ``random.sample``, needlessly scrambling the
+    index-based resume/dedup keys the caller relies on.
+    """
+    if count is None or count >= len(all_matches):
+        return all_matches
+    return random.Random(seed).sample(all_matches, count)
+
+
 def _get_formatted_match(
     match: dict,
     kind: str,
@@ -331,6 +427,24 @@ def _get_formatted_match(
             specs, kind=kind, dfs=dfs, involved_cols=involved_cols
         )
     return "\n".join(match.get(f"{kind}_matches", []))
+
+
+def _get_match_for_planner(match: dict) -> Any:
+    """
+    Return what's passed as the ``match`` constraint into ``generate_statements``
+    (and from there into ``QueryPlanner._build_constraint_links``).
+
+    Prefers the structured per-relationship link list — one ``QueryLink`` per
+    verified join/union/join-correlation — over the flattened prose block
+    ``_get_formatted_match`` builds for legacy string-only match formats:
+    ``_build_constraint_links`` collapses anything that isn't already a
+    list/tuple into a single synthesized link, which reads as one prescribed
+    chain even when the underlying relationships are independent pairs.
+    """
+    specs = match.get("relationships") or match.get("match_specs")
+    if specs:
+        return _relationships_to_links(specs)
+    return None
 
 
 def _already_succeeded(results: dict, kind: str, idx: str) -> bool:
@@ -376,6 +490,14 @@ def _store_generation(
     if content.get("query_plan"):
         meta["query_plan"] = content["query_plan"]
     extra = {k: v for k, v in result.items() if k not in ("queries", "status")}
+    # "traceable" (the phase-grouped TraceableQuerySet dump, carrying every
+    # approved query's execution.reliability) is a SIBLING of "result" on
+    # `content` (see JudgementResponseAgent._assemble_result's return shape),
+    # not nested inside it — so it never appears in `result.items()` above.
+    # Merge it in explicitly, same as proposed_columns/query_plan above,
+    # or it silently never reaches the saved JSON.
+    if content.get("traceable") is not None:
+        extra["traceable"] = content["traceable"]
     if extra:
         meta["result_extra"] = extra
     store_entry(results, kind, entry_id, queries, meta)
@@ -394,6 +516,13 @@ def create_statements(
     single_table_query_count: int = 0,
     languages: list= ["English"],
     seed: int = 0,
+    search_index=None,
+    keyword_search_top_k_coefficient: float = 5.0,
+    multi_table_query_count: Optional[int] = None,
+    gate_unretrievable_groups: bool = False,
+    retrieval_gate_enabled: bool = True,
+    plan_judge_count: Optional[int] = None,
+    code_judge_count: Optional[int] = None,
 ) -> list[dict]:
     bad_tokens = bad_tokens or []
 
@@ -401,6 +530,7 @@ def create_statements(
         datasets_metadata = {}
 
     all_matches: list = load_json(candidates_file)
+    all_matches = _cap_matches(all_matches, multi_table_query_count, seed=seed)
     results = load_json(output_file) if output_file.exists() else {}
 
     # Table analyses (description + keywords) are cached per table id and
@@ -436,6 +566,12 @@ def create_statements(
     cross_agent = StatementAgent(
         config_path, kind, bad_tokens, languages=languages, seed=seed,
         analysis_cache_path=analysis_cache_path,
+        search_index=search_index,
+        keyword_search_top_k_coefficient=keyword_search_top_k_coefficient,
+        gate_unretrievable_groups=gate_unretrievable_groups,
+        retrieval_gate_enabled=retrieval_gate_enabled,
+        plan_judge_count=plan_judge_count,
+        code_judge_count=code_judge_count,
     )
 
 
@@ -446,6 +582,12 @@ def create_statements(
         single_agent = SingleStatementAgent(
             config_path, kind, bad_tokens, languages=languages, seed=seed,
             analysis_cache_path=analysis_cache_path,
+            search_index=search_index,
+            keyword_search_top_k_coefficient=keyword_search_top_k_coefficient,
+            gate_unretrievable_groups=gate_unretrievable_groups,
+            retrieval_gate_enabled=retrieval_gate_enabled,
+            plan_judge_count=plan_judge_count,
+            code_judge_count=code_judge_count,
         )
 
         for st_idx, csv_path in enumerate(sampled):
@@ -467,14 +609,14 @@ def create_statements(
 
             generation_time = __import__("time").perf_counter() - start
 
+            _store_generation(results, kind, str_idx, content, aliases, generation_time)
+            save_json(results, output_file)
+            sys.stdout.flush()
+
             actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
             cooldown = _compute_timeout(actual_tokens)
             print(f"[st_{st_idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
             __import__("time").sleep(cooldown)
-
-            _store_generation(results, kind, str_idx, content, aliases, generation_time)
-            save_json(results, output_file)
-            sys.stdout.flush()
             
     # ── Cross-table generation ────────────────────────────────────────────────
     for idx, match in enumerate(all_matches):
@@ -490,27 +632,29 @@ def create_statements(
             match, csv_folder, datasets_metadata, "csv"
         )
 
-        formatted_match = _get_formatted_match(match, kind, dfs=dfs, involved_cols=involved_cols)
+        match_for_planner = _get_match_for_planner(match)
+        if match_for_planner is None:
+            match_for_planner = _get_formatted_match(match, kind, dfs=dfs, involved_cols=involved_cols)
 
         start = __import__("time").perf_counter()
 
         content = cross_agent.generate_statements(
             dataset_paths, aliases, kind,
-            formatted_match,
+            match_for_planner,
             involved_cols, metadatas,
             max_cols, sample_size=5
         )
 
         generation_time = __import__("time").perf_counter() - start
 
+        _store_generation(results, kind, str_idx, content, aliases, generation_time)
+        save_json(results, output_file)
+        sys.stdout.flush()
+
         actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
         cooldown = _compute_timeout(actual_tokens)
         print(f"[{idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
         __import__("time").sleep(cooldown)
-
-        _store_generation(results, kind, str_idx, content, aliases, generation_time)
-        save_json(results, output_file)
-        sys.stdout.flush()
 
     
 
@@ -551,6 +695,9 @@ async def stream_generate_statements(
         )
         all_matches: list = await loop.run_in_executor(
             None, load_json, cfg.statement_generation.query_candidates_path
+        )
+        all_matches = _cap_matches(
+            all_matches, cfg.statement_generation.multi_table_query_count, seed=cfg.seed
         )
     except Exception as exc:
         yield {"type": "error", "message": str(exc)}
@@ -615,6 +762,10 @@ async def stream_generate_statements(
             cfg.statement_generation.bad_tokens,
             seed=cfg.seed,
             analysis_cache_path=analysis_cache_path,
+            gate_unretrievable_groups=cfg.mcp_search.gate_unretrievable_groups,
+            retrieval_gate_enabled=cfg.mcp_search.retrieval_gate_enabled,
+            plan_judge_count=JUDGE_MODE_COUNTS[cfg.judges.plan_mode],
+            code_judge_count=JUDGE_MODE_COUNTS[cfg.judges.code_mode],
         )
         for st_idx, csv_path in enumerate(sampled):
             dataset_name = csv_path.stem
@@ -669,6 +820,10 @@ async def stream_generate_statements(
         cfg.statement_generation.bad_tokens,
         seed=cfg.seed,
         analysis_cache_path=analysis_cache_path,
+        gate_unretrievable_groups=cfg.mcp_search.gate_unretrievable_groups,
+        retrieval_gate_enabled=cfg.mcp_search.retrieval_gate_enabled,
+        plan_judge_count=JUDGE_MODE_COUNTS[cfg.judges.plan_mode],
+        code_judge_count=JUDGE_MODE_COUNTS[cfg.judges.code_mode],
     )
     for idx, match in enumerate(all_matches):
         #if idx < resume_from:
@@ -678,10 +833,12 @@ async def stream_generate_statements(
             dataset_paths, aliases, metadatas, involved_cols, dfs = _build_match_inputs(
                 match, cfg.datasets_path, metadata, "csv"
             )
-            formatted_match = _get_formatted_match(match, kind, dfs=dfs, involved_cols=involved_cols)
+            match_for_planner = _get_match_for_planner(match)
+            if match_for_planner is None:
+                match_for_planner = _get_formatted_match(match, kind, dfs=dfs, involved_cols=involved_cols)
             content = cross_agent.generate_statements(
                 dataset_paths, aliases, kind,
-                formatted_match,
+                match_for_planner,
                 involved_cols, metadatas,
                 cfg.candidates_discovery.limit_to_n_columns, sample_size=5,
             )
@@ -726,6 +883,14 @@ async def stream_generate_statements(
 
 def generate_statements(cfg: OrQAConfig) -> None:
     metadata = load_normalized_datasets_metadata(cfg.normalized_metadata_filepath)
+    # Built once, shared by every plan judge panel this run spins up: the
+    # SAME reverse index tasks.mcp_search points at, so the plan judge's
+    # keyword-searchability check (see
+    # orqa.agent.utility.keyword_searchability) verifies against the exact
+    # index a downstream retrieval agent would actually search. `None` when
+    # it can't be built (metadata not indexed yet, Elasticsearch down, ...)
+    # — the check then no-ops rather than blocking generation.
+    search_index = load_index(cfg)
     for lang in ["PANDAS","SQL"]:
         create_statements(
             cfg.llm_config_path.joinpath("litellm.yaml"),
@@ -740,4 +905,11 @@ def generate_statements(cfg: OrQAConfig) -> None:
             single_table_query_count=cfg.statement_generation.single_table_query_count,
             languages=cfg.statement_generation.detected_languages,
             seed=cfg.seed,
+            search_index=search_index,
+            keyword_search_top_k_coefficient=cfg.mcp_search.keyword_search_top_k_coefficient,
+            multi_table_query_count=cfg.statement_generation.multi_table_query_count,
+            gate_unretrievable_groups=cfg.mcp_search.gate_unretrievable_groups,
+            retrieval_gate_enabled=cfg.mcp_search.retrieval_gate_enabled,
+            plan_judge_count=JUDGE_MODE_COUNTS[cfg.judges.plan_mode],
+            code_judge_count=JUDGE_MODE_COUNTS[cfg.judges.code_mode],
         )

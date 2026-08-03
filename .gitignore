@@ -28,3 +28,16 @@ _orqa
 tests/*
 !tests/test_main_cli.py
 .claude
+.vscode
+# Archived TabPFN skill implementation — relocated out of the tracked
+# codebase (see archive/tabpfn/README.md for what it was and where it
+# lived before the move); kept locally for potential future reuse.
+archive/
+tests
+notebooks
+/tests
+.mcp.json
+.pytest_cache
+.python-version
+AGENTS.md
+metadata.json

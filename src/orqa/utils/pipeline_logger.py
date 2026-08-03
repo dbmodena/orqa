@@ -92,22 +92,14 @@ class PipelineLogger:
             return
         
         steps = plan.get("steps", [])
-        task_types = plan.get("task_types", [])
-        
+
         plan_label = _badge("QUERY PLAN", BG_BLUE)
         print(_indent(f"{plan_label}", 1))
-        
+
         # Log question
         question = plan.get("question", "")
         if question:
             print(_indent(f"{CYAN}Question:{RESET}  {question}", 2))
-        
-        # Log task types
-        if task_types:
-            task_str = ", ".join(f"{BOLD}{t}{RESET}" for t in task_types)
-            print(_indent(f"{CYAN}Task types:{RESET}  {task_str}", 2))
-        else:
-            print(_indent(f"{CYAN}Task types:{RESET}  {DIM}(none — plain){RESET}", 2))
 
         # Log the plan's declared result contract (expected_result_type is
         # mechanically enforced against the executed result by the
@@ -156,20 +148,6 @@ class PipelineLogger:
                 if columns:
                     print(_indent(f"columns: {', '.join(columns)}", 4))
 
-    def skills_injected(self, task_types: list) -> None:
-        """Log which per-task-type skill markdown(s) were injected for this plan.
-
-        Injection is unconditional: whichever ML task types the plan calls for
-        (SQL plans never carry any) get their ``conf/skills/{task_type}.md``
-        injected. When the plan has no ML task types, plain generation is
-        reported.
-        """
-        task_types = list(task_types or [])
-        if not task_types:
-            print(_indent(f"{DIM}⚙  Skill provided: none (plain generation){RESET}", 1))
-            return
-        print(_indent(f"{CYAN}⚙  Skill(s) injected: {BOLD}{', '.join(task_types)}{RESET}", 1))
-
     # ------------------------------------------------------------------ #
     # Stage 0 — table analysis (TableAnalysisAgent)                       #
     # ------------------------------------------------------------------ #
@@ -212,16 +190,22 @@ class PipelineLogger:
     # Judge panels — per-judge votes (plan + code majority voting)        #
     # ------------------------------------------------------------------ #
 
-    # Layered vote fields of the PLAN panel (see PlanJudgment /
-    # JudgePanel.vote_fields), with the short label each is rendered under.
-    # Votes lacking these fields (code panel) render exactly as before.
+    # Layered vote fields of the PLAN and CODE panels (see PlanJudgment /
+    # Judgment / JudgePanel.vote_fields), with the short label each is
+    # rendered under. A panel's votes only carry the fields relevant to it,
+    # so both sets can share one tuple — panel_votes() only renders the
+    # fields actually present in a given vote.
     _VOTE_LAYERS = (
         ("question_approval", "question"),
         ("plan_approval", "plan"),
         ("table_usage_approval", "tables"),
-        ("skill_approval", "skill"),
-        ("predictor_approval", "predictors"),
         ("expected_result_approval", "result-type"),
+        ("difficulty_approval", "difficulty"),
+        ("convergence_approval", "convergence"),
+        ("metric_combination_approval", "combination"),
+        ("topic_linkage_approval", "topic-linkage"),
+        ("plan_compliance_approval", "compliance"),
+        ("present_result_approval", "result"),
     )
 
     def panel_votes(self, panel: dict, level: int = 1) -> None:
@@ -231,8 +215,7 @@ class PipelineLogger:
         For a layered panel (plan judges), the tally line additionally shows
         each layer's vote count, and every judge's line shows its layer
         votes — so a rejection is immediately attributable to the question,
-        the steps, the table usage, or the skill usage without opening the
-        saved JSON."""
+        the steps, or the table usage without opening the saved JSON."""
         if not panel:
             return
         votes = panel.get("votes", [])
@@ -406,6 +389,49 @@ class PipelineLogger:
             f"  {RED}⚡{RESET}  {DIM}#{query_id}{RESET}  execution error: {RED}{error}{RESET}",
             1,
         ))
+
+    # ------------------------------------------------------------------ #
+    # Phase 3b — empty-result plan-level retry (Agent._retry_empty_results) #
+    # ------------------------------------------------------------------ #
+    # A query can pass the validator/judge loop above (query_approved) and
+    # still execute to 0 rows — that's caught separately, AFTER the loop
+    # exits, so it needs its own visible trail: otherwise a query that
+    # looked fully approved live in the console can still end up in
+    # failed_queries with no explanation printed anywhere.
+
+    def empty_result_code_regen(self, query_id, question: str) -> None:
+        """Printed right before the one-shot regeneration call, so the
+        (potentially slow) code-gen + code-judge round isn't silent between
+        the PLAN JUDGE verdict above and the recovered/exhausted verdict
+        below."""
+        print(_indent(
+            f"  {CYAN}⚙{RESET}  {DIM}#{query_id}{RESET}  "
+            f"{CYAN}regenerating code from the revised plan…{RESET}",
+            1,
+        ))
+
+    def empty_result_escalation(self, query_id, question: str) -> None:
+        print(_indent(
+            f"  {YELLOW}↺{RESET}  {DIM}#{query_id}{RESET}  {question}  "
+            f"{YELLOW}judge-approved but executed to an empty result — "
+            f"escalating to a one-shot plan-level retry{RESET}",
+            1,
+        ))
+
+    def empty_result_recovered(self, query_id, question: str) -> None:
+        print(_indent(
+            f"  {GREEN}✔{RESET}  {DIM}#{query_id}{RESET}  {question}  "
+            f"{GREEN}plan-level retry recovered a non-empty result{RESET}",
+            1,
+        ))
+
+    def empty_result_permanent_fail(self, query_id, question: str, reason: str) -> None:
+        print(_indent(
+            f"  {RED}✖✖{RESET}  {DIM}#{query_id}{RESET}  {question}  "
+            f"{DIM}(empty-result retry exhausted){RESET}",
+            1,
+        ))
+        print(_indent(f"{RED}{reason}{RESET}", 3))
 
     def iteration_done(self) -> None:
         print(_indent(f"{GREEN}✔  All queries approved — stopping early.{RESET}", 1))

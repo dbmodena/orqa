@@ -289,7 +289,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Discovery method: {cfg.candidates_discovery.method}", file=out)
         print(f"Root data directory: {cfg.data_path}", file=out)
         print(f"Prompts folder: {cfg.prompts_path}", file=out)
-        print(f"Skills folder: {cfg.skills_path}", file=out)
         print(f"LLM configurations folder: {cfg.llm_config_path}", file=out)
         print(f"Crawled datasets folder: {cfg.crawled_datasets_path}", file=out)
         print(f"Processed datasets folder: {cfg.datasets_path}", file=out)

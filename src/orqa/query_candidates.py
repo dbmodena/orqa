@@ -19,6 +19,7 @@ import pandas as pd
 from conf import OrQAConfig
 
 from .graph import matches_graph
+from .schema_matching.valentine_matcher import THRESHOLD as SCHEMA_MATCH_THRESHOLD
 from .utils import save_json
 from .utils.pipeline_logger import PipelineLogger
 
@@ -73,8 +74,43 @@ def _resolve_case_insensitive(
 
 
 def _make_union_match(task_spec, df_q, df_r, alias_q, alias_r):
-    q_columns = task_spec.get("q_columns", [])
-    r_columns = task_spec.get("r_columns", [])
+    """
+    ``q_columns``/``r_columns`` on a union task are NOT a correspondence —
+    ``q_columns`` is the LLM-proposed subset of the query table's schema, while
+    ``r_columns`` (see ``matches_graph.process_edge``) is every candidate-table
+    column that showed up *anywhere* in an unfiltered, un-scored COMA
+    schema-matcher pass over the two FULL schemas. The two lists have
+    different provenance and routinely differ wildly in length (a handful of
+    curated columns vs. nearly the candidate's entire schema).
+
+    The matcher's actual per-pair output (``task_spec["matches"]``, a list of
+    ``[q_col, r_col, score]`` triples) DOES carry a real, if noisy, cross-table
+    correspondence — filtered here to pairs at/above ``SCHEMA_MATCH_THRESHOLD``
+    (the same cutoff already used elsewhere in the codebase to decide whether
+    a schema match is trustworthy) and ranked by confidence. When nothing
+    clears that bar, fall back to the disjoint originals rather than
+    fabricate a pairing that isn't actually supported.
+    """
+    raw_matches = task_spec.get("matches") or []
+    confident = sorted(
+        (
+            (c1, c2, float(score))
+            for c1, c2, score in raw_matches
+            if float(score) >= SCHEMA_MATCH_THRESHOLD
+        ),
+        key=lambda triple: triple[2],
+        reverse=True,
+    )
+
+    if confident:
+        q_columns      = [c1 for c1, _, _ in confident]
+        r_columns      = [c2 for _, c2, _ in confident]
+        column_scores  = [s for _, _, s in confident]
+    else:
+        q_columns      = task_spec.get("q_columns", [])
+        r_columns      = task_spec.get("r_columns", [])
+        column_scores  = []
+
     col_str = f"{q_columns} / {r_columns}" if q_columns or r_columns else "All columns"
     return {
         "relationship": {
@@ -83,6 +119,11 @@ def _make_union_match(task_spec, df_q, df_r, alias_q, alias_r):
             "right": alias_r,
             "left_cols": q_columns,
             "right_cols": r_columns,
+            # Schema-match confidence per (left_cols[i], right_cols[i]) pair,
+            # same length/order as left_cols/right_cols. Empty when no pair
+            # cleared SCHEMA_MATCH_THRESHOLD — left_cols/right_cols are then
+            # each side's independently relevant columns, NOT a correspondence.
+            "column_scores": column_scores,
             "description": f"UNION: {alias_q} ∪ {alias_r} ON {col_str}",
         },
         "columns": {alias_q: set(q_columns), alias_r: set(r_columns)},
@@ -126,25 +167,40 @@ def _make_join_correlation_match(task_spec, df_q, df_r, alias_q, alias_r):
         alias_q,
         alias_r,
     )
+    # Only the semantic pipeline actually computes this at discovery time
+    # (config.py: "join-correlation tasks are verified with an actual join +
+    # correlation computation") — classical/BLEND JC tasks carry no such
+    # metric, so this is None there and silently omitted below.
+    metrics = task_spec.get("metrics") or {}
+    correlation = metrics.get("correlation")
+    correlation_method = metrics.get("correlation_method")
+    corr_note = (
+        f" [{correlation_method} r={correlation:.2f}]"
+        if correlation is not None else ""
+    )
     description = (
         f"JOIN-CORRELATION: merge {alias_q} ⋈ {alias_r} "
         f"ON {alias_q}.{q_key} = {alias_r}.{r_key}"
         + (" [case-insensitive]" if ci else "")
-        + f", then correlate {alias_q}.{q_target} with {alias_r}.{r_target}"
+        + f", then correlate {alias_q}.{q_target} with {alias_r}.{r_target}{corr_note}"
     )
+    relationship = {
+        "type": "merge_correlation",
+        "how": "inner",
+        "left": alias_q,
+        "right": alias_r,
+        "left_on": [q_key],
+        "right_on": [r_key],
+        "case_insensitive": ci,
+        "relationship": task_spec.get("relationship", ""),
+        "correlation_cols": {alias_q: q_target, alias_r: r_target},
+        "description": description,
+    }
+    if correlation is not None:
+        relationship["correlation_value"] = correlation
+        relationship["correlation_method"] = correlation_method
     return {
-        "relationship": {
-            "type": "merge_correlation",
-            "how": "inner",
-            "left": alias_q,
-            "right": alias_r,
-            "left_on": [q_key],
-            "right_on": [r_key],
-            "case_insensitive": ci,
-            "relationship": task_spec.get("relationship", ""),
-            "correlation_cols": {alias_q: q_target, alias_r: r_target},
-            "description": description,
-        },
+        "relationship": relationship,
         "columns": {alias_q: {q_key, q_target}, alias_r: {r_key, r_target}},
     }
 

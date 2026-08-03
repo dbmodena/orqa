@@ -62,14 +62,16 @@ enable_json_mode: true
 judge_profiles:
   # Judges the structured query plans (before code generation).
   plan:
-    - "oci/google.gemini-2.5-flash"
+    - "oci/openai.gpt-oss-120b"
     - "oci/openai.gpt-oss-20b"
-    - "oci/meta.llama-3.3-70b-instruct"
+    - "oci/google.gemini-2.5-flash"
+    
   # Judges the generated (question, code, result) triples.
   code:
-    - "oci/google.gemini-2.5-flash"
+    - "oci/openai.gpt-oss-120b"
     - "oci/openai.gpt-oss-20b"
-    - "oci/meta.llama-3.3-70b-instruct"
+    - "oci/google.gemini-2.5-flash"
+    
 
 # Response model configuration
 response_model:

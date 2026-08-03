@@ -97,18 +97,18 @@ tasks:
     embedding_batch_size: 64
     target_cluster_size: 40
     cluster_overlap_margin: 0.1
-    max_cluster_size: 60
+    max_cluster_size: 30
     sm_matcher: coma
     tokens_budget: 5000000
     max_datasets_to_process: 2000
   query_generation:
     kind: "PANDAS"
-    bad_tokens: ['s','None','R','NaN']
     max_response_tokens: 300
     max_memory_usage: 512
     max_pool_time: 60
     enable_single_table: "yes"
-    single_table_query_count: 300
+    single_table_query_count: 3
+    multi_table_query_count: 4
     languages: ["English"]
 
   # MCP dataset-search server (step: mcp_search)
@@ -117,3 +117,34 @@ tasks:
     elasticsearch_url: http://localhost:9200
     host: 127.0.0.1
     port: 8765
+    # Adaptive top-K for the plan judge's keyword-searchability gate: each
+    # plan's own K = round(number_of_tables_in_plan * this coefficient), so
+    # a plan joining more tables is held to a wider net than a single-table
+    # one instead of every plan sharing one fixed K.
+    keyword_search_top_k_coefficient: 9.0
+    # Whether the PRE-planning retrievability check (run once per table
+    # group, before any LLM call) may abort a group as "unretrievable_group"
+    # when no keyword combination can surface every table within top-K.
+    # False: the check still runs and still hands the planner a verified
+    # keyword anchor when one is found — only the abort-on-failure half is
+    # disabled, so an unresolved group just proceeds to planning without
+    # an anchor instead of being skipped outright.
+    gate_unretrievable_groups: false
+    # Master on/off switch for the retrieval gate as a whole — the
+    # PRE-planning keyword suggestion above AND the plan judge's reactive
+    # keyword-searchability layer. False disables both outright, regardless
+    # of whether a reverse index is otherwise available.
+    retrieval_gate_enabled: false
+
+  # How many judges vote on each panel (see orqa.agent.agents.JudgePanel).
+  # judge_profiles.plan/code in conf/llm/litellm.yaml stay the pool of
+  # CANDIDATE judge models (currently 3 each); this only caps how many of
+  # them are actually used per run — independently for the plan panel
+  # (judges a structured plan before any code is written) and the code
+  # panel (judges the generated question/code/result triple).
+  #   mono: use just the first configured judge — a single verdict, no
+  #     voting. Cheaper and faster; no cross-model disagreement signal.
+  #   trio: use the first three configured judges — majority vote.
+  judges:
+    plan_mode: mono
+    code_mode: mono

@@ -14,22 +14,24 @@ Below this prompt you will see the **Inputs** (detected languages, alias, table 
 - DuckDB/ANSI SQL syntax only. Correct and executable code only.
 - Follow the Structured Plan's steps, in order — they are the validated decomposition of this exact question.
 
-### Difficulty
-Assign whichever of `easy` / `medium` / `hard` genuinely reflects the complexity of THIS plan's steps — don't force it up or down to hit a particular tier:
+### Data quality — the table is RAW
+The table is loaded exactly as stored: no bad-token→NULL conversion, no numeric coercion, no null-row dropping has been applied upstream. If the Structured Plan includes a `clean` step, implement its `params.actions` literally in SQL using the EXACT literal tokens shown in Column Statistics' `bad_token_counts` (never invented ones): `CASE WHEN col IN ('n/a', 'not available') THEN NULL ELSE col END` to blank a sentinel, `TRY_CAST(col AS DOUBLE)` — never a raw `CAST`, which errors on any stray token — to cast, `WHERE col IS NOT NULL` to drop rows, `COALESCE(col, <value>)` to impute a constant. If a column your query touches shows a non-trivial `bad_token_counts` or a `numeric_parseable_ratio` near 1.0 but no `clean` step covers it, still handle it defensively (`TRY_CAST` instead of `CAST`) rather than letting a stray token crash the query. If an action carries `"treat_as_missing"`, fold those exact values into the same `CASE`/`IN (...)` blanking before whatever the action does next — they're planner-discovered sentinels not already in `bad_token_counts`.
 
-| Level | Typically reflects |
-|---|---|
-| Easy | Basic SELECT, WHERE, optional ORDER BY/LIMIT, ≤1 aggregate, no subqueries |
-| Medium | GROUP BY + HAVING, multiple aggregates, nested filters, one non-correlated subquery, or UNION/INTERSECT/EXCEPT on the same table |
-| Hard | Correlated or multi-level subqueries, window functions, CASE, CTEs (incl. recursive), or combinations of several advanced features |
+If the Structured Plan includes a `derive` step whose `params.actions` use `"technique": "flag"` or `"bucket"` (preserving an outlier/censoring pattern as its own feature instead of discarding it): implement `flag` as `CASE WHEN col ~ '<pattern>' OR col IN (...) THEN TRUE ELSE FALSE END AS output_column`, and `bucket` as a `CASE WHEN ... THEN 'label' WHEN ... THEN 'label' ELSE ... END AS output_column` mapping the ranges/patterns named in the action's `rule` to their labels — using the exact values/patterns from `numeric_outliers`/`minority_value_groups`, never invented ones.
+
+### Correlate / limit / rank steps
+If the Structured Plan includes a `correlate` step: use DuckDB's `corr(col_a, col_b)` aggregate — Pearson only, so `params.method` will always be `"pearson"` for a SQL plan (never generate Spearman/Kendall SQL). Add `GROUP BY <params.group_by columns>` when `params.group_by` is set, for one coefficient per group instead of one over the whole table; alias the result `AS <params.output_column>` when that key is present.
+
+If the Structured Plan includes a `limit` step: `params.how` (default `"head"`) selects the idiom — `"head"` -> a bare `LIMIT params.n` applied on top of the query's existing row order (typically right after an `ORDER BY` implementing the plan's `sort` step); `"largest"`/`"smallest"` -> `ORDER BY <params.by columns> DESC`/`ASC LIMIT params.n` directly, for a self-contained top/bottom-N with no separate `sort` step. Note: the validator's test-execution path strips and overrides any trailing `LIMIT` with its own `LIMIT 100` safety cap during validation only — this does not change what you should generate; still emit the plan's real `LIMIT params.n`.
+
+If the Structured Plan includes a `rank` step: use the window function matching `params.method` — `"min"` -> `RANK()`, `"dense"` -> `DENSE_RANK()`, `"first"` -> `ROW_NUMBER()` (SQL plans are restricted to these three; never generate `"average"`/`"max"` tie-handling in SQL) — `OVER ([PARTITION BY <params.group_by columns>] ORDER BY <params.by columns> [DESC])`, aliased `AS <params.output_column>`. Omit `PARTITION BY` when `params.group_by` is absent; add `DESC` to `ORDER BY` when `params.ascending` is `false`.
 
 ### Output (conform to the Pydantic schema — `queries` must contain exactly ONE item)
-- `difficulty`: easy / medium / hard
 - `question`: the plan's business question (faithfully preserved, see above)
 - `query`: DuckDB SQL
 - `motivation`: 2–3 sentences in business language explaining (1) the analytical value, (2) which specific columns are used and why they matter.
 
-Note: `topic`, `story`, `translated_question`, `detected_language`,
+Note: `difficulty`, `topic`, `story`, `translated_question`, `detected_language`,
 `question_keywords`, `translated_question_keywords`, and `tables` are NOT
 part of this output — the query plan already decided them (table usage,
 justification, and columns were already fixed and judged during planning)

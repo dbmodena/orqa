@@ -18,13 +18,17 @@ infrastructure is required.
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import re
 import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
+
+logger = logging.getLogger(__name__)
 
 # Relative weights of each metadata field when scoring a match.
 # A keyword hitting the title matters more than one buried in
@@ -348,6 +352,53 @@ class DatasetIndex:
             if len(results) >= top_k:
                 break
         return results
+
+
+def load_index(cfg) -> Optional[Any]:
+    """Build/load the reverse index for the backend ``cfg.mcp_search.backend``
+    selects, creating it from the normalized metadata when missing or stale.
+
+    Shared by the MCP retrieval-benchmark server and any other caller (e.g.
+    the plan judge's keyword-searchability check) that needs the SAME index
+    a portal's ``mcp_search`` config points at. Returns ``None`` instead of
+    raising when the index can't be built (metadata not yet produced,
+    Elasticsearch unreachable, ...) — callers should treat that as "no
+    index available" rather than a fatal error.
+    """
+    try:
+        if cfg.mcp_search.backend == "elasticsearch":
+            from orqa.benchmark import es_index
+
+            es_url = (
+                os.environ.get("ELASTICSEARCH_URL", "").strip()
+                or cfg.mcp_search.elasticsearch_url
+            )
+            es = es_index.connect(es_url)
+            index, rebuilt = es_index.ESDatasetIndex.build_or_load(
+                es,
+                cfg.mcp_search.es_index_name,
+                cfg.normalized_metadata_filepath,
+                cfg.datasets_path,
+                cfg.datasets_format,
+                source=cfg.source,
+            )
+            location = f"Elasticsearch index {cfg.mcp_search.es_index_name!r} at {es_url}"
+        else:
+            index, rebuilt = DatasetIndex.build_or_load(
+                cfg.normalized_metadata_filepath,
+                cfg.mcp_search.index_filepath,
+                cfg.datasets_path,
+                cfg.datasets_format,
+                source=cfg.source,
+            )
+            location = str(cfg.mcp_search.index_filepath)
+    except Exception:
+        logger.warning("Could not build/load the reverse index for %r.", cfg.source, exc_info=True)
+        return None
+
+    action = "Created" if rebuilt else "Reusing"
+    logger.info("%s %s (%d datasets)", action, location, len(index))
+    return index
 
 
 @dataclass

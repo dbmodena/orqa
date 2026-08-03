@@ -34,14 +34,7 @@ dependencies = [
     "valentine>=0.4.1",
     "wrapt-timeout-decorator>=1.5.1",
     "tabulate",
-    "tabpfn_client"
 ]
-
-[project.optional-dependencies]
-# Optional ML extra: the thin hosted TabPFN API client (not the heavyweight
-# local model). Kept optional so base installs stay lean; enabled deliberately
-# alongside the `allow_tabpfn` config gate. Import name is `tabpfn_client`.
-ml = ["tabpfn-client>=0.1,<1"]
 
 [tool.uv.sources]
 ulod = { git = "https://github.com/nanni00/ULOD" }

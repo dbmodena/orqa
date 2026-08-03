@@ -42,7 +42,7 @@ from typing import Literal, Optional
 import pandas as pd
 from mcp.server.fastmcp import FastMCP
 
-from orqa.benchmark.index import DatasetIndex
+from orqa.benchmark.index import load_index
 from orqa.benchmark.questions import BenchmarkTodo, evaluate_table_retrieval, load_questions
 
 # Row cap applied when a tool needs the actual data (preview, valentine
@@ -707,38 +707,19 @@ def _load_index(cfg):
     """
     Prepare the reverse index for the configured backend, creating it
     from the normalized metadata when missing or stale.
+
+    Delegates the actual build/load to ``orqa.benchmark.index.load_index``
+    (shared with the plan judge's keyword-searchability check), but unlike
+    that shared helper — which returns ``None`` on failure so a judging
+    run degrades gracefully — the server's whole purpose IS the index, so
+    a failure to build/load it here is fatal.
     """
-    if cfg.mcp_search.backend == "elasticsearch":
-        import os
-
-        from orqa.benchmark import es_index
-
-        es_url = (
-            os.environ.get("ELASTICSEARCH_URL", "").strip()
-            or cfg.mcp_search.elasticsearch_url
+    index = load_index(cfg)
+    if index is None:
+        raise RuntimeError(
+            f"Could not build/load the reverse index for {cfg.source!r}; "
+            "see the warning above for the underlying error."
         )
-        es = es_index.connect(es_url)
-        index, rebuilt = es_index.ESDatasetIndex.build_or_load(
-            es,
-            cfg.mcp_search.es_index_name,
-            cfg.normalized_metadata_filepath,
-            cfg.datasets_path,
-            cfg.datasets_format,
-            source=cfg.source,
-        )
-        location = f"Elasticsearch index {cfg.mcp_search.es_index_name!r} at {es_url}"
-    else:
-        index, rebuilt = DatasetIndex.build_or_load(
-            cfg.normalized_metadata_filepath,
-            cfg.mcp_search.index_filepath,
-            cfg.datasets_path,
-            cfg.datasets_format,
-            source=cfg.source,
-        )
-        location = str(cfg.mcp_search.index_filepath)
-
-    action = "Created" if rebuilt else "Reusing"
-    _log(f"{action} {location} ({len(index)} datasets)")
     return index
 
 

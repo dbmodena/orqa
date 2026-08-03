@@ -93,6 +93,45 @@ def iter_questions(payload: dict, kind: str) -> Iterator[tuple[str, str, str, di
                 yield section, query_id, qnum, question, meta
 
 
+def match_plan_feedback(meta: dict, question: str) -> Optional[dict]:
+    """The plan-judge history whose (final) question produced this query.
+
+    ``_meta.result_extra.plan_feedback`` holds one entry per PLAN in the
+    generation run; a query descends from exactly one of them. Matched on
+    the question text of the entry itself or of any of its attempts (the
+    question may have been rewritten across correction rounds — the query
+    carries the FINAL wording, which the last attempt also carries).
+    """
+    feedback = ((meta.get("result_extra") or {}).get("plan_feedback")) or []
+    for entry in feedback:
+        if entry.get("question") == question:
+            return entry
+        for att in entry.get("attempts") or []:
+            if att.get("question") == question:
+                return entry
+    return None
+
+
+def resolve_task_types(meta: dict, question: str) -> list:
+    """A query's ML-skill ``task_types`` (classification/regression/
+    timeseries/causal), resolved from its plan-judge history — the plan the
+    query was ultimately generated from is the LAST judge attempt's
+    ``proposed_plan`` (earlier ones were revised away). Empty list when no
+    matching plan-feedback entry exists (e.g. a SQL plan, or an older run
+    without plan-level judging recorded).
+
+    This is the single shared resolution the dashboard (``web_app.py``) and
+    any other consumer of a query's ML-skill status should use, so they
+    never silently diverge on which queries are ML-skill — the same
+    one-shared-helper principle ``utils.clean_columns`` already applies to
+    ``prepare_dataset``/``QueryExecutor.load_tables``.
+    """
+    plan_fb = match_plan_feedback(meta or {}, question)
+    plan_attempts = (plan_fb or {}).get("attempts") or []
+    final_plan = (plan_attempts[-1].get("proposed_plan") if plan_attempts else None) or {}
+    return final_plan.get("task_types") or []
+
+
 def _question_fields(query: dict, language: str) -> dict:
     """
     Pick the question/keywords in the portal's target language.

@@ -57,6 +57,16 @@ class JudgePanel(LLMClientStructured):
         root_key: When the response schema wraps its items in a list (the
             ``Judgments.queries`` shape), the wrapper key to unwrap — the
             FIRST item is the judge's verdict. ``None`` for flat schemas.
+        judge_count: Cap the panel to the first N entries of
+            ``judge_profiles.<panel>`` (see the workflow yaml's
+            ``tasks.judges.plan_mode``/``code_mode`` — "mono" resolves to
+            1, "trio" to 3, translated by the caller before construction;
+            this class only knows the resulting count, not the mono/trio
+            vocabulary). ``None`` (the default) uses every configured
+            profile unchanged — the pre-existing behavior. Aggregation
+            itself (``_aggregate``) is already generic over N, so capping
+            here needs no changes there: majority voting over 1 judge
+            degenerates to trusting that judge's own verdict outright.
     """
 
     def __init__(
@@ -66,6 +76,7 @@ class JudgePanel(LLMClientStructured):
         response_model: str,
         root_key: Optional[str] = None,
         vote_fields: Optional[List[str]] = None,
+        judge_count: Optional[int] = None,
     ):
         super().__init__(config_path, response_model)
         self.panel = panel
@@ -78,6 +89,8 @@ class JudgePanel(LLMClientStructured):
         self.vote_fields = list(vote_fields) if vote_fields else None
         self._message_builder = JudgeMessageBuilder()
         raw_profiles = (self.config.get("judge_profiles") or {}).get(panel) or []
+        if judge_count is not None:
+            raw_profiles = raw_profiles[:judge_count]
         # A panel needs both its judges AND its response schema; missing
         # either (older YAMLs) simply leaves the panel unconfigured.
         self.judges = (

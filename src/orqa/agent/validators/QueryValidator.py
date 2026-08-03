@@ -3,6 +3,7 @@ from typing import List, Dict, Tuple, Any
 import difflib
 import json
 import logging
+import math
 import pickle
 import queue as queue_module
 import re
@@ -27,7 +28,7 @@ TECHNICAL_TERMS = [
     'primary key', 'foreign key',
     'pd.', 'df.', 'sql', 'duckdb',
     'str.lower', 'astype', 'fillna', 'dropna',
-    'correlate', 'correlation', 'coefficient',
+    'coefficient',
     'pearson', 'spearman', 'kendall',
     'covariance', 'r-squared',
     'percentile', 'quantile', 'variance',
@@ -39,8 +40,10 @@ TECHNICAL_TERMS = [
 TERM_SUGGESTIONS = {
     'join':        '"combine", "match", or "link" — e.g. "link customers with their orders".',
     'merge':       '"combine" or "bring together" — e.g. "combine sales data with location info".',
-    'correlate':   '"tend to increase/decrease together" or "relationship between".',
-    'correlation': '"relationship" or "pattern" — e.g. "Is there a pattern between X and Y?".',
+    'coefficient': 'Drop it — ask "how much do X and Y correlate" or "is there a correlation between X and Y" without naming the statistic.',
+    'pearson':     'Drop the method name — ask "how much do X and Y correlate" or "is there a correlation between X and Y", never which formula computes it.',
+    'spearman':    'Drop the method name — ask "how much do X and Y correlate" or "is there a correlation between X and Y", never which formula computes it.',
+    'kendall':     'Drop the method name — ask "how much do X and Y correlate" or "is there a correlation between X and Y", never which formula computes it.',
     'groupby':     '"for each" or "broken down by" — e.g. "average revenue for each region".',
     'group by':    '"for each" or "per" — e.g. "total sales per category".',
     'aggregate':   '"total" or "combined" — e.g. "total revenue per store".',
@@ -50,12 +53,27 @@ TERM_SUGGESTIONS = {
     'select':      '"find", "show", or "list" — e.g. "Show the top 10 restaurants by revenue".',
     'pivot':       '"broken down by" or "compared across" — e.g. "Revenue across regions and categories".',
     'null':        '"missing" or "without a value" — e.g. "restaurants without a listed address".',
-    'nan':         '"missing" or "not available" — e.g. "entries where the phone number is not available".',
+    'nan':         '"missing" or "not available" — e.g. "restaurants where the phone number is not available".',
+    'none':        '"missing" or "not available" — e.g. "restaurants without a listed address".',
     'schema':      'Describe the data directly — e.g. "restaurant name, address, and inspection date".',
     'dataframe':   '"data" or describe the subject — e.g. "the restaurant data".',
+    'dataframes':  '"data" or describe the subject — e.g. "the restaurant data".',
     'dataset':     '"data" or name the subject — e.g. "the inspection records".',
+    'datasets':    '"data" or name the subject — e.g. "the inspection records".',
     'row':         'Name the subject — e.g. "each restaurant" instead of "each row".',
+    'rows':        'Name the subject — e.g. "restaurants" instead of "rows".',
     'column':      'Name the information — e.g. "the restaurant name" instead of "the name column".',
+    'columns':     'Name the information — e.g. "the name and address" instead of "the columns".',
+    'table':       'Name the subject directly — e.g. "the restaurants" instead of "the table".',
+    'tables':      'Name the subject directly — e.g. "the restaurants" instead of "the tables".',
+    'field':       'Name the information — e.g. "the phone number" instead of "the field".',
+    'fields':      'Name the information — e.g. "the phone number and address" instead of "the fields".',
+    'record':      'Name the subject — e.g. "each restaurant" instead of "each record".',
+    'records':     'Name the subject — e.g. "restaurants" instead of "records".',
+    'entry':       'Name the subject — e.g. "each inspection" instead of "each entry".',
+    'entries':     'Name the subject — e.g. "inspections" instead of "entries".',
+    'index':       'Name what distinguishes it — e.g. describe the identifying detail, not "the index".',
+    'indices':     'Name what distinguishes them, or name the subject directly instead of "indices".',
     'union':       '"combined" or "across both" — e.g. "restaurants across both lists".',
 }
 
@@ -344,6 +362,20 @@ class QueryValidator(ABC):
             pass
         return f"a {type(result).__name__}"
 
+    @staticmethod
+    def _unwrap_scalar(r: Any) -> Any:
+        """1x1 DataFrame or 1-element Series/list -> the inner scalar value."""
+        try:
+            if isinstance(r, pd.DataFrame) and r.shape == (1, 1):
+                return r.iloc[0, 0]
+            if isinstance(r, pd.Series) and len(r) == 1:
+                return r.iloc[0]
+            if isinstance(r, (list, tuple)) and len(r) == 1:
+                return r[0]
+        except Exception:
+            pass
+        return r
+
     @classmethod
     def _matches_expected_result_type(cls, result: Any, expected: str) -> bool:
         """True when ``result``'s shape satisfies the plan's declared
@@ -361,18 +393,7 @@ class QueryValidator(ABC):
         Polars frames/series are duck-typed via shape/len rather than
         imported here.
         """
-        def _unwrap_scalar(r: Any) -> Any:
-            # 1x1 DataFrame or 1-element Series/list -> the inner value.
-            try:
-                if isinstance(r, pd.DataFrame) and r.shape == (1, 1):
-                    return r.iloc[0, 0]
-                if isinstance(r, pd.Series) and len(r) == 1:
-                    return r.iloc[0]
-                if isinstance(r, (list, tuple)) and len(r) == 1:
-                    return r[0]
-            except Exception:
-                pass
-            return r
+        _unwrap_scalar = cls._unwrap_scalar
 
         is_df = isinstance(result, pd.DataFrame) or (
             hasattr(result, "shape") and hasattr(result, "columns")
@@ -453,6 +474,43 @@ class QueryValidator(ABC):
             }[expected]
         )
 
+    def _check_result_finite(self, result: Any) -> None:
+        """Reject a NaN/inf scalar final answer.
+
+        A `number`-typed result is the plan's single final answer, so NaN/inf
+        means the underlying computation is mathematically undefined (e.g. a
+        correlation coefficient with zero variance on one side, or a ratio
+        dividing by zero) — never a valid business answer, regardless of how
+        many tables fed into it. Unlike ``_is_empty_result``/
+        ``_empty_result_is_error`` (gated off for multi-table queries because
+        sample-data key mismatches can legitimately yield zero rows), this
+        check always applies: an undefined number is never the right shape
+        for ANY query, single- or multi-table.
+        """
+        scalar = self._unwrap_scalar(result)
+        if isinstance(scalar, bool) or isinstance(scalar, np.bool_):
+            return
+        if not isinstance(scalar, numbers.Number):
+            return
+        try:
+            finite = math.isfinite(float(scalar))
+        except (TypeError, ValueError):
+            return
+        if finite:
+            return
+        raise ValueError(
+            "UNDEFINED RESULT — the executed result is NaN/infinite, not a "
+            "valid business answer.\n"
+            "This usually means a correlation (or other ratio) was computed "
+            "against a column that has zero variance in this query's scope "
+            "(e.g. an averaged year derived from a table already filtered "
+            "to a single year), or a division landed on zero.\n"
+            "Fix the CODE if the zero-variance/zero-denominator input is a "
+            "mistake; if the input is genuinely constant given the plan's "
+            "own scope, the question cannot be meaningfully answered this "
+            "way and the PLAN needs a different final computation."
+        )
+
     # ------------------------------------------------------------------
     # Main validation loop
     # ------------------------------------------------------------------
@@ -494,6 +552,7 @@ class QueryValidator(ABC):
                 # the empty-result gate so an empty result gets its own, more
                 # specific feedback rather than a shape complaint.
                 self._check_expected_result_type(actual_query, result_data)
+                self._check_result_finite(result_data)
                 if not self._check_table_usage(query_code, sanitized_names):
                     raise ValueError(self._build_unused_tables_feedback())
                 if not self._check_tables_field_coverage(actual_query):
@@ -501,9 +560,9 @@ class QueryValidator(ABC):
                 if self._check_table_names_in_question(actual_query["question"]):
                     raise ValueError(self._build_question_tables_feedback())
 
-                technical_terms = self._check_technical_terms_in_question(actual_query["question"])
-                if technical_terms:
-                    raise ValueError(self._build_technical_terms_feedback(technical_terms))
+                #technical_terms = self._check_technical_terms_in_question(actual_query["question"])
+                #if technical_terms:
+                #    raise ValueError(self._build_technical_terms_feedback(technical_terms))
                 self.good_queries[idx] = actual_query
 
             except Exception as e:
@@ -585,6 +644,21 @@ class QueryValidator(ABC):
             cols = table.get("columns_involved") or []
             if cols:
                 missing = [c for c in cols if c not in dataframe.columns]
+                if missing and code:
+                    # A `derive`/`aggregate` step's own OUTPUT column
+                    # legitimately doesn't exist in the raw table yet — the
+                    # code creates it itself (df['x'] = ..., .assign(x=...),
+                    # a named-aggregation x=('col', 'func'), or a rename
+                    # target). columns_involved is copied straight from the
+                    # plan's declared columns (structured_outputs.py Table.
+                    # columns_involved), which doesn't distinguish "read
+                    # from the raw table" from "produced by this plan's own
+                    # steps" — so a missing column the code itself creates
+                    # is not a hallucinated/typo'd raw-column reference.
+                    missing = [
+                        c for c in missing
+                        if not self._is_column_created_by_code(c, code)
+                    ]
                 if missing:
                     available_cols = list(dataframe.columns)
                     suggestions_per_col = []
@@ -748,6 +822,36 @@ class QueryValidator(ABC):
                 f"Query result has {row_count:,} rows, exceeding the {self.MAX_RESULT_ROWS:,} row limit.\n"
                 "Fix: add WHERE/filter conditions, use LIMIT, or aggregate before returning."
             )
+
+    @staticmethod
+    def _is_column_created_by_code(col: str, code: str) -> bool:
+        """Whether *code* itself creates column *col* rather than reading it
+        from the raw table — a `derive`/`aggregate` step's own output,
+        legitimately absent from the raw DataFrame before the code runs.
+
+        Heuristic, not a parse: matches the common ways pandas code
+        introduces a new column, so a false POSITIVE just lets a query
+        through to real execution (which still raises an accurate error if
+        the column genuinely never materializes) — cheaper than a false
+        NEGATIVE, which permanently kills a correct query on a misleading
+        "typo" message before it ever runs.
+        """
+        if not code:
+            return False
+        escaped = re.escape(col)
+        # df['col'] = ...  /  df.loc[mask, 'col'] = ...  (bracket assignment
+        # target — the quoted name immediately precedes `] =`, not `==`).
+        if re.search(rf"""['"]{escaped}['"]\s*\]\s*=(?!=)""", code):
+            return True
+        # .assign(col=...), .agg(col=('src', 'func')), pd.NamedAgg output —
+        # bare identifier immediately followed by `=` (kwarg-style, not a
+        # comparison), not itself a dict/attribute access.
+        if re.search(rf"(?<![.\w]){escaped}\s*=(?!=)", code):
+            return True
+        # .rename(columns={'old': 'col'}) — appears as a mapping's target value.
+        if re.search(rf":\s*['\"]{escaped}['\"]", code):
+            return True
+        return False
 
     def _suggest_columns(self, missing_col: str, available: list[str], max_suggestions: int = 10) -> list[str]:
         """Return up to *max_suggestions* column names from *available* ordered by

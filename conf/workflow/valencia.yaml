@@ -125,7 +125,6 @@ tasks:
 
   query_generation:
     kind: "SQL"
-    bad_tokens: ['s','None','R','NaN']
     max_response_tokens: 300
     max_memory_usage: 512
     max_pool_time: 60

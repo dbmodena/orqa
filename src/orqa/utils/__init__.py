@@ -366,41 +366,73 @@ def _is_valid_column_name(col) -> bool:
     return True
 
 
-def _coerce_numeric_like_columns(
-    df: pd.DataFrame, threshold: float = 0.9
-) -> pd.DataFrame:
-    """Convert object columns that are numeric-in-disguise to real numerics.
-
-    Open-data columns frequently mix numeric values with formatting
-    ("1,314", "34.10%", "$500") or stray non-numeric tokens ("R", "s"),
-    which leaves the column as dtype object and makes row values type-
-    inconsistent — joins and comparisons then crash on type mismatches.
-    A column whose non-null values are >= ``threshold`` parseable as
-    numbers (after stripping thousands separators, '%' and '$') is
-    converted with ``errors='coerce'``: the column gets one consistent
-    dtype and the stray tokens become NaN in place, instead of their rows
-    being dropped. Percent values keep their face value ("34.1%" -> 34.1).
-
-    Below-threshold columns are genuinely categorical/text and are left
-    untouched.
+def _strip_numeric_formatting(series: "pd.Series") -> "pd.Series":
+    """Strip thousands separators, '%' and '$' from a string series, as a
+    prelude to a numeric-parseability check — the exact cleaning
+    ``clean_columns`` used to auto-coerce object columns with, factored out
+    so every read-only "would this parse as a number" check in this module
+    (``_numeric_parse_ratio``, ``ColumnStatistics``'s ``minority_value_groups``)
+    agrees on what counts as numeric-in-disguise. Never applied to real data.
     """
-    for col in df.columns:
-        if df[col].dtype != object:
-            continue
-        non_null = df[col].dropna()
-        if non_null.empty:
-            continue
-        cleaned = (
-            non_null.astype(str)
-            .str.strip()
-            .str.replace(",", "", regex=False)
-            .str.rstrip("%")
-            .str.lstrip("$")
-        )
-        parsed = pd.to_numeric(cleaned, errors="coerce")
-        if parsed.notna().mean() >= threshold:
-            df[col] = parsed.reindex(df.index)
-    return df
+    return (
+        series.astype(str)
+        .str.strip()
+        .str.replace(",", "", regex=False)
+        .str.rstrip("%")
+        .str.lstrip("$")
+    )
+
+
+def _numeric_parse_ratio(series: "pd.Series") -> Optional[float]:
+    """Fraction of ``series``'s non-null values that would parse as a number
+    after stripping thousands separators, '%' and '$' — kept here as a
+    READ-ONLY statistic (see ``ColumnStatistics.compute``) so the planner can
+    see which columns are numeric-in-disguise ("1,314", "34.10%", "$500")
+    and decide for itself whether to add a ``clean`` step casting them —
+    never applied automatically.
+
+    Returns ``None`` for an all-null series (no values to judge).
+    """
+    non_null = series.dropna()
+    if non_null.empty:
+        return None
+    parsed = pd.to_numeric(_strip_numeric_formatting(non_null), errors="coerce")
+    return float(parsed.notna().mean())
+
+
+def _generalize_value_shape(value) -> str:
+    """Collapse a value to a cheap structural signature by replacing every
+    run of digits with ``#`` — e.g. ``"<18"`` -> ``"<#"``, ``"90+"`` ->
+    ``"#+"``, ``"18-24"`` -> ``"#-#"``, ``"minor"`` -> ``"minor"`` (unchanged,
+    no digits). Used by ``ColumnStatistics.compute`` to GROUP an object
+    column's rare/tail values into a handful of buckets instead of listing
+    every distinct one — keeps ``minority_value_groups`` small regardless of
+    table size, without making any judgment about whether a bucket is noise
+    or signal (that call is left entirely to the query planner).
+    """
+    return re.sub(r"\d+", "#", str(value))
+
+
+def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Column-level cleaning shared by ``prepare_dataset`` (the view shown to
+    the LLM during analysis/planning) and ``QueryExecutor.load_tables`` (the
+    view the generated code actually runs against) — kept as ONE function
+    specifically so those two call sites can never silently diverge again
+    (see ``QueryExecutor``'s docstring for the history of that happening).
+
+    Drops illegally/purely-numerically named columns only (never valid
+    Python identifiers or SQL columns, so generated code can't reference
+    them anyway) — a structural requirement, not a data-quality judgment
+    call. It deliberately does NOT touch cell values anymore: no bad-token
+    conversion, no numeric coercion, no null handling — those are now
+    decisions the query planner makes explicitly (see the ``clean`` plan
+    op), informed by the raw per-column statistics ``ColumnStatistics``
+    computes. Also deliberately NOT row- or column-COUNT limiting: that's a
+    prompt-size concern specific to the analysis view, never safe to apply
+    at execution time (see ``QueryExecutor``).
+    """
+    valid_columns = [c for c in df.columns if _is_valid_column_name(c)]
+    return df[valid_columns]
 
 
 def prepare_dataset(
@@ -408,47 +440,28 @@ def prepare_dataset(
     involved_cols: list[str],
     limit_to_n_columns: int = 20,
     sample_size: int = 5,
-    bad_tokens: list = [],
     limit_to_n_rows: Optional[int] = None,
     seed: int = 0,
 ) -> tuple[dict, dict]:
-    # ``na_values=bad_tokens`` already converts aliased-NaN tokens from open
-    # data ('R', 'None', ...) into real NaN at read time, so they can never
-    # appear as join/filter values downstream. No global ``df.dropna()`` here:
-    # dropping every row with a null in ANY column emptied wide open-data
-    # tables outright (nulls in never-used columns killed rows the selected
-    # columns needed), which starved generation and validation of data.
-    # Nulls are instead handled per-column below, and rows are only dropped
-    # where a null actually breaks something: the mandatory link columns.
-    df = pd_read_dataset(dataset_path, opts={"csv": {"na_values": bad_tokens, "low_memory": False}, "parquet": {"na_values": bad_tokens, "low_memory": False}})
+    # Loaded raw: no bad-token->NaN conversion, no numeric coercion, no
+    # null-row dropping (not even on the mandatory link columns) — those
+    # were previously forced here unconditionally, but are now judgment
+    # calls the query planner makes explicitly via a ``clean`` plan step,
+    # informed by the raw per-column statistics ``ColumnStatistics``
+    # computes from exactly this view. Pandas' own default NA-token
+    # detection (blank cells, "NaN", "NULL", ...) still applies via
+    # ``pd_read_dataset``'s underlying ``pd.read_csv``/``read_parquet`` —
+    # that's an unambiguous "this cell is empty" signal, not a portal-
+    # specific convention needing a judgment call.
+    df = pd_read_dataset(dataset_path, opts={"csv": {"low_memory": False}, "parquet": {"low_memory": False}})
 
     if limit_to_n_rows is not None:
         df = df.head(limit_to_n_rows)
 
-    # ── drop columns with illegal / purely-numeric names ──────────────────────
-    valid_columns = [c for c in df.columns if _is_valid_column_name(c)]
-    df = df[valid_columns]
-    # ──────────────────────────────────────────────────────────────────────────
+    df = clean_columns(df)
 
     selected_cols = select_columns(df.columns.tolist(), limit_to_n_columns, involved_cols)
     df = df[selected_cols].copy()
-
-    # Clean only the columns that survived selection (cleaning before
-    # selection would let nulls/typing in discarded columns affect kept rows).
-    df = _coerce_numeric_like_columns(df)
-
-    # Rows with a null join key can never match: drop them here so merges on
-    # the mandatory link columns don't crash or silently mismatch. This is the
-    # only row-level null handling — single-table runs (no involved_cols) keep
-    # every row.
-    col_map = {str(c).strip().lower(): c for c in df.columns}
-    resolved_cols = [
-        col_map[str(c).strip().lower()]
-        for c in involved_cols
-        if str(c).strip().lower() in col_map
-    ]
-    if resolved_cols:
-        df = df.dropna(subset=resolved_cols)
 
     dataset_info, column_typings = extract_dataset_info(df, sample_size=sample_size, seed=seed)
     dataset_info["dataset_name"] = dataset_path.stem

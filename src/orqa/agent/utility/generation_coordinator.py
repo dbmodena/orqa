@@ -4,8 +4,8 @@
 the design (see the component table in the requirements, Requirement 16), it:
 
 * Builds the final generation prompt by delegating to
-  :func:`orqa.agent.prompting.build_generation_prompt` (skill-injected,
-  plan-grounded — task 8.2), calls the injected ``generate_fn`` with it, and
+  :func:`orqa.agent.prompting.build_generation_prompt` (plan-grounded —
+  task 8.2), calls the injected ``generate_fn`` with it, and
 * Assigns every generated query a unique, opaque ``client_id`` used purely as
   an **internal** bookkeeping key (``plan_by_client_id``, judge-result maps,
   ...) — never something the LLM is asked to declare or echo back. Every
@@ -14,12 +14,11 @@ the design (see the component table in the requirements, Requirement 16), it:
   input order; nothing ever reads an id back out of a model response.
 
 This module implements **tasks 8.1 and 8.2**: the ``client_id`` assignment
-(8.1) plus orchestrating the skill-injected, plan-grounded prompt build and
-the generation call itself (8.2). The prompt-assembly logic (rendering plan
-steps, column statistics, and skill sections) lives in
-:mod:`orqa.agent.prompting.prompts` — it is shared with ``StatementValidator``'s
-correction prompts, so it belongs with the rest of the prompting module
-rather than here.
+(8.1) plus orchestrating the plan-grounded prompt build and the generation
+call itself (8.2). The prompt-assembly logic (rendering plan steps and
+column statistics) lives in :mod:`orqa.agent.prompting.prompts` — it is
+shared with ``StatementValidator``'s correction prompts, so it belongs with
+the rest of the prompting module rather than here.
 
 Why assign ids programmatically rather than trust the model to mint them: the
 ``client_id`` is the key the validator and judge use to map results back to
@@ -128,9 +127,8 @@ class GenerationCoordinator:
                 :class:`LLMClientStatementGenerator.complete`. Injected so the LLM
                 client can be mocked in tests.
             plan: Optional structured plan whose ordered steps ground generation
-                (Requirement 20.1) and whose ``task_types`` (Pandas plans only)
-                drive per-task-type skill injection (Requirement 20.3). Passed
-                through to :func:`orqa.agent.prompting.build_generation_prompt`.
+                (Requirement 20.1). Passed through to
+                :func:`orqa.agent.prompting.build_generation_prompt`.
             stats: Optional per-table column statistics rendered into the prompt
                 (Requirement 20.2).
 

@@ -68,32 +68,59 @@
   <div class="source-grid" id="sourceGrid"></div>
 
   <div id="workArea" style="display:none">
-    <div id="queriesSection" style="display:none">
-      <div class="section-label" style="margin-top:40px">Queries</div>
-      <div class="filter-bar">
-        <input  type="text" id="searchBox"  placeholder="Search questions…" oninput="renderQueries()"/>
-        <select id="kindFilter" onchange="renderQueries()">
-          <option value="">All kinds</option>
-        </select>
-        <select id="skillFilter" onchange="renderQueries()">
-          <option value="">All skills</option>
-          <option value="__plain__">Plain (no skill)</option>
-          <option value="classification">classification</option>
-          <option value="regression">regression</option>
-          <option value="timeseries">timeseries</option>
-          <option value="causal">causal</option>
-        </select>
-        <select id="diffFilter" onchange="renderQueries()">
-          <option value="">All difficulties</option>
-          <option value="easy">Easy</option>
-          <option value="medium">Medium</option>
-          <option value="hard">Hard</option>
-        </select>
-        <span class="q-count" id="qCount"></span>
+
+    <!-- ── Browse page ── -->
+    <div id="pageBrowse">
+      <div id="queriesSection" style="display:none">
+        <div class="section-label" style="margin-top:40px">Queries</div>
+        <div class="filter-bar">
+          <input  type="text" id="searchBox"  placeholder="Search questions…" oninput="onFilterChange()"/>
+          <select id="kindFilter" onchange="onFilterChange()">
+            <option value="">All kinds</option>
+          </select>
+          <select id="skillFilter" onchange="onFilterChange()">
+            <option value="">All skills</option>
+            <option value="__plain__">Plain (no skill)</option>
+            <option value="classification">classification</option>
+            <option value="regression">regression</option>
+            <option value="timeseries">timeseries</option>
+            <option value="causal">causal</option>
+          </select>
+          <select id="diffFilter" onchange="onFilterChange()">
+            <option value="">All difficulties</option>
+            <option value="easy">Easy</option>
+            <option value="medium">Medium</option>
+            <option value="hard">Hard</option>
+          </select>
+          <span class="q-count" id="qCount"></span>
+        </div>
+        <div id="queriesList"></div>
+        <div class="pagination" id="pagination"></div>
       </div>
-      <div id="queriesList"></div>
+      <div id="emptyState" class="banner" style="display:none">No generated queries found for this source.</div>
     </div>
-    <div id="emptyState" class="banner" style="display:none">No generated queries found for this source.</div>
+
+    <!-- ── Stats page ── -->
+    <div id="pageStats" style="display:none">
+      <div class="section-label" style="margin-top:40px">Overview</div>
+      <div class="stat-cards" id="statOverview"></div>
+
+      <div class="section-label" style="margin-top:32px">Failure Rate — final query outcome</div>
+      <div class="rate-grid" id="failureRateGrid"></div>
+
+      <div class="section-label" style="margin-top:32px">Plan Judge Rejection Rate</div>
+      <div class="rate-grid" id="planRejectionGrid"></div>
+
+      <div class="section-label" style="margin-top:32px">Code Judge Rejection Rate</div>
+      <div class="rate-grid" id="codeRejectionGrid"></div>
+
+      <div class="section-label" style="margin-top:32px">Discovery Cluster Map</div>
+      <div id="clusterSection"></div>
+
+      <div class="section-label" style="margin-top:32px">Fetched Random Walks</div>
+      <div id="randomWalksSection"></div>
+    </div>
+
   </div><!-- /workArea -->
 </main>
 
@@ -110,7 +137,7 @@
   <div class="modal-body" id="modalBody"></div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+<script src="/static/marked.min.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

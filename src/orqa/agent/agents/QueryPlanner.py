@@ -5,10 +5,8 @@
 :mod:`orqa.agent.prompting.models`): an ordered list of plan-step decomposition
 steps and the ``table_links`` carried over from the mandatory upstream
 constraints. The planner is **kind-aware**: a ``"SQL"`` planner produces
-:class:`~orqa.agent.prompting.models.SQLQueryPlan` (no ``task_types`` — a SQL
-plan can never require an ML skill), while a ``"PANDAS"`` planner produces
-:class:`~orqa.agent.prompting.models.PandasQueryPlan` (``task_types`` drawn
-from the closed set of 5 ML task types, derived from the plan's steps).
+:class:`~orqa.agent.prompting.models.SQLQueryPlan`, while a ``"PANDAS"``
+planner produces :class:`~orqa.agent.prompting.models.PandasQueryPlan`.
 
 Design constraints implemented here (Requirements 5.1, 5.2, 6.1, 6.2):
 
@@ -17,9 +15,6 @@ Design constraints implemented here (Requirements 5.1, 5.2, 6.1, 6.2):
   them (in any composition shape — chained or independent branches), and the
   produced plan preserves them **unchanged** in ``table_links`` regardless of
   what the language model returns for that field.
-* For Pandas plans, ``task_types`` is the distinct set of skill-relevant
-  operations found in the plan steps (classification, regression, timeseries,
-  causal). SQL plans have no ``task_types`` field at all.
 * Column statistics (``TableStats``) are injected into the planner prompt.
 
 Plan *validation* and the re-request / free-text fallback (task 5.4) are
@@ -40,6 +35,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..llm_client.LLMClientStructured import LLMClientStructured
 from ..prompting.models import (
+    _DIFFICULTY_LEVELS,
     _RESULT_TYPES,
     PandasPlanStep,
     PandasQueryPlan,
@@ -50,19 +46,10 @@ from ..prompting.models import (
     TableStats,
 )
 from ..prompting.prompts import QueryPlannerPrompt
+from ..utility.difficulty_estimator import build_reconciliation_feedback, estimate_plan_tier
 from ..utility.structured_outputs import QueryLink, Table
 
 logger = logging.getLogger(__name__)
-
-# Operations that require a skill (the ML task types). ``task_types`` on a
-# produced Pandas plan is the distinct set of these ops appearing in the plan
-# steps. SQL plans never carry these ops at all (schema-enforced).
-SKILL_TASK_TYPES: tuple[str, ...] = (
-    "classification",
-    "regression",
-    "timeseries",
-    "causal",
-)
 
 # Ops whose entire purpose is to produce a NEW column rather than read an
 # existing one (a groupby's count/sum output, a derive's computed column).
@@ -71,28 +58,6 @@ SKILL_TASK_TYPES: tuple[str, ...] = (
 # reference.
 _COLUMN_PRODUCING_OPS = frozenset({"aggregate", "derive"})
 
-# Name tokens that mark a column as identifier-like: a label for a record or a
-# place, not a measured quantity. Such columns are never valid ML prediction
-# targets ("predicting" a zip code or an ID is meaningless even though the
-# column is numeric) — validate_plan rejects ML steps that declare one as
-# their target/outcome so the retry can pick a real outcome column.
-_IDENTIFIER_TOKENS = frozenset({
-    "zip", "zipcode", "postal", "postcode", "id", "ids", "uid", "uuid", "guid",
-    "code", "codes", "dbn", "phone", "tel", "fax", "url", "web", "website",
-    "email", "address", "adress", "street", "name", "names", "lat", "lon",
-    "lng", "latitude", "longitude", "ssn", "license", "licence",
-})
-
-_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
-
-# Matches a `filter` step description that pins a column to a single value
-# ("street equals 'Broadway'", "borough == 'Bronx'", "status is exactly
-# 'Closed'") as opposed to a range/set condition ("between", "at least").
-# Used to catch a specific ML-plan defect: reusing such a column as a
-# predictive feature is a no-op, since the filter already fixed it to one
-# value across the whole training population (see validate_plan).
-_EQUALITY_FILTER_RE = re.compile(r"\bequal(?:s|ing)?\b|\bis exactly\b|==", re.IGNORECASE)
-
 # An underscore between two letters in a QUESTION is a near-certain sign a
 # raw column identifier got pasted in verbatim (natural language never uses
 # underscores) — e.g. "the increase in Pre-K seats (grade_pk_half_day_full_day)"
@@ -100,54 +65,18 @@ _EQUALITY_FILTER_RE = re.compile(r"\bequal(?:s|ing)?\b|\bis exactly\b|==", re.IG
 # so this alone is grounds for rejection — see validate_plan.
 _UNDERSCORE_IN_QUESTION_RE = re.compile(r"[a-zA-Z]_[a-zA-Z]")
 
-# Phrases that name the ML METHOD rather than what the user wants to know —
-# the generation prompt already tells the model never to use this vocabulary
-# in `question` (see query_planner.md); this is the deterministic backstop
-# that actually rejects a plan that slips one through instead of hoping a
-# judge notices later. Multi-word PHRASES only (never bare words like
-# "predict"/"classify"/"model"), since those are legitimate domain nouns in
-# plenty of real questions (e.g. "what incident classification is most
-# likely", "what model type does it have") — the phrase requires an actual
-# verb-level method reference to trip.
-_JARGON_PHRASES: tuple = (
-    "can we predict", "would predict", "predict whether", "help predict",
-    "forecast predicts", "using a machine learning model", "using machine learning",
-    "training data", "held-out", "held out", "hold-out data",
-    "confounding variable", "confounder",
-    "regression model", "run a regression",
-    "classifier model", "classification model",
-    "correlation coefficient", "impute missing",
-)
-
 
 def _question_leaks_implementation(question: str) -> Optional[str]:
-    """Human-readable reason ``question`` leaks a raw column name or ML
-    method jargon, or ``None`` when it's clean. See ``validate_plan``."""
+    """Human-readable reason ``question`` leaks a raw column identifier, or
+    ``None`` when it's clean. See ``validate_plan``."""
     text = question or ""
     if _UNDERSCORE_IN_QUESTION_RE.search(text):
         return (
             "contains an underscore, which almost always means a raw column "
             "identifier was pasted into the question text verbatim"
         )
-    low = text.lower()
-    for phrase in _JARGON_PHRASES:
-        if phrase in low:
-            return (
-                f"contains the ML-method phrase {phrase!r} — describe what "
-                "the user wants to know, not the technique"
-            )
     return None
 
-
-def _is_identifier_like(column: str) -> bool:
-    """True when a column name reads as an identifier/label, not a quantity.
-
-    Tokenizes on non-alphanumerics (``school_code`` -> ``school``, ``code``)
-    and matches whole tokens only, so ``grid`` or ``valid`` never trip the
-    ``id`` token.
-    """
-    tokens = [t for t in _TOKEN_SPLIT_RE.split(str(column).lower()) if t]
-    return any(t in _IDENTIFIER_TOKENS for t in tokens)
 
 QueryPlan = Union[SQLQueryPlan, PandasQueryPlan]
 PlanStep = Union[SQLPlanStep, PandasPlanStep]
@@ -157,8 +86,7 @@ class PlanValidationError(ValueError):
     """Raised when a structured query plan fails structural validation.
 
     Signals that a plan references an unknown table alias, references a column
-    that does not exist in any referenced table, has no steps, or (Pandas
-    plans only) has a ``task_types`` set inconsistent with its steps
+    that does not exist in any referenced table, or has no steps
     (Requirements 5.3-5.5).
     """
 
@@ -188,8 +116,8 @@ class QueryPlanBatchClient(LLMClientStructured):
     """Structured LLM client that returns a kind-appropriate batch of query plans.
 
     Sibling of :class:`QueryPlannerClient` for the multi-plan request (several
-    query plans, each with its own skill needs). Kept as a separate client
-    (rather than toggling ``response_model`` on the same instance) so a single
+    query plans in one call). Kept as a separate client (rather than toggling
+    ``response_model`` on the same instance) so a single
     :class:`QueryPlanner` can freely mix single-plan and batch-plan requests
     without cross-contaminating response-model state.
     """
@@ -244,7 +172,6 @@ class QueryPlanner:
         stats: Sequence[TableStats],
         languages: Optional[Sequence[str]] = None,
         dfs: Optional[Sequence[Any]] = None,
-        skills_available: bool = True,
     ) -> QueryPlan:
         """Produce a structured query plan.
 
@@ -258,17 +185,9 @@ class QueryPlanner:
             stats: Per-table column statistics injected into the prompt.
             languages: Detected languages for question phrasing.
             dfs: The tables in scope (one per alias, same order), used to inject
-                a real up-to-10-row sample per table so questions — especially
-                hypothetical-scenario ones — ground their concrete values in
-                actually observed data rather than invented ones.
-            skills_available: Whether ML skills (classification, regression,
-                timeseries, causal) may be offered to the planner at all this
-                call. ``False`` (set by the caller when the account is near
-                its daily TabPFN usage quota — see agent.py's
-                ``TABPFN_USAGE_GATE_RATIO``) omits every ML instruction from
-                the prompt AND is enforced in ``validate_plan``, so a plan
-                with any skill op is rejected regardless of what the model
-                does.
+                a real up-to-10-row sample per table so questions ground their
+                concrete values in actually observed data rather than invented
+                ones.
 
         Returns:
             A :class:`SQLQueryPlan` or :class:`PandasQueryPlan` (per ``self.kind``)
@@ -282,7 +201,6 @@ class QueryPlanner:
 
         prompt = self._build_prompt(
             analyses, aliases, constraint_links, stats, languages, dfs=dfs,
-            skills_available=skills_available,
         )
 
         # Known columns per alias are derived from the column statistics so plan
@@ -295,9 +213,7 @@ class QueryPlanner:
         # First validation attempt. On success the normalised plan (contiguous
         # 1..N orders) is returned directly (Requirement 5.3).
         try:
-            return self.validate_plan(
-                candidate, aliases, known_columns, skills_available=skills_available
-            )
+            return self.validate_plan(candidate, aliases, known_columns)
         except PlanValidationError as exc:
             first_error = str(exc)
             logger.warning(
@@ -314,9 +230,7 @@ class QueryPlanner:
         retry_candidate = self._assemble_plan(raw_plan_retry, constraint_links)
 
         try:
-            return self.validate_plan(
-                retry_candidate, aliases, known_columns, skills_available=skills_available
-            )
+            return self.validate_plan(retry_candidate, aliases, known_columns)
         except PlanValidationError as exc_retry:
             logger.warning(
                 "Structured plan re-request also failed (%s); "
@@ -336,18 +250,14 @@ class QueryPlanner:
         languages: Optional[Sequence[str]] = None,
         num_plans: int = 3,
         dfs: Optional[Sequence[Any]] = None,
-        skills_available: bool = True,
+        retrievable_keywords: Optional[list[str]] = None,
     ) -> List[QueryPlan]:
         """Produce several independent query plans in a single LLM call.
 
         Unlike :meth:`plan` (one plan, one question), this asks the model for
         ``num_plans`` *distinct* business questions over the same tables, each
         with its own ``question``/``question_keywords`` and its own ordered
-        ``steps`` — and, for Pandas plans, its own ``task_types``. This is what
-        lets downstream skill injection (``GenerationCoordinator``) pick different
-        skills per plan/question instead of one skill for an entire run: e.g.
-        one plan may be a plain aggregation (no skill) while another needs
-        ``classification`` or ``causal``.
+        ``steps``.
 
         Each returned plan preserves the same mandatory ``table_links`` as
         :meth:`plan` (the upstream ``match``/``involved_cols`` constraints are
@@ -367,13 +277,23 @@ class QueryPlanner:
                 fewer (e.g. a single-table run with little to decompose); it is
                 never padded back up to ``num_plans``.
             dfs: The tables in scope (one per alias, same order), used to inject
-                a real up-to-10-row sample per table so questions — especially
-                hypothetical-scenario ones — ground their concrete values in
-                actually observed data rather than invented ones.
-            skills_available: Whether ML skills may be offered to the planner
-                at all this call (see :meth:`plan`). ``False`` disables ML
-                instructions in the prompt for every plan in the batch and is
-                enforced in ``validate_plan``.
+                a real up-to-10-row sample per table so questions ground their
+                concrete values in actually observed data rather than invented
+                ones.
+            retrievable_keywords: A keyword set EMPIRICALLY VERIFIED (see
+                ``orqa.agent.utility.keyword_suggestion.
+                suggest_retrievable_keywords``) to surface every table in
+                ``aliases`` within the plan judge's own keyword-searchability
+                top-K, computed BEFORE this call against the real reverse
+                index — not a guess. When given, every plan's `question`
+                must weave these terms in naturally (not just list them in
+                `question_keywords`), so the run starts from a proven-
+                retrievable footing instead of discovering retrievability by
+                trial and error across correction rounds. ``None``/empty
+                when unavailable (no index configured, or the group could
+                not be resolved — see the pre-planning check in
+                ``StatementOrchestrator._run``) — the prompt then falls back
+                to its ordinary retrievability guidance alone.
 
         Returns:
             A non-empty list of kind-appropriate query plans, each independently
@@ -387,7 +307,8 @@ class QueryPlanner:
 
         prompt = self._build_prompt(
             analyses, aliases, constraint_links, stats, languages,
-            num_plans=num_plans, dfs=dfs, skills_available=skills_available,
+            num_plans=num_plans, dfs=dfs,
+            retrievable_keywords=retrievable_keywords,
         )
         raw_set, _usage = self._request_plan_batch(prompt)
         raw_plans = self._extract_raw_plans(raw_set)
@@ -395,7 +316,6 @@ class QueryPlanner:
         plans: List[QueryPlan] = [
             self._validate_or_retry_one(
                 raw_plan, prompt, constraint_links, aliases, known_columns,
-                skills_available=skills_available,
             )
             for raw_plan in raw_plans
         ]
@@ -406,7 +326,148 @@ class QueryPlanner:
             empty = self._empty_plan(constraint_links)
             plans = [self._free_text_fallback(empty, aliases, constraint_links)]
 
+        plans = self._dedupe_difficulties(
+            plans, analyses, aliases, match, involved_cols, stats, languages,
+            dfs, retrievable_keywords,
+        )
+        plans = self._reconcile_difficulty(
+            plans, analyses, aliases, match, involved_cols, stats, languages,
+            dfs, retrievable_keywords,
+        )
+
         return plans
+
+    def _dedupe_difficulties(
+        self,
+        plans: List[QueryPlan],
+        analyses: Sequence[dict],
+        aliases: dict,
+        match: Any,
+        involved_cols: Optional[dict],
+        stats: Sequence[TableStats],
+        languages: Sequence[str],
+        dfs: Optional[Sequence[Any]],
+        retrievable_keywords: Optional[list[str]],
+    ) -> List[QueryPlan]:
+        """Ensure a batch has no duplicate difficulty tiers — deterministic,
+        code-level, no judge involved.
+
+        Keeps each tier's FIRST occurrence unchanged. Every later occurrence
+        of an already-used tier is reassigned to one of the tiers the batch
+        is still missing (in easy -> medium -> hard order) and sent through
+        a forced revision so its STEPS are redesigned to genuinely earn that
+        new tier — never just relabeled. Complements (does not overlap with)
+        the plan judge's per-plan Check 7: this pass guarantees tier
+        UNIQUENESS across the batch; Check 7 guarantees each individual
+        plan's tier is honest.
+        """
+        if len(plans) < 2:
+            return plans
+
+        all_tiers = ["easy", "medium", "hard"]
+        used = {p.difficulty for p in plans}
+        missing = iter(t for t in all_tiers if t not in used)
+        seen: set = set()
+        result: List[QueryPlan] = []
+        for plan in plans:
+            if plan.difficulty not in seen:
+                seen.add(plan.difficulty)
+                result.append(plan)
+                continue
+            target = next(missing, None)
+            if target is None:
+                # No missing tier left to reassign to (only possible with a
+                # batch of more than 3 plans, which the live pipeline never
+                # requests) — leave the duplicate as-is rather than guess.
+                result.append(plan)
+                continue
+            logger.info(
+                "Plan difficulty dedup: reassigning duplicate '%s' -> '%s'",
+                plan.difficulty, target,
+            )
+            retarget = plan.model_copy(update={"difficulty": target})
+            feedback = (
+                f"This plan's difficulty (`{plan.difficulty}`) duplicates "
+                "another plan already in this batch. It is REASSIGNED to "
+                f"`{target}` — redesign the STEPS (add or remove operations "
+                f"or tables) so the plan's actual complexity genuinely earns "
+                f"the `{target}` tier per the DIFFICULTY rubric, not just the "
+                "label."
+            )
+            revised, _usage = self.revise_plan(
+                retarget, feedback, analyses, aliases, match, involved_cols,
+                stats, languages, dfs=dfs,
+                retrievable_keywords=retrievable_keywords,
+            )
+            seen.add(target)
+            result.append(revised if revised is not None else retarget)
+        return result
+
+    def _reconcile_difficulty(
+        self,
+        plans: List[QueryPlan],
+        analyses: Sequence[dict],
+        aliases: dict,
+        match: Any,
+        involved_cols: Optional[dict],
+        stats: Sequence[TableStats],
+        languages: Sequence[str],
+        dfs: Optional[Sequence[Any]],
+        retrievable_keywords: Optional[list[str]],
+    ) -> List[QueryPlan]:
+        """Verify each plan's declared `difficulty` against the deterministic
+        structural/data-engineering estimate (see
+        ``orqa.agent.utility.difficulty_estimator``) — code-level, no judge
+        involved, same "deterministic, no judge involved" spirit as
+        :meth:`_dedupe_difficulties` — and force one corrective revision on
+        a mismatch, feeding the estimate's own named gaps back as feedback
+        rather than a vague "make it harder/easier" instruction.
+
+        Runs AFTER :meth:`_dedupe_difficulties` (tier uniqueness first, so a
+        reassigned duplicate's revision is what gets checked here) and
+        BEFORE the plan ever reaches the judge panel — the same
+        "catch what's mechanically checkable before spending a judge call"
+        principle already used for keyword-searchability (see
+        ``agent._judge_plans``). The plan judge's own ``difficulty_approval``
+        layer (``plan_judge.md`` Check 5) stays the final backstop for the
+        two things this estimator can't compute — whether flag/bucket steps
+        preserve genuinely DIFFERENT messy-data patterns, and whether a
+        bucket step's branching reflects real domain judgment rather than
+        an arbitrary split — so a mismatch this pass misses is still caught
+        downstream; this pass just spares most plans that round-trip.
+
+        One revision attempt per plan, mirroring the rest of this file's
+        single-retry convention — a plan still mismatched after its
+        revision is passed through unchanged and left to the judge panel.
+        """
+        result: List[QueryPlan] = []
+        for plan in plans:
+            estimate = estimate_plan_tier(plan)
+            if estimate.tier == plan.difficulty:
+                result.append(plan)
+                continue
+            feedback = build_reconciliation_feedback(estimate, plan.difficulty)
+            logger.info(
+                "Plan difficulty reconciliation: declared '%s', computed "
+                "'%s' — revising once. %s",
+                plan.difficulty, estimate.tier, estimate.explanation,
+            )
+            revised, _usage = self.revise_plan(
+                plan, feedback, analyses, aliases, match, involved_cols,
+                stats, languages, dfs=dfs,
+                retrievable_keywords=retrievable_keywords,
+            )
+            candidate = revised if revised is not None else plan
+            re_estimate = estimate_plan_tier(candidate)
+            if re_estimate.tier != candidate.difficulty:
+                logger.warning(
+                    "Plan difficulty reconciliation: still mismatched after "
+                    "revision (declared '%s', computed '%s') — leaving as-is "
+                    "for the judge panel to catch.",
+                    candidate.difficulty, re_estimate.tier,
+                )
+            result.append(candidate)
+        return result
 
     def revise_plan(
         self,
@@ -419,7 +480,7 @@ class QueryPlanner:
         stats: Sequence[TableStats],
         languages: Optional[Sequence[str]] = None,
         dfs: Optional[Sequence[Any]] = None,
-        skills_available: bool = True,
+        retrievable_keywords: Optional[list[str]] = None,
     ) -> tuple[Optional[QueryPlan], dict]:
         """Re-request ONE plan corrected against reviewer feedback.
 
@@ -431,11 +492,13 @@ class QueryPlanner:
         are preserved unchanged, exactly as in :meth:`plan`.
 
         Args:
-            skills_available: Must match whatever the plan's ORIGINAL
-                generation call used (see :meth:`plan`) — a plan denied ML
-                skills for quota reasons should not regain them mid-run just
-                because a correction round happens to fall after the quota
-                check.
+            retrievable_keywords: Same pre-verified keyword set as
+                :meth:`plan_batch` (must be the SAME set passed to the
+                original ``plan_batch`` call this plan came from, so a
+                revision never drifts away from the anchor the run started
+                with) — re-included here because a correction round rebuilds
+                the base prompt from scratch rather than reusing the
+                original call's.
 
         Returns:
             ``(revised_plan, usage_total)`` — ``revised_plan`` is ``None``
@@ -449,7 +512,7 @@ class QueryPlanner:
 
         base_prompt = self._build_prompt(
             analyses, aliases, constraint_links, stats, languages, dfs=dfs,
-            skills_available=skills_available,
+            retrievable_keywords=retrievable_keywords,
         )
         correction_prompt = (
             f"{base_prompt}\n\n"
@@ -460,7 +523,11 @@ class QueryPlanner:
             "specific topic, and phrased like an average non-technical user "
             "seeking an insight. Return a SINGLE flat JSON object matching the "
             "plan schema directly (`question`, `steps`, `table_links`, ...) at "
-            "the top level. Do NOT wrap it in a `plans` list or any other key.\n\n"
+            "the top level. Do NOT wrap it in a `plans` list or any other key. "
+            "Do not try to fix a difficulty-correspondence rejection by "
+            "changing the `difficulty` value itself — it is fixed for this "
+            "plan; only add or remove STEPS so the plan's actual complexity "
+            "matches it (any `difficulty` you return here is ignored).\n\n"
             "### PLAN TO CORRECT\n"
             f"{json.dumps(plan.model_dump(), indent=2, ensure_ascii=False, default=str)}\n\n"
             "### REVIEW FEEDBACK\n"
@@ -474,10 +541,13 @@ class QueryPlanner:
         raw_plan, usage = self._request_plan(correction_prompt)
         _accumulate(usage)
         candidate = self._assemble_plan(raw_plan, constraint_links)
+        # The difficulty tier is fixed for a correction round — the model may
+        # only change the STEPS to match it, never relabel. Force-override
+        # whatever the model returned, mirroring how table_links is already
+        # force-preserved above (see _assemble_plan's docstring).
+        candidate = candidate.model_copy(update={"difficulty": plan.difficulty})
         try:
-            return self.validate_plan(
-                candidate, aliases, known_columns, skills_available=skills_available
-            ), usage_total
+            return self.validate_plan(candidate, aliases, known_columns), usage_total
         except PlanValidationError as exc:
             first_error = str(exc)
             logger.warning(
@@ -489,10 +559,9 @@ class QueryPlanner:
         raw_retry, usage_retry = self._request_plan(retry_prompt)
         _accumulate(usage_retry)
         retry_candidate = self._assemble_plan(raw_retry, constraint_links)
+        retry_candidate = retry_candidate.model_copy(update={"difficulty": plan.difficulty})
         try:
-            return self.validate_plan(
-                retry_candidate, aliases, known_columns, skills_available=skills_available
-            ), usage_total
+            return self.validate_plan(retry_candidate, aliases, known_columns), usage_total
         except PlanValidationError as exc_retry:
             logger.warning(
                 "Revised plan re-request also failed structural validation "
@@ -507,7 +576,6 @@ class QueryPlanner:
         constraint_links: List[QueryLink],
         aliases: dict,
         known_columns: dict,
-        skills_available: bool = True,
     ) -> QueryPlan:
         """Validate a single raw plan from a batch, re-requesting just that one.
 
@@ -517,9 +585,7 @@ class QueryPlanner:
         """
         candidate = self._assemble_plan(raw_plan, constraint_links)
         try:
-            return self.validate_plan(
-                candidate, aliases, known_columns, skills_available=skills_available
-            )
+            return self.validate_plan(candidate, aliases, known_columns)
         except PlanValidationError as exc:
             first_error = str(exc)
             logger.warning(
@@ -555,9 +621,7 @@ class QueryPlanner:
         raw_retry, _usage = self._request_plan(retry_prompt)
         retry_candidate = self._assemble_plan(raw_retry, constraint_links)
         try:
-            return self.validate_plan(
-                retry_candidate, aliases, known_columns, skills_available=skills_available
-            )
+            return self.validate_plan(retry_candidate, aliases, known_columns)
         except PlanValidationError as exc_retry:
             logger.warning(
                 "Structured plan re-request also failed in batch (%s); "
@@ -604,7 +668,6 @@ class QueryPlanner:
         plan: QueryPlan,
         aliases: dict,
         known_columns: dict,
-        skills_available: bool = True,
     ) -> QueryPlan:
         """Validate and normalise a structured plan.
 
@@ -612,16 +675,6 @@ class QueryPlanner:
         5.3), then verifies that every table referenced by a step is a known
         alias (Requirement 5.4) and that every column referenced by a step
         exists in one of the tables that step references (Requirement 5.5).
-        For Pandas plans, also asserts ``task_types`` is exactly the distinct
-        set of skill-relevant ops in the steps (design pseudocode). SQL plans
-        have no ``task_types`` to check.
-
-        When ``skills_available`` is ``False``, ANY step whose ``op`` is an ML
-        skill (``SKILL_TASK_TYPES``) is rejected outright — this is the
-        enforcement half of the quota gate (see ``_build_prompt``'s
-        ``offer_skills``): the prompt not mentioning ML ops is only a nudge,
-        this is what actually guarantees a throttled run cannot produce one,
-        even if the model reaches for a skill unprompted.
 
         Also verifies ``plan.tables`` (the ``Table`` entries carrying each
         table's planning-time justification): every known alias must appear
@@ -645,11 +698,11 @@ class QueryPlanner:
         if not plan.steps:
             raise PlanValidationError("plan has no steps")
 
-        # Question-quality enforcement: a raw column identifier or ML-method
-        # phrase leaking into the question is a hard rejection, not a style
-        # nit the plan judge is left to catch on its own. Applies to BOTH
-        # plan kinds — SQL questions can leak jargon/column names exactly
-        # the same way Pandas ones can.
+        # Question-quality enforcement: a raw column identifier leaking into
+        # the question is a hard rejection, not a style nit the plan judge is
+        # left to catch on its own. Applies to BOTH plan kinds — SQL
+        # questions can leak column names exactly the same way Pandas ones
+        # can.
         for text_field in ("question", "translated_question"):
             text = getattr(plan, text_field, "") or ""
             reason = _question_leaks_implementation(text)
@@ -657,22 +710,7 @@ class QueryPlanner:
                 raise PlanValidationError(
                     f"plan.{text_field} {reason}: {text!r}. Rewrite it as an "
                     "average, non-technical user would ask it — no column "
-                    "names, no ML/analytics vocabulary, only plain words for "
-                    "what they want to know."
-                )
-
-        # Quota gate enforcement: independent of everything else below, a
-        # throttled request (skills_available=False) may not produce ANY
-        # skill step, regardless of what the prompt did or didn't say.
-        if not skills_available:
-            skill_ops_used = sorted({s.op for s in plan.steps if s.op in SKILL_TASK_TYPES})
-            if skill_ops_used:
-                raise PlanValidationError(
-                    f"plan uses ML skill op(s) {skill_ops_used}, but ML skills "
-                    "are not available for this batch (the account is near "
-                    "its daily usage quota) — rewrite every step as a plain "
-                    "filter/join/union/group/aggregate/sort/select/derive "
-                    "operation, with no task_types"
+                    "names, only plain words for what they want to know."
                 )
 
         # Requirement 5.3: assign a contiguous 1..N order sequence.
@@ -721,20 +759,15 @@ class QueryPlanner:
         }
 
         # Whether any earlier step could have produced new columns (aggregate/
-        # derive, an ML skill step's predictions, or explicitly declared
-        # outputs in params). Once true, an unresolved column reference is
-        # downgraded to a warning: `params` is free-form, so output harvesting
-        # is best-effort, and a false rejection costs a full planner
-        # re-request that tends to yield a WORSE plan (derived names pushed
-        # into prose where no validator — or generator — can see them). The
-        # statement generator reads the whole plan including descriptions, so
-        # an unresolved derived name is a soft signal, not a broken plan.
+        # derive, or explicitly declared outputs in params). Once true, an
+        # unresolved column reference is downgraded to a warning: `params` is
+        # free-form, so output harvesting is best-effort, and a false
+        # rejection costs a full planner re-request that tends to yield a
+        # WORSE plan (derived names pushed into prose where no validator —
+        # or generator — can see them). The statement generator reads the
+        # whole plan including descriptions, so an unresolved derived name is
+        # a soft signal, not a broken plan.
         derivation_seen = False
-
-        # Columns an earlier `filter` step pinned to a single value via an
-        # equality condition, per table alias — reusing one of these as an ML
-        # feature later in the same plan is checked below (validate_plan).
-        pinned_columns_by_alias: dict = {}
 
         for step in plan.steps:
             # Requirement 5.4: every referenced table must be a known alias.
@@ -745,9 +778,31 @@ class QueryPlanner:
                         f"alias {table!r}; known aliases: {sorted(known_aliases)}"
                     )
 
+            # Structural checks for correlate/limit/rank's fixed `params`
+            # shape (see _STEP_PARAMS_DESCRIPTION) — kind-aware, since SQL
+            # plans are restricted to a narrower method vocabulary than
+            # Pandas plans for both `correlate` and `rank`.
+            new_op_error = self._validate_new_op_params(step)
+            if new_op_error:
+                raise PlanValidationError(new_op_error)
+
+            # Register outputs this step declares in params (derive's
+            # new_column, aggregate's output_column / aggregations keys,
+            # correlate/rank's output_column) BEFORE the column-existence
+            # check below, so a step that lists its own forward-declared
+            # output inside its own `columns` (the established `derive`
+            # convention — "output_column must also appear in the step's
+            # columns") is never rejected just because it's the first
+            # producing step in the plan and _COLUMN_PRODUCING_OPS doesn't
+            # cover its op (correlate/rank deliberately don't, since their
+            # SOURCE columns must always already exist — only their
+            # declared output is new).
+            declared_outputs = self._declared_output_columns(step)
+
             # Requirement 5.5: every referenced column must exist in at least
             # one of the tables the step references — physical schema columns
-            # plus outputs registered by earlier steps. Exceptions:
+            # plus outputs registered by earlier steps (or this step's own,
+            # per above). Exceptions:
             #   * ops that legitimately produce NEW columns (`aggregate`,
             #     `derive`): an unrecognized name there is the step's own
             #     output, registered for later steps rather than rejected;
@@ -759,6 +814,7 @@ class QueryPlanner:
             allowed_columns: set = set()
             for table in step.tables:
                 allowed_columns |= columns_by_alias.get(table, set())
+            allowed_columns |= declared_outputs
 
             produces_columns = step.op in _COLUMN_PRODUCING_OPS
             for column in step.columns:
@@ -780,90 +836,38 @@ class QueryPlanner:
                 for table in step.tables:
                     columns_by_alias.setdefault(table, set()).add(column)
 
-            # Track columns a `filter` step pins to a single value (see
-            # _EQUALITY_FILTER_RE) so a later ML step reusing one as a
-            # feature can be caught below — after such a filter the column
-            # is constant across the training population.
-            if step.op == "filter" and _EQUALITY_FILTER_RE.search(step.description or ""):
-                for table in step.tables:
-                    pinned_columns_by_alias.setdefault(table, set()).update(step.columns)
+            # `correlate`/`limit`/`rank` name columns inside `params.by`/
+            # `params.group_by` rather than `step.columns` — those are
+            # otherwise invisible to the loop above, so check their
+            # existence separately here (using the now-finalised
+            # allowed_columns, which already includes this step's own
+            # declared output).
+            if step.op in ("correlate", "limit", "rank"):
+                params = step.params or {}
+                referenced = list(params.get("by") or []) + list(params.get("group_by") or [])
+                for column in referenced:
+                    if column not in allowed_columns:
+                        raise PlanValidationError(
+                            f"step {step.order} ({step.op}) params references "
+                            f"unknown column {column!r}; known columns for "
+                            f"{step.tables}: {sorted(allowed_columns)}"
+                        )
 
-            # Register outputs this step declares in params (derive's
-            # new_column, aggregate's output_column / aggregations keys) so
-            # later steps can reference them without tripping the check.
-            declared_outputs = self._declared_output_columns(step)
+            # Register this step's declared outputs for LATER steps.
             for table in step.tables:
                 columns_by_alias.setdefault(table, set()).update(declared_outputs)
 
-            if produces_columns or declared_outputs or step.op in SKILL_TASK_TYPES:
+            if produces_columns or declared_outputs:
                 derivation_seen = True
 
-            # ML target sanity: a classification/regression step must declare
-            # its target, and no ML step may point its target/outcome at an
-            # identifier-like column ("predicting" a zip code or an ID is
-            # meaningless). Raising here feeds the reason back through the
-            # standard re-request loop so the retry picks a real outcome.
-            if step.op in SKILL_TASK_TYPES:
-                roles = step.columns_role or {}
-                declared = []
-                for role in ("target", "outcome"):
-                    value = roles.get(role)
-                    if isinstance(value, str):
-                        declared.append(value)
-                    elif isinstance(value, (list, tuple)):
-                        declared.extend(str(v) for v in value)
-                if step.op in ("classification", "regression") and not declared:
-                    raise PlanValidationError(
-                        f"step {step.order} ({step.op}) does not declare its "
-                        "prediction target under `columns_role.target` — add "
-                        "the real outcome column it predicts"
-                    )
-                for column in declared:
-                    if _is_identifier_like(column):
-                        raise PlanValidationError(
-                            f"step {step.order} ({step.op}) uses identifier-like "
-                            f"column {column!r} as its prediction target. "
-                            "Identifiers (zip/postal codes, IDs, codes, phone "
-                            "numbers, URLs, addresses, names, coordinates) are "
-                            "labels, not quantities — predicting them is "
-                            "meaningless. Choose a genuinely measured or "
-                            "categorical outcome column instead, or drop the "
-                            "ML step if the table has none"
-                        )
-
-                # Zero-variance feature sanity: a feature column an earlier
-                # `filter` step already pinned to a single value (per table)
-                # carries no signal for this step to learn from — the
-                # "prediction" collapses to the target's mode/mean among the
-                # filtered rows, i.e. exactly the plain aggregate this ML
-                # step is dressing up as a model.
-                feature_columns = [c for c in step.columns if c not in declared]
-                for table in step.tables:
-                    pinned = pinned_columns_by_alias.get(table, set())
-                    reused = sorted(set(feature_columns) & pinned)
-                    if reused:
-                        raise PlanValidationError(
-                            f"step {step.order} ({step.op}) uses "
-                            f"{reused} as predictive feature(s) on table "
-                            f"{table!r}, but an earlier `filter` step already "
-                            "pinned that column to a single value there. "
-                            "After that filter the column is constant across "
-                            "the training population, so the model has no "
-                            "variance to learn from in it. Either drop the "
-                            "column as a feature, or drop the ML step and "
-                            "answer with a plain aggregate over the filtered "
-                            "rows instead"
-                        )
-
-        # Design pseudocode: task_types must equal the distinct skill ops in
-        # steps. Only Pandas plans carry task_types at all.
-        if isinstance(plan, PandasQueryPlan):
-            expected_task_types = self._derive_task_types(plan.steps)
-            if plan.task_types != expected_task_types:
-                raise PlanValidationError(
-                    f"task_types {plan.task_types} do not match the skill ops "
-                    f"derived from steps {expected_task_types}"
-                )
+            # A `clean` step's drop_column actions remove the column from
+            # what later steps may reference — enforced by simply subtracting
+            # it from the known-columns set, so it trips the SAME
+            # column-existence check above for whichever later step
+            # references it, rather than a parallel special-cased error path.
+            dropped_columns = self._clean_step_dropped_columns(step)
+            for table in step.tables:
+                columns_by_alias.get(table, set()).difference_update(dropped_columns)
 
         return plan
 
@@ -872,6 +876,70 @@ class QueryPlanner:
         """Map each alias to the set of its column names from the statistics."""
         return {table.alias: {c.column for c in table.columns} for table in stats}
 
+    def _validate_new_op_params(self, step) -> Optional[str]:
+        """Structural checks for `correlate`/`limit`/`rank`'s fixed `params`
+        shape (see `_STEP_PARAMS_DESCRIPTION`). Returns an error string, or
+        ``None`` when the step is fine (or not one of these three ops).
+
+        Kind-aware (``self.kind``/``self._is_pandas``) for the two SQL/Pandas
+        asymmetries this schema deliberately carries: DuckDB's `corr()` is
+        Pearson-only (no Spearman/Kendall), and DuckDB has no native
+        average/max tie-handling for ranks (only `RANK()`/`DENSE_RANK()`/
+        `ROW_NUMBER()`, i.e. `"min"`/`"dense"`/`"first"`).
+        """
+        params = step.params or {}
+        if step.op == "correlate":
+            if len(set(step.columns)) < 2:
+                return (
+                    f"step {step.order} (correlate) needs 2+ distinct columns "
+                    f"in `columns`; got {step.columns!r}"
+                )
+            method = params.get("method", "pearson")
+            allowed = {"pearson", "spearman", "kendall"} if self._is_pandas else {"pearson"}
+            if method not in allowed:
+                return (
+                    f"step {step.order} (correlate) params.method={method!r} "
+                    f"invalid for {self.kind} plans; allowed: {sorted(allowed)}"
+                )
+        elif step.op == "limit":
+            n = params.get("n")
+            if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+                return f"step {step.order} (limit) params.n must be a positive int; got {n!r}"
+            how = params.get("how", "head")
+            if how not in {"head", "largest", "smallest"}:
+                return f"step {step.order} (limit) params.how={how!r} invalid"
+            if how in {"largest", "smallest"}:
+                by = params.get("by")
+                if not isinstance(by, list) or not by or not all(
+                    isinstance(c, str) and c for c in by
+                ):
+                    return (
+                        f"step {step.order} (limit) how={how!r} requires a "
+                        "non-empty params.by list"
+                    )
+        elif step.op == "rank":
+            output_column = params.get("output_column")
+            if not isinstance(output_column, str) or not output_column:
+                return f"step {step.order} (rank) requires params.output_column"
+            by = params.get("by")
+            if not isinstance(by, list) or not by or not all(
+                isinstance(c, str) and c for c in by
+            ):
+                return f"step {step.order} (rank) requires a non-empty params.by list"
+            default_method = "average" if self._is_pandas else "min"
+            method = params.get("method", default_method)
+            allowed = (
+                {"average", "min", "max", "first", "dense"}
+                if self._is_pandas
+                else {"min", "dense", "first"}
+            )
+            if method not in allowed:
+                return (
+                    f"step {step.order} (rank) params.method={method!r} "
+                    f"invalid for {self.kind} plans; allowed: {sorted(allowed)}"
+                )
+        return None
+
     @staticmethod
     def _declared_output_columns(step) -> set:
         """Output column names a step declares in its free-form ``params``.
@@ -879,10 +947,12 @@ class QueryPlanner:
         Well-structured plans put a step's INPUT columns in ``step.columns``
         and its OUTPUT names in ``params`` — ``derive`` declares
         ``params.new_column``, ``aggregate`` declares ``params.output_column``
-        or the keys of ``params.aggregations``. These outputs are legitimate
-        references for later steps (a ``sort`` on an aggregate's result), so
-        validate_plan registers them instead of rejecting the reference.
-        ``params`` is free-form, so this harvest is best-effort by convention.
+        or the keys of ``params.aggregations``, and ``rank``/``correlate``
+        declare (the latter optionally) ``params.output_column`` the same
+        way. These outputs are legitimate references for later steps (a
+        ``sort`` on an aggregate's result), so validate_plan registers them
+        instead of rejecting the reference. ``params`` is free-form, so this
+        harvest is best-effort by convention.
         """
         params = step.params or {}
         if not isinstance(params, dict):
@@ -902,6 +972,31 @@ class QueryPlanner:
         return out
 
     @staticmethod
+    def _clean_step_dropped_columns(step) -> set:
+        """Columns a `clean` step's ``params.actions`` marks ``drop_column``.
+
+        Best-effort by convention, mirroring ``_declared_output_columns`` —
+        malformed/missing ``actions`` yields an empty set rather than
+        raising, since ``params`` is free-form. Used to remove those columns
+        from what later steps are allowed to reference (see
+        ``_CLEAN_STEP_PARAMS_DESCRIPTION``: a dropped column may not be
+        referenced by any later step).
+        """
+        if step.op != "clean":
+            return set()
+        params = step.params or {}
+        if not isinstance(params, dict):
+            return set()
+        actions = params.get("actions")
+        if not isinstance(actions, list):
+            return set()
+        return {
+            a["column"] for a in actions
+            if isinstance(a, dict) and a.get("action") == "drop_column"
+            and isinstance(a.get("column"), str) and a["column"]
+        }
+
+    @staticmethod
     def _retry_prompt(prompt: str, error: str) -> str:
         """Append validation feedback so the re-request can self-correct."""
         return (
@@ -917,7 +1012,7 @@ class QueryPlanner:
         if self._is_pandas:
             return PandasQueryPlan(
                 question="", question_keywords=[], plan_keywords=[], steps=[],
-                task_types=[], table_links=constraint_links,
+                table_links=constraint_links,
             )
         return SQLQueryPlan(
             question="", question_keywords=[], plan_keywords=[], steps=[],
@@ -936,8 +1031,7 @@ class QueryPlanner:
         produce a plan that still satisfies the schema and preserves the
         mandatory ``table_links``: a single free-text ``select`` step over the
         available tables with no specific column references (so it can never
-        fail column validation), and (for Pandas plans) an empty ``task_types``
-        set (no skill).
+        fail column validation).
         """
         alias_list = list(aliases.keys()) if aliases else []
         description = (
@@ -978,6 +1072,7 @@ class QueryPlanner:
             "detected_language": plan.detected_language,
             "topic": plan.topic,
             "story": plan.story,
+            "difficulty": plan.difficulty,
             "expected_result_type": plan.expected_result_type,
             "expected_result_description": plan.expected_result_description,
         }
@@ -992,7 +1087,6 @@ class QueryPlanner:
                 question_keywords=plan.question_keywords,
                 plan_keywords=plan.plan_keywords,
                 steps=[fallback_step],
-                task_types=[],
                 tables=fallback_tables,
                 table_links=constraint_links,
                 **metadata,
@@ -1028,10 +1122,17 @@ class QueryPlanner:
         produced plan and asserted against in tests.
 
         * When ``match`` is already a structured list of links (dicts or
-          :class:`QueryLink`), those links are coerced and returned verbatim.
-        * Otherwise a single ``join`` link is synthesised across the tables that
-          carry involved columns, using the ordered union of those columns and
-          the ``match`` text (when a string) as the description.
+          :class:`QueryLink`), those links are coerced and returned verbatim —
+          this is the normal path (see
+          ``statement_generation._get_match_for_planner``): one link per
+          verified pairwise relationship, each carrying its own
+          table-attributed ``key_columns``.
+        * Otherwise (legacy string-only match formats) a single ``join`` link
+          is synthesised across the tables that carry involved columns, with
+          the ``match`` text as the description; ``key_columns`` lists each
+          involved column tagged with its own table but makes no claim about
+          which columns on different tables correspond to each other, since
+          that information isn't available in this fallback.
         * A single-table request (fewer than two linked tables) yields no link.
         """
         # Case 1: match is already a structured list of links -> preserve as-is.
@@ -1057,12 +1158,18 @@ class QueryPlanner:
         if len(linked_tables) < 2:
             return []
 
-        # Ordered union of the involved columns across the linked tables.
-        columns: List[str] = []
-        for alias in linked_tables:
-            for col in involved_cols.get(alias, []):
-                if col not in columns:
-                    columns.append(col)
+        # One {alias: column} entry per involved column, so each column stays
+        # attributed to its own table — this fallback (legacy string-only
+        # match formats) has no record of which column on one table actually
+        # pairs with which column on another, so it deliberately does NOT
+        # claim a cross-table correspondence the way the structured
+        # per-relationship path (see statement_generation._relationship_to_link)
+        # does.
+        key_columns: List[dict] = [
+            {alias: col}
+            for alias in linked_tables
+            for col in involved_cols.get(alias, [])
+        ]
 
         description = (
             match.strip()
@@ -1075,7 +1182,7 @@ class QueryPlanner:
                 type="join",
                 tables=linked_tables,
                 description=description,
-                columns=columns,
+                key_columns=key_columns,
             )
         ]
 
@@ -1092,15 +1199,8 @@ class QueryPlanner:
         languages: Sequence[str],
         num_plans: int = 1,
         dfs: Optional[Sequence[Any]] = None,
-        skills_available: bool = True,
+        retrievable_keywords: Optional[list[str]] = None,
     ) -> str:
-        # Whether the planner is even told ML skills exist this call. Gated
-        # OFF (independently of the question/tables) when the caller reports
-        # the account is near its daily TabPFN usage quota (see
-        # agent.py's TABPFN_USAGE_GATE_RATIO) — a throttled Pandas run gets
-        # the exact same plain-operations-only wording a SQL run always gets.
-        offer_skills = self._is_pandas and skills_available
-        skill_ops = ", ".join(SKILL_TASK_TYPES)
         if num_plans <= 1:
             task_statement = (
                 "You are an expert data engineer. Produce an ordered, step-by-step "
@@ -1117,193 +1217,56 @@ class QueryPlanner:
                 "Return only valid JSON matching the required schema, as a "
                 f"`plans` list of exactly {num_plans} plan objects.\n\n"
             )
-            if offer_skills:
-                batch_note = (
-                    "MULTI-PLAN REQUIREMENTS:\n"
-                    f"- Each of the {num_plans} plans is fully self-contained: its own "
-                    "`question`, its own `steps`, and therefore its own `task_types` "
-                    "(derived from its own steps). Plans do NOT share steps.\n"
-                    "- Each plan's `task_types` should follow from whatever is the "
-                    "most genuinely interesting, well-justified question that plan "
-                    "asks — do NOT aim for a fixed mix of plain vs. ML plans across "
-                    f"the batch. A plain plan (only filter/join/group/aggregate/sort/"
-                    "select/derive, no `task_types`) is just as valid an outcome as "
-                    f"one using a machine-learning operation ({skill_ops}); never "
-                    "force an ML operation onto a plan merely to have one, or "
-                    "because the data happens to allow it — only when the question "
-                    "it produces is one a curious non-expert would actually ask.\n"
-                    "- Consider EVERY ML operation before choosing, so you're not "
-                    "defaulting to the same one or two every time — but 'consider' "
-                    "means check whether it's the right fit, not manufacture a plan "
-                    "for it. `causal` in particular tends to get overlooked: when "
-                    "the tables contain a treatment-like column (an intervention, "
-                    "program, policy, or group membership), an outcome column, and "
-                    "other covariates that could confound their relationship, weigh "
-                    "whether a causal framing is genuinely the more interesting "
-                    "question there — not plain stratified aggregation wearing "
-                    "`causal` framing. Only build that plan when it clears that "
-                    "bar; the mere presence of the triple is not, by itself, "
-                    "sufficient reason to build one.\n"
-                    "- Do not repeat the same question across plans.\n\n"
+            if num_plans == 3:
+                difficulty_note = (
+                    "- Assign exactly one EASY, one MEDIUM, and one HARD plan across "
+                    "these 3 — one plan per tier, no repeats — per the DIFFICULTY "
+                    "rubric above. The tiers must come from genuinely different step "
+                    "structures, not from labeling three similarly-simple plans "
+                    "easy/medium/hard: if two plans would earn the same tier under "
+                    "the rubric applied honestly, restructure one of them (add a "
+                    "join/groupby/extra step, or simplify one down) until the three "
+                    "are actually distinct in complexity, not just in label.\n"
                 )
             else:
-                batch_note = (
-                    "MULTI-PLAN REQUIREMENTS:\n"
-                    f"- Each of the {num_plans} plans is fully self-contained: its own "
-                    "`question` and its own `steps`. Plans do NOT share steps.\n"
-                    "- Do not repeat the same question across plans.\n\n"
+                difficulty_note = (
+                    f"- Spread these {num_plans} plans across the DIFFICULTY rubric "
+                    "above as evenly as possible, cycling easy -> medium -> hard -> "
+                    "easy -> ... so every tier is represented — never label multiple "
+                    "plans the same tier while leaving another tier completely "
+                    "unused when you have enough plans to cover all three. Each "
+                    "label must come from that plan's own step structure, honestly "
+                    "applied, not assigned to hit the target mix and then rationalized.\n"
                 )
+            batch_note = (
+                "MULTI-PLAN REQUIREMENTS:\n"
+                f"- Each of the {num_plans} plans is fully self-contained: its own "
+                "`question` and its own `steps`. Plans do NOT share steps.\n"
+                "- Do not repeat the same question across plans.\n"
+                f"{difficulty_note}\n"
+            )
 
-        if offer_skills:
-            ops_statement = (
-                "- Every step's `op` MUST be exactly one of these values — no others "
-                "are valid, even if a step's intent (e.g. correlating two columns) "
-                "isn't literally one of these words: filter, join, union, group, "
-                "aggregate, sort, select, derive, classification, regression, "
-                "timeseries, causal. There is no `correlation` op — "
-                "express a correlation/relationship-strength analysis as `derive` "
-                "(compute the statistic, e.g. `.corr()`) or `aggregate`, not as its "
-                "own op.\n"
-                f"- Machine-learning operations are: {skill_ops}. Use them only when "
-                "the question genuinely requires prediction/inference. A "
-                "`classification` or `regression` step MUST record its target "
-                "column under `columns_role.target` — this is validated.\n"
-                "- THE CORE TEST for whether ANY of these four ops genuinely "
-                "belongs: is the target's value for the case in question "
-                "genuinely UNCERTAIN given the inputs, or is it already "
-                "recoverable by a LOOKUP or by ARITHMETIC? If a human could "
-                "get the same answer by finding matching rows and reading "
-                "off the result (a lookup — e.g. zip code -> borough is a "
-                "near-fixed mapping), or by combining the given numbers with "
-                "+, -, *, / (arithmetic — e.g. total_enrollment is literally "
-                "the sum of the grade-level columns), NO ML step belongs "
-                "there at all, no matter how the question is phrased — plan "
-                "it as `derive`/`aggregate` instead. Reach for classification/"
-                "regression/timeseries/causal only when the relationship is "
-                "genuinely probabilistic: real-world cases with similar "
-                "inputs still land on different real outcomes. Every rule "
-                "below is a specific consequence of this one test.\n"
-                "- For any `classification` step, the prediction target must be "
-                "a low-cardinality column: check its `cardinality` in COLUMN "
-                "STATISTICS and never target a column with more than 50 "
-                "distinct values — the classifier hard-fails above 160 classes, "
-                "and targets anywhere near that are unanswerable. Pick a "
-                "genuinely categorical column instead (status, category, "
-                "type, ...), or add an explicit earlier step that collapses "
-                "the target to its top ~10 most frequent values plus \"other\" "
-                "and note that collapse in the step's `description`.\n"
-                "- An ML target must be a genuinely measured quantity or a "
-                "meaningful category. Identifier-like columns are LABELS, not "
-                "quantities, and are NEVER valid targets (and rarely useful "
-                "features): zip/postal codes, IDs and record codes, phone "
-                "numbers, URLs, emails, street addresses, entity names, and "
-                "latitude/longitude. \"Predicting\" a zip code or an ID is "
-                "meaningless even if the column is numeric. If a table's only "
-                "numeric columns are identifiers, do NOT propose an ML plan "
-                "for it — plain aggregation plans are the right choice there.\n"
-                "- Never use a column as an ML feature if an earlier step in "
-                "the SAME plan already filtered it down to one specific value "
-                "(e.g. `filter` where street equals 'Broadway', then "
-                "`classification` using street as a feature). After that "
-                "filter the column is constant across the rows the model "
-                "would train on — it carries no signal, and the \"prediction\" "
-                "is really just the target's mode/mean among the filtered "
-                "rows. That's a plain `aggregate` on the filtered subset, not "
-                "an ML step — plan it as such.\n"
-            )
-            if len(aliases or {}) >= 2:
-                ops_statement += (
-                    "- An ML plan MAY combine tables first: when joining/unioning "
-                    "the provided tables surfaces a column that itself makes a "
-                    "genuinely good ML feature or target — e.g. join two tables, "
-                    "then run `regression` on a column contributed by the joined "
-                    "table — plan it as one plan combining tables (`join`/`union`) "
-                    "AND an ML step over the newly-combined columns. This is an "
-                    "option, not a quota: do NOT manufacture a join/union chain "
-                    "just to have somewhere to attach an ML step, and do not force "
-                    "it when the joined columns aren't actually useful features/"
-                    "targets for the ML step — a single-table ML plan, or no ML "
-                    "plan at all, is the right call when that's what the tables "
-                    "support.\n"
-                )
-            ops_statement += (
-                "- A `classification` or `regression` step's `question` should "
-                "read as a specific what-if insight question a curious "
-                "non-expert would ask — PREFER this hypothetical framing; fall "
-                "back to a general-reliability framing only when the data "
-                "offers no natural concrete scenario:\n"
-                "  - Hypothetical framing MUST name concrete values for the "
-                "scenario's predictors IN THE QUESTION TEXT ITSELF — a question "
-                "that only names the predictor COLUMNS, with no committed values, "
-                "is not a hypothetical scenario, it's an unstated evaluation "
-                "question wearing hypothetical phrasing. "
-                "Wrong: \"Can we predict the number of students in a class based "
-                "on the grade level and program type?\" (names the columns, "
-                "commits to no scenario). "
-                "Right: \"What would be the number of students in a class of "
-                "grade 5 and program type STEM?\" (the scenario's own values are "
-                "stated, and it asks for one specific insight). \n"
-                "  - The fallback reliability framing asks about general "
-                "predictive power without committing to specific input values, "
-                "phrased in everyday words (e.g. \"how well do grade level and "
-                "program type tell us how big a class will be?\") — never in "
-                "model-evaluation vocabulary (\"accuracy\", \"held-out\", "
-                "\"predictive model\"). Use it only when the question is "
-                "genuinely about reliability, not one scenario.\n"
-                "  - Make the step's `description` state which framing was chosen "
-                "and, for hypothetical framing, the concrete scenario values "
-                "chosen — the code-generation step needs both to build the right "
-                "input row.\n"
-                "- Use a `timeseries` op ONLY when a table carries a genuine "
-                "ordered time dimension with enough history to learn from: a "
-                "date/datetime/period column (or many sequential period "
-                "columns) covering roughly 8+ observed points per series. "
-                "Comparing or differencing a handful of wide-format year "
-                "columns (e.g. `rate_2012` vs `rate_2013`) is NOT a timeseries "
-                "operation — it needs no forecasting model; plan it as "
-                "`derive`/`aggregate` instead.\n"
-                "- A `timeseries` step's `question` should ask about the "
-                "DIRECTION/TENDENCY of the series (e.g. is it expected to "
-                "increase, decrease, or stay stable) rather than demanding an "
-                "exact future value, and must STATE ITS AS-OF ANCHOR IN THE "
-                "QUESTION TEXT ITSELF — the last observed date/period of the "
-                "data (see the Time Context section), e.g. \"As of <last "
-                "observed period>, is ... heading up or down?\". The projection "
-                "target is always relative to that stated anchor: within the "
-                "observed range or the period(s) immediately following it — "
-                "never a date implied by the current datetime when the data "
-                "ends earlier.\n"
-                "- A `causal` step's `question` should be phrased as the "
-                "natural disentangling question a non-expert would ask: "
-                "explicitly contrast the suspected driver against the "
-                "alternative explanation in plain words (\"Is it <the "
-                "treatment/choice> itself that leads to <the outcome>, or is "
-                "it rather <the confounding factor> that explains it?\") — "
-                "with both candidate explanations named from the data. It must "
-                "motivate why a simple association is not enough (a suspected "
-                "confound, or an intervention whose effect needs isolating) — "
-                "not a generic \"what's associated with X\" framing that "
-                "`derive`/`aggregate` could already answer.\n"
-            )
-        elif self._is_pandas:
-            # skills_available is False: the account is near its daily TabPFN
-            # usage quota (see agent.py's TABPFN_USAGE_GATE_RATIO). The model
-            # isn't even told ML ops exist this call — same wording SQL
-            # always gets — and validate_plan additionally rejects any skill
-            # op that slips through regardless of this prompt (belt and
-            # braces, not just a hopeful nudge).
-            ops_statement = (
-                "- Steps must use only plain relational/aggregation operations "
-                "(filter, join, union, group, aggregate, sort, select, derive) — "
-                "machine-learning operations are not available for this batch "
-                "(the account is near its daily ML-skill usage quota).\n"
-            )
-        else:
-            ops_statement = (
-                "- Steps must use only plain relational/aggregation operations "
-                "(filter, join, union, group, aggregate, sort, select, derive) — "
-                "machine-learning operations are not available for SQL generation.\n"
-            )
+        ops_statement = (
+            "- Every step's `op` MUST be exactly one of these values — no "
+            "others are valid: filter, join, union, group, aggregate, sort, "
+            "select, derive, clean, correlate, limit, rank.\n"
+            "- Use `correlate` for a Pearson/Spearman/Kendall correlation "
+            "between 2+ numeric columns — SQL plans: `pearson` only (DuckDB's "
+            "built-in `corr()` has no native Spearman/Kendall). Never express "
+            "a correlation as `derive`/`aggregate` instead.\n"
+            "- Use `limit` to cap the number of result rows (`params.n`), "
+            "typically right after a `sort` or a `group`+`aggregate` — never "
+            "encode a row cap inside another step's `params`.\n"
+            "- Use `rank` only when the RANK POSITION ITSELF must appear as a "
+            "value in the answer (e.g. \"what rank is Brooklyn in complaint "
+            "volume\"), materializing it as a new column via `params."
+            "output_column`. If you only need the top-N rows and never need "
+            "the rank number as a value, use `sort`+`limit` instead — never "
+            "`rank`.\n"
+            "- A `join-correlation` link's `correlated_columns` (see VERIFIED "
+            "TABLE RELATIONSHIPS below) names pre-vetted columns to feed "
+            "directly into a `correlate` step's `columns` after that join.\n"
+        )
 
         return QueryPlannerPrompt().update(
             task_statement=task_statement,
@@ -1318,41 +1281,59 @@ class QueryPlanner:
             table_sample=self._render_table_sample(dfs, aliases),
             column_statistics=self._render_statistics(stats),
             detected_languages=json.dumps(list(languages), ensure_ascii=False),
+            retrievable_keywords=self._render_retrievable_keywords(retrievable_keywords),
+        )
+
+    @staticmethod
+    def _render_retrievable_keywords(retrievable_keywords: Optional[list[str]]) -> str:
+        """The "### RETRIEVABLE KEYWORDS" prompt section — empty (section
+        omitted entirely, not printed as "none") when no pre-verified set is
+        available, so older behavior (retrievability guidance alone, no
+        anchor) is unchanged for portals with no reverse index configured.
+        """
+        if not retrievable_keywords:
+            return ""
+        terms = ", ".join(f"`{kw}`" for kw in retrievable_keywords)
+        return (
+            "\n### RETRIEVABLE KEYWORDS (pre-verified — do not skip this)\n"
+            f"These exact terms — {terms} — were EMPIRICALLY VERIFIED just now "
+            "against the real reverse index: searching with them surfaces "
+            "EVERY table in TABLE ALIASES within the retrievability check's "
+            "own top-K window. This is not a guess or a suggestion, it is a "
+            "proven-working anchor. Every plan's `question` MUST weave ALL of "
+            "these terms into its own natural prose (not just list them in "
+            "`question_keywords` while the question text stays silent on "
+            "them — see the question-writing rule above: `question_keywords` "
+            "must literally appear in or be directly implied by the question "
+            "text). You may freely add other natural topical words alongside "
+            "them; you may NOT drop, paraphrase, or merge any of these terms "
+            "into a different word — a paraphrase (e.g. one merged word "
+            "instead of a real multi-word term above) is exactly what breaks "
+            "retrieval even when it means the same thing to a person.\n"
         )
 
     @staticmethod
     def _render_time_context() -> str:
         """Render the "### TIME CONTEXT" block of the planner prompt.
 
-        Gives the planner a concrete "now" plus the rule that matters for
-        `timeseries` plans: the tables' data usually ends well BEFORE the
-        current datetime, so a projection must be anchored to the data's own
-        last observed timestamp/period (visible in the table sample and column
-        statistics), never to the present day.
+        Gives the planner a concrete "now" so a question about a fixed-period
+        table (see the TEMPORAL SCOPE guidance) is phrased relative to what
+        the data actually covers, never implicitly as if it were current.
         """
         # Date-level granularity on purpose: a full timestamp changes on every
         # call and would invalidate the provider's cached prompt prefix for
         # every token that follows it; the date is stable across a whole day.
-        return (
-            f"- Current date: {datetime.now().date().isoformat()}\n"
-            "- The tables' observed data may end well before this datetime. "
-            "For any `timeseries` step, first identify the LAST "
-            "timestamp/period actually observed in the table sample and "
-            "column statistics, then frame the question's projection target "
-            "relative to THAT point: within the observed range or the "
-            "period(s) immediately following it. Never phrase a forecast "
-            "relative to the current datetime (e.g. \"next year\", \"today\", "
-            "\"upcoming months\") when the data ends earlier than it."
-        )
+        return f"- Current date: {datetime.now().date().isoformat()}\n"
 
     @staticmethod
     def _render_table_sample(dfs: Optional[Sequence[Any]], aliases: dict) -> str:
         """Render up to 10 real sample rows per table.
 
-        Grounds the planner's questions — especially a hypothetical scenario's
-        concrete predictor values — in values that actually occur in the data,
-        rather than the model inventing a plausible-sounding but nonexistent
-        one. Uses ``DataFrame.to_json`` (not a raw ``.to_dict()``) so NaN/NaT/
+        Grounds the planner's questions — especially a question naming a
+        concrete value (a real place, category, or period) — in values that
+        actually occur in the data, rather than the model inventing a
+        plausible-sounding but nonexistent one. Uses ``DataFrame.to_json``
+        (not a raw ``.to_dict()``) so NaN/NaT/
         Timestamp/numpy scalar values round-trip into plain JSON-safe types
         the same way ``StatementOrchestrator._serialize_query_output`` (in ``agent.py``) already does
         for executed query results.
@@ -1375,15 +1356,17 @@ class QueryPlanner:
     def _render_links(links: Sequence[QueryLink]) -> str:
         if not links:
             return "(no mandatory links — single table)"
-        payload = [
-            {
+        payload = []
+        for link in links:
+            entry = {
                 "type": link.type,
                 "tables": link.tables,
-                "columns": link.columns,
+                "key_columns": link.key_columns,
                 "description": link.description,
             }
-            for link in links
-        ]
+            if link.correlated_columns:
+                entry["correlated_columns"] = link.correlated_columns
+            payload.append(entry)
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
     @staticmethod
@@ -1402,10 +1385,20 @@ class QueryPlanner:
                             "dtype": c.dtype,
                             "cardinality": c.cardinality,
                             "null_ratio": round(c.null_ratio, 4),
+                            "nan_count": c.nan_count,
+                            "bad_token_counts": c.bad_token_counts,
+                            "numeric_parseable_ratio": (
+                                round(c.numeric_parseable_ratio, 4)
+                                if c.numeric_parseable_ratio is not None
+                                else None
+                            ),
                             "numeric_min": c.numeric_min,
                             "numeric_max": c.numeric_max,
                             "numeric_mean": c.numeric_mean,
+                            "numeric_outliers": c.numeric_outliers,
+                            "numeric_pinned_extreme": c.numeric_pinned_extreme,
                             "top_values": c.top_values,
+                            "minority_value_groups": c.minority_value_groups,
                         }
                         for c in table.columns
                     ],
@@ -1437,9 +1430,7 @@ class QueryPlanner:
 
         The ``table_links`` are always the mandatory constraint links — the
         model's own ``table_links`` output is discarded so the upstream
-        relationships are preserved unchanged (Requirement 6.2). For Pandas
-        plans, ``task_types`` is derived from the ordered steps (Requirement
-        5.2); SQL plans have no ``task_types`` field.
+        relationships are preserved unchanged (Requirement 6.2).
         """
         raw_plan = raw_plan or {}
         metadata = self._extract_metadata_fields(raw_plan)
@@ -1448,14 +1439,11 @@ class QueryPlanner:
 
         if self._is_pandas:
             steps = self._coerce_steps(raw_plan.get("steps", []), PandasPlanStep)
-            task_types = self._derive_task_types(steps)
-            logger.info("Selected task_types: %s", task_types if task_types else "(none)")
             return PandasQueryPlan(
                 question=str(raw_plan.get("question", "")),
                 question_keywords=self._limit_keywords(raw_plan.get("question_keywords")),
                 plan_keywords=self._limit_keywords(raw_plan.get("plan_keywords")),
                 steps=steps,
-                task_types=task_types,
                 tables=tables,
                 table_links=constraint_links,
                 **metadata,
@@ -1493,6 +1481,9 @@ class QueryPlanner:
         expected_type = str(raw_plan.get("expected_result_type", "")).strip().lower()
         if expected_type not in get_args(_RESULT_TYPES):
             expected_type = "table"
+        difficulty = str(raw_plan.get("difficulty", "")).strip().lower()
+        if difficulty not in get_args(_DIFFICULTY_LEVELS):
+            difficulty = "easy"
         return {
             "query_plan": str(raw_plan.get("query_plan", "")),
             "translated_question": str(raw_plan.get("translated_question", "")),
@@ -1502,6 +1493,7 @@ class QueryPlanner:
             "detected_language": str(raw_plan.get("detected_language", "")),
             "topic": str(raw_plan.get("topic", "")),
             "story": str(raw_plan.get("story", "")),
+            "difficulty": difficulty,
             "expected_result_type": expected_type,
             "expected_result_description": str(
                 raw_plan.get("expected_result_description", "")
@@ -1559,15 +1551,6 @@ class QueryPlanner:
             except ValidationError as exc:
                 logger.warning("Skipping invalid plan table entry %d: %s", idx, exc)
         return tables
-
-    @staticmethod
-    def _derive_task_types(steps: Sequence[Any]) -> List[str]:
-        """Distinct skill-relevant ops, in first-appearance order."""
-        seen: List[str] = []
-        for step in steps:
-            if step.op in SKILL_TASK_TYPES and step.op not in seen:
-                seen.append(step.op)
-        return seen
 
     @staticmethod
     def _limit_keywords(value: Any, limit: int = 10) -> List[str]:

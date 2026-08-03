@@ -25,9 +25,6 @@ from .prompts import (
     GenerationEnrichmentPrompt,
     QueryPlannerPrompt,
     TableAnalyzerBatchPrompt,
-    SkillUsageInstructionPrompt,
-    load_skill_section,
-    build_skill_sections,
     build_generation_prompt,
 )
 from .models import (
@@ -61,9 +58,6 @@ __all__ = [
     "GenerationEnrichmentPrompt",
     "QueryPlannerPrompt",
     "TableAnalyzerBatchPrompt",
-    "SkillUsageInstructionPrompt",
-    "load_skill_section",
-    "build_skill_sections",
     "build_generation_prompt",
     "SQLPlanStep",
     "PandasPlanStep",

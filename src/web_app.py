@@ -18,20 +18,22 @@ import math
 import os
 import traceback
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
 from conf import load_config
-from orqa.benchmark.questions import META_KEY, iter_questions
+from orqa.benchmark.index import load_index
+from orqa.benchmark.questions import META_KEY, iter_questions, match_plan_feedback
 from orqa.embedding_discovery.clustering import compute_cluster_projection, save_cluster_projection
 from orqa.queries.query_execution import QueryExecutor
 from orqa.utils import load_json
@@ -115,26 +117,20 @@ def _get_source_or_404(source: str) -> SourceEntry:
     return entry
 
 
+# Built lazily (first keyword-search request per source), not at startup like
+# _SOURCES: an index needs the metadata already crawled/indexed and, for the
+# elasticsearch backend, a reachable cluster — neither should block the app
+# from serving everything else when they're not there yet.
+_INDEX_CACHE: dict[str, Any] = {}
+
+
+def _get_index(source: str, cfg) -> Optional[Any]:
+    if source not in _INDEX_CACHE:
+        _INDEX_CACHE[source] = load_index(cfg)
+    return _INDEX_CACHE[source]
+
+
 # ── Queries file reading ──────────────────────────────────────────────────────
-
-
-def _match_plan_feedback(meta: dict, question: str) -> dict | None:
-    """The plan-judge history whose (final) question produced this query.
-
-    ``_meta.result_extra.plan_feedback`` holds one entry per PLAN in the
-    generation run; a query descends from exactly one of them. Matched on
-    the question text of the entry itself or of any of its attempts (the
-    question may have been rewritten across correction rounds — the query
-    carries the FINAL wording, which the last attempt also carries).
-    """
-    feedback = ((meta.get("result_extra") or {}).get("plan_feedback")) or []
-    for entry in feedback:
-        if entry.get("question") == question:
-            return entry
-        for att in entry.get("attempts") or []:
-            if att.get("question") == question:
-                return entry
-    return None
 
 
 def _query_status(q: dict) -> str:
@@ -157,7 +153,7 @@ def _read_queries(cfg) -> list[dict]:
     items: list[dict] = []
     for kind_key in data:
         for section, entry_key, qnum, q, meta in iter_questions(data, kind_key):
-            plan_fb = _match_plan_feedback(meta or {}, q.get("question", ""))
+            plan_fb = match_plan_feedback(meta or {}, q.get("question", ""))
             plan_attempts = (plan_fb or {}).get("attempts") or []
             # The plan the query was ultimately generated from — the last
             # attempt's proposal (earlier ones were revised away).
@@ -169,6 +165,7 @@ def _read_queries(cfg) -> list[dict]:
                     "entry_key": entry_key,
                     "qnum": qnum,
                     "question": q.get("question", ""),
+                    "question_keywords": q.get("question_keywords") or [],
                     "difficulty": q.get("difficulty", ""),
                     "code": q.get("code", ""),
                     "topic": q.get("topic", ""),
@@ -216,6 +213,7 @@ def _finalize_rates(buckets: dict) -> dict:
         }
         for k, v in sorted(buckets.items())
     }
+
 
 
 def _compute_stats(items: list[dict]) -> dict:
@@ -446,15 +444,46 @@ def _read_clusters(cfg) -> dict:
 
 
 def _json_safe(v):
-    """A cell value the browser's JSON parser will accept."""
+    """A cell value the browser's JSON parser will accept.
+
+    Executed query results aren't always plain Python scalars: a
+    ``number``-typed plan's aggregate is usually a numpy scalar (``.sum()``/
+    ``.mean()`` return ``np.int64``/``np.float64``/``np.bool_``, none of
+    which are instances of the Python types they resemble — a plain
+    ``isinstance(v, (int, float, bool, str))`` check misses all three and
+    used to fall through to ``str(v)``, silently turning a numeric result
+    into a JSON string), and a ``list``-typed plan's per-group aggregation
+    (e.g. ``df.groupby(...).apply(list)``) puts an actual Python
+    list/ndarray in a DataFrame cell. ``pd.isna()`` on one of those returns
+    an elementwise array rather than a single bool, so calling it inside an
+    ``if`` used to crash the whole export with "the truth value of an array
+    is ambiguous" instead of ever reaching the fallback.
+    """
     if v is None:
         return None
-    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-        return None
-    if isinstance(v, (int, float, bool, str)):
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.bool_):
+        return bool(v)
+    if isinstance(v, (float, np.floating)):
+        f = float(v)
+        return None if (math.isnan(f) or math.isinf(f)) else f
+    if isinstance(v, (int, bool, str)):
         return v
-    if pd.isna(v):
-        return None
+    if isinstance(v, (list, tuple, set, np.ndarray)):
+        return [_json_safe(x) for x in list(v)]
+    if isinstance(v, dict):
+        return {str(k): _json_safe(x) for k, x in v.items()}
+    if isinstance(v, (pd.Timestamp, datetime, date)):
+        try:
+            return None if pd.isna(v) else v.isoformat()
+        except TypeError:
+            return v.isoformat()
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
     return str(v)
 
 
@@ -540,12 +569,45 @@ def get_clusters(source: str) -> dict:
     return _read_clusters(entry.cfg)
 
 
+@app.get("/api/keyword-search/{source}")
+def keyword_search(
+    source: str,
+    keywords: list[str] = Query(...),
+    num_tables: int = 1,
+) -> dict:
+    """Reverse-index search for the "Search Index" play button on a query's
+    detail view: same ``DatasetIndex``/``ESDatasetIndex`` the plan judge's
+    keyword-searchability check runs (see
+    ``orqa.agent.utility.keyword_searchability``), exposed here so a human
+    can re-run the exact same retrieval by hand for one query's
+    ``question_keywords`` and see which tables actually come back.
+
+    ``num_tables`` (the query's own table count, from the caller) drives the
+    SAME adaptive top-K the gate itself used —
+    ``round(num_tables * keyword_search_top_k_coefficient)`` — rather than a
+    fixed K, so this manual re-run matches exactly what the plan judge saw
+    for this query rather than a different, unrelated constant.
+
+    Sync ``def`` (threadpool): the elasticsearch backend does network I/O.
+    """
+    entry = _get_source_or_404(source)
+    index = _get_index(source, entry.cfg)
+    top_k = max(
+        1,
+        round(max(1, num_tables) * entry.cfg.mcp_search.keyword_search_top_k_coefficient),
+    )
+    if index is None:
+        return {"available": False, "results": [], "top_k": top_k}
+    results = index.search(keywords, top_k=top_k)
+    return {"available": True, "results": [r.to_dict() for r in results], "top_k": top_k}
+
+
 @app.post("/api/execute/{source}/{kind}/{entry_key}/{qnum}")
 def execute_query(source: str, kind: str, entry_key: str, qnum: str) -> dict:
     """Re-execute one stored query against the real datasets.
 
     Sync ``def`` on purpose: FastAPI runs it on the threadpool, so a long
-    pandas/TabPFN execution never blocks the event loop. Read-only with
+    pandas execution never blocks the event loop. Read-only with
     respect to the queries file — nothing is written back.
     """
     entry = _get_source_or_404(source)
@@ -565,18 +627,21 @@ def execute_query(source: str, kind: str, entry_key: str, qnum: str) -> dict:
             status_code=404, detail=f"Query {kind}/{entry_key}/{qnum} not found"
         )
 
-    executor = QueryExecutor(
-        cfg.datasets_path,
-        bad_tokens=list(getattr(cfg.statement_generation, "bad_tokens", []) or []),
-    )
+    executor = QueryExecutor(cfg.datasets_path)
     try:
         frame = executor.execute({"tables": (meta or {}).get("tables", {})}, query, kind)
+        if frame is None:
+            return {"ok": False, "error": "Execution returned no result."}
+        result = _serialize_frame(frame)
     except Exception as exc:
+        # Covers both execution errors AND serialization errors (an
+        # unexpected cell type _json_safe doesn't know how to handle) —
+        # either way the UI gets a graceful "execution failed" message
+        # instead of an unhandled 500 with no body the frontend can parse.
         return {
             "ok": False,
             "error": f"{type(exc).__name__}: {exc}",
             "trace": traceback.format_exc(limit=4),
         }
-    if frame is None:
-        return {"ok": False, "error": "Execution returned no result."}
-    return {"ok": True, "result": _serialize_frame(frame)}
+    return {"ok": True, "result": result}
+

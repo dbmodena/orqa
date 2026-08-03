@@ -40,7 +40,6 @@ class ErrorFormatter:
         story: str = "",
         code: str = "",
         tables: list = None,
-        skill_sections: list[str] | None = None,
     ) -> str:
         """Format a single query as a JSON block (matching the Query Pydantic schema)
         followed by its errors/feedback.
@@ -56,12 +55,6 @@ class ErrorFormatter:
         correction prompt instructs the model to regenerate all of them
         together if it rewrites ``question``, and to return them unchanged
         otherwise.
-
-        ``skill_sections`` (when the query was originally bound to an ML skill —
-        see ``prompting.build_skill_sections``, shared with the generation
-        prompt) is rendered right after the query JSON, before the errors, so a
-        correction cycle re-sees the exact skill pattern the query is supposed
-        to follow and doesn't silently drop it while fixing something else.
         """
         # --- Build the query JSON object (mirrors Query Pydantic schema) ---
         # Normalise tables into the Table schema shape regardless of how they
@@ -101,25 +94,9 @@ class ErrorFormatter:
         if not error_lines:
             error_lines.append("[No errors]")
 
-        # --- Re-inject the skill this query is bound to, if any -----------
-        # Without this, a correction cycle only ever sees the base schema —
-        # the skill's documented pattern (e.g. TabPFNRegressor) was shown only
-        # once, at initial generation, and would otherwise be silently lost
-        # the moment the LLM "fixes" an unrelated error.
-        skill_block = ""
-        if skill_sections:
-            skill_block = (
-                "\nThis query MUST keep using the following skill's documented "
-                "pattern in your correction — do not replace it with a plain "
-                "pandas/sklearn approximation:\n\n"
-                + "\n\n".join(skill_sections)
-                + "\n"
-            )
-
         return (
             f"--- Query #{query_id} ---\n"
-            f"{query_json}\n"
-            f"{skill_block}\n"
+            f"{query_json}\n\n"
             + "\n".join(error_lines)
         )
 
@@ -140,7 +117,6 @@ class ErrorFormatter:
                 story=entry.get("story", ""),
                 code=entry.get("code", ""),
                 tables=entry.get("tables"),
-                skill_sections=entry.get("skill_sections"),
             )
             sections.append(formatted)
 

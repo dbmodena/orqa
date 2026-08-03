@@ -6,6 +6,21 @@ import os
 import yaml
 
 
+def _coerce_bool(value, field_name: str) -> bool:
+    """Coerce a yaml-sourced value (bool, truthy/falsy string, or 0/1) to bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if value.lower() in ("true", "1", "yes"):
+            return True
+        if value.lower() in ("false", "0", "no"):
+            return False
+        raise ValueError(f"{field_name} must be a bool, got string '{value}'")
+    if isinstance(value, (int, float)):
+        return bool(value)
+    raise TypeError(f"{field_name} must be a bool, got {type(value).__name__}")
+
+
 @dataclass
 class PolarsOpts:
     read: dict = field(
@@ -241,7 +256,11 @@ class StatementGeneration:
     # Path where the generated queries will reside
     queries_path: Path
 
-    # list of bad values in order to prefilter on query generation
+    # Per-portal missing-value sentinel literals (e.g. "n/a", "not available",
+    # "(null)") derived from blend.clean_args.bad_tokens. No longer applied
+    # automatically at load time — used only to compute per-column bad-token
+    # counts (see ColumnStatistics.compute) shown to the query planner, which
+    # decides for itself whether/how to clean a column via a `clean` plan step.
     bad_tokens: list
 
     # max number of tokens per natural languange response
@@ -254,6 +273,13 @@ class StatementGeneration:
     enable_single_table: bool = False
     # Number of queries to generate per single table (None = fall back to cross-table count)
     single_table_query_count: Optional[int] = None
+    # Cap on how many cross-table candidate matches get processed for
+    # multi-table query generation (None = process every match in
+    # query_candidates(.json), i.e. no cap — the pre-existing behavior).
+    # When set, a seeded random sample of this many matches is used, same
+    # sampling idiom as single_table_query_count's dataset sampling, so
+    # runs (and sibling workflows sharing the yaml seed) are reproducible.
+    multi_table_query_count: Optional[int] = None
 
     @property
     def target_language(self) -> str:
@@ -265,23 +291,9 @@ class StatementGeneration:
         return (self.detected_languages or ["English"])[0]
 
     def __post_init__(self):
-        # Validate enable_single_table is a bool, coerce common truthy/falsy values
-        if not isinstance(self.enable_single_table, bool):
-            if isinstance(self.enable_single_table, str):
-                if self.enable_single_table.lower() in ("true", "1", "yes"):
-                    self.enable_single_table = True
-                elif self.enable_single_table.lower() in ("false", "0", "no"):
-                    self.enable_single_table = False
-                else:
-                    raise ValueError(
-                        f"enable_single_table must be a bool, got string '{self.enable_single_table}'"
-                    )
-            elif isinstance(self.enable_single_table, (int, float)):
-                self.enable_single_table = bool(self.enable_single_table)
-            else:
-                raise TypeError(
-                    f"enable_single_table must be a bool, got {type(self.enable_single_table).__name__}"
-                )
+        self.enable_single_table = _coerce_bool(
+            self.enable_single_table, "enable_single_table"
+        )
 
         # Validate single_table_query_count is a positive int or None
         if self.single_table_query_count is not None:
@@ -293,6 +305,18 @@ class StatementGeneration:
             if self.single_table_query_count <= 0:
                 raise ValueError(
                     f"single_table_query_count must be a positive int, got {self.single_table_query_count}"
+                )
+
+        # Validate multi_table_query_count is a positive int or None
+        if self.multi_table_query_count is not None:
+            if not isinstance(self.multi_table_query_count, int) or isinstance(self.multi_table_query_count, bool):
+                raise TypeError(
+                    f"multi_table_query_count must be a positive int or None, "
+                    f"got {type(self.multi_table_query_count).__name__}"
+                )
+            if self.multi_table_query_count <= 0:
+                raise ValueError(
+                    f"multi_table_query_count must be a positive int, got {self.multi_table_query_count}"
                 )
 
 
@@ -321,12 +345,88 @@ class MCPSearch:
     # ELASTICSEARCH_URL env variable, when set, takes precedence.
     elasticsearch_url: str
 
+    # Adaptive K for the plan judge's keyword-searchability check (see
+    # orqa.agent.utility.keyword_searchability.check_keyword_searchability):
+    # each plan's own K = round(len(plan_tables) * this coefficient), so a
+    # plan joining more tables is held to a wider top-K net than a
+    # single-table one, rather than every plan sharing one fixed K.
+    keyword_search_top_k_coefficient: float = 5.0
+
+    # Whether the PRE-planning retrievability check (see
+    # orqa.agent.utility.keyword_suggestion.suggest_retrievable_keywords,
+    # run once per table group before any LLM call) is allowed to ABORT a
+    # group as "unretrievable_group" when no keyword combination can
+    # surface every table within top-K. False (the default) still runs the
+    # check and still hands the planner a verified keyword anchor when one
+    # is found — only the abort-on-failure half is disabled, so a group
+    # that can't be resolved just proceeds to planning without an anchor
+    # (the old behavior) instead of being skipped outright.
+    gate_unretrievable_groups: bool = False
+
+    # Master on/off switch for the retrieval gate as a whole — BOTH the
+    # PRE-planning keyword combination/suggestion check
+    # (suggest_retrievable_keywords, above) AND the plan judge's reactive
+    # keyword-searchability layer (check_keyword_searchability, applied per
+    # plan in StatementOrchestrator._judge_plans). True (the default)
+    # preserves today's behavior: whenever a reverse index is configured,
+    # both mechanisms run. False disables both outright, regardless of
+    # whether an index is otherwise available — StatementOrchestrator
+    # implements this by treating its search index as unset (both
+    # mechanisms already no-op to an automatic pass when the index is
+    # None, so no other code path needs to change). Independent of
+    # gate_unretrievable_groups above, which only controls whether a
+    # PRE-planning miss aborts the group — that flag is meaningless once
+    # this one is False, since the check it gates never runs at all.
+    retrieval_gate_enabled: bool = True
+
     # Name of the per-city Elasticsearch index, derived from the data path
     es_index_name: str = field(init=False)
 
     # Where the materialized index is stored (builtin backend only)
     index_path: Path = field(init=False)
     index_filepath: Path = field(init=False)
+
+    def __post_init__(self):
+        self.gate_unretrievable_groups = _coerce_bool(
+            self.gate_unretrievable_groups, "gate_unretrievable_groups"
+        )
+        self.retrieval_gate_enabled = _coerce_bool(
+            self.retrieval_gate_enabled, "retrieval_gate_enabled"
+        )
+
+
+# How many judges each panel mode resolves to — the only two values a
+# JudgePanel's judge_count is ever constructed with. "trio" caps at 3 even
+# if judge_profiles.<panel> lists more (e.g. future failover profiles); a
+# panel configured with fewer than the requested count simply uses however
+# many it has (JudgePanel does no padding).
+JUDGE_MODE_COUNTS: dict[str, int] = {"mono": 1, "trio": 3}
+
+
+@dataclass
+class Judges:
+    """How many judges vote in each panel (see
+    ``orqa.agent.agents.JudgePanel``) — independent of ``judge_profiles.plan``/
+    ``judge_profiles.code`` in the LLM yaml, which lists the CANDIDATE judge
+    models; this only caps how many of them are actually used per run.
+    ``"mono"`` uses just the first configured judge (a single verdict, no
+    voting); ``"trio"`` uses the first three (majority vote). Aggregation
+    itself is generic over N (see JudgePanel._aggregate), so either mode
+    works mechanically — "mono" is a deliberate quality/cost trade-off, not
+    a degraded fallback.
+    """
+
+    plan_mode: Literal["mono", "trio"] = "trio"
+    code_mode: Literal["mono", "trio"] = "trio"
+
+    def __post_init__(self):
+        for field_name in ("plan_mode", "code_mode"):
+            value = getattr(self, field_name)
+            if value not in JUDGE_MODE_COUNTS:
+                raise ValueError(
+                    f"tasks.judges.{field_name} must be one of "
+                    f"{sorted(JUDGE_MODE_COUNTS)}, got {value!r}"
+                )
 
 
 @dataclass
@@ -337,6 +437,7 @@ class OrQAConfig:
     candidates_discovery: CandidatesDiscovery
     statement_generation: StatementGeneration
     mcp_search: MCPSearch
+    judges: Judges
 
     # Classical (BLEND) pipeline configuration; None when the workflow yaml
     # omits the blend/indexing blocks (semantic-only setups).
@@ -368,11 +469,6 @@ class OrQAConfig:
     # but in the configuration directory already present
     # in the repository
     prompts_path: Path = field(init=False)
-
-    # Where the per-task-type ML skill markdowns are stored
-    # (classification.md, regression.md, ...). Same as prompts_path:
-    # not under data_path, but in the repository's configuration directory.
-    skills_path: Path = field(init=False)
 
     # Where the LiteLLM and other LLM-related config things
     # are kept
@@ -426,11 +522,9 @@ class OrQAConfig:
 
         self.logging_path = self.data_path / "log"
         self.prompts_path = Path(os.environ["ORQA_CONF"]) / "prompts"
-        self.skills_path = Path(os.environ["ORQA_CONF"]) / "skills"
         self.llm_config_path =  Path(os.environ["ORQA_CONF"]) / "llm"
         self.statistics_path = self.data_path / "statistics"
         assert self.prompts_path.exists()
-        assert self.skills_path.exists()
         self.pandas_opts = PandasOpts()
         self.polars_opts = PolarsOpts()
 
@@ -463,9 +557,6 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
 
     # gets the type of queries we want to generate
     kind = parsed["tasks"]["query_generation"]["kind"]
-
-    # gets the list of bad tokens
-    bad_tokens = parsed["tasks"]["query_generation"]["bad_tokens"]
 
     # max number of natural language response tokens
     max_response_tokens = parsed["tasks"]["query_generation"]["max_response_tokens"]
@@ -513,6 +604,19 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         )
         blend_opts = BLENDOpts(**parsed["blend"])
 
+    # Derive the missing-value sentinel list shown to the query planner from
+    # BLEND's cleaning tokens, excluding the tail of low-signal-but-VALID
+    # values BLEND also filters for indexing purposes only (real data, not
+    # missing-value indicators — e.g. "0"/"yes"/"no" are legitimate answers).
+    _BLEND_LOW_SIGNAL_TOKENS = {"0", "0.0", "1", "2", "no", "yes", "ny"}
+    blend_bad_tokens = list(
+        parsed.get("blend", {}).get("clean_args", {}).get("bad_tokens", [])
+    )
+    bad_tokens = [
+        t for t in blend_bad_tokens
+        if str(t).strip().lower() not in _BLEND_LOW_SIGNAL_TOKENS
+    ]
+
     # setup the Candidates Discovery step
     candidates_discovery_task = parsed["tasks"]["candidates_discovery"]
     cand_disc_directory = data_path / "candidates_discovery"
@@ -559,6 +663,9 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     single_table_query_count = parsed["tasks"]["query_generation"].get(
         "single_table_query_count", None
     )
+    multi_table_query_count = parsed["tasks"]["query_generation"].get(
+        "multi_table_query_count", None
+    )
     detected_languages  = parsed["tasks"]["query_generation"].get(
         "languages", ["English"]
     )
@@ -571,6 +678,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         detected_languages=detected_languages,
         enable_single_table=enable_single_table,
         single_table_query_count=single_table_query_count,
+        multi_table_query_count=multi_table_query_count,
     )
 
     # setup the MCP dataset-search server (port comes from the
@@ -589,6 +697,24 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         elasticsearch_url=str(
             mcp_search_task.get("elasticsearch_url", "http://localhost:9200")
         ),
+        keyword_search_top_k_coefficient=float(
+            mcp_search_task.get("keyword_search_top_k_coefficient", 5.0)
+        ),
+        gate_unretrievable_groups=mcp_search_task.get(
+            "gate_unretrievable_groups", False
+        ),
+        retrieval_gate_enabled=mcp_search_task.get(
+            "retrieval_gate_enabled", True
+        ),
+    )
+
+    # How many judges vote on each plan/code panel (see JudgePanel) — the
+    # judge_profiles.plan/code lists in the LLM yaml stay the pool of
+    # CANDIDATE models; this only caps how many of them are used per run.
+    judges_task = parsed["tasks"].get("judges") or {}
+    judges = Judges(
+        plan_mode=judges_task.get("plan_mode", "trio"),
+        code_mode=judges_task.get("code_mode", "trio"),
     )
 
     cleaning_task = parsed["tasks"].get("cleaning", {})
@@ -625,6 +751,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         candidates_discovery=candidates_discovery,
         statement_generation=statement_generation,
         mcp_search=mcp_search,
+        judges=judges,
         filter_filenames_patterns=filter_filenames_patterns,
         filter_column_patterns=filter_column_patterns,
         try_separators=try_separators,
