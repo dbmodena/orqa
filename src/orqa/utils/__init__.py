@@ -28,11 +28,24 @@ PANDAS_KEYWORDS = {
 }
 
 
+def _pl_csv_opts_with_sniffed_separator(dataset_path: Path, opts: dict) -> dict:
+    """Merge in a sniffed delimiter for Polars' CSV reader, unless the caller
+    already pinned one — Polars (unlike pandas' sep=None) has no built-in
+    auto-detection, so without this every non-comma-delimited file (common
+    on EU open-data portals) silently mis-parses into a single column."""
+    csv_defaults = {"infer_schema_length": None}
+    csv_opts = {**csv_defaults, **opts.get("csv", {})}
+    if "separator" not in csv_opts:
+        sniffed = _sniff_csv_separator(dataset_path)
+        if sniffed is not None:
+            csv_opts["separator"] = sniffed
+    return csv_opts
+
+
 def pl_read_dataset(dataset_path: Path, opts: dict = {}) -> pl.DataFrame:
     match dataset_path.suffix:
         case ".csv":
-            csv_defaults = {"infer_schema_length": None}
-            csv_opts = {**csv_defaults, **opts.get("csv", {})}
+            csv_opts = _pl_csv_opts_with_sniffed_separator(dataset_path, opts)
             return pl.read_csv(dataset_path, **csv_opts)
         case ".parquet":
             return pl.read_parquet(dataset_path, **opts.get("parquet", {}))
@@ -45,8 +58,7 @@ def pl_read_dataset(dataset_path: Path, opts: dict = {}) -> pl.DataFrame:
 def pl_scan_dataset(dataset_path: Path, opts: dict = {}) -> pl.LazyFrame:
     match dataset_path.suffix:
         case ".csv":
-            csv_defaults = {"infer_schema_length": None}
-            csv_opts = {**csv_defaults, **opts.get("csv", {})}
+            csv_opts = _pl_csv_opts_with_sniffed_separator(dataset_path, opts)
             return pl.scan_csv(dataset_path, **csv_opts)
         case ".parquet":
             return pl.scan_parquet(dataset_path, **opts.get("parquet", {}))
@@ -296,10 +308,33 @@ def load_dataset_info(
     return info, column_typings
 
 
+def _sniff_csv_separator(dataset_path: Path, sample_bytes: int = 65_536) -> Optional[str]:
+    """Cheaply detect a CSV's delimiter from a small leading sample via
+    ``csv.Sniffer``, so the full read below can stay on pandas' fast C
+    engine with an explicit ``sep`` instead of paying for ``sep=None`` +
+    ``engine="python"`` auto-detection over the WHOLE file — some datasets
+    in this corpus run to 100+MB, where the python engine is markedly
+    slower. Returns ``None`` (caller falls back to pandas' comma default)
+    when the sample is too ambiguous to call (e.g. a single-column file).
+    """
+    import csv as _csv
+    try:
+        with open(dataset_path, "r", encoding="utf-8", errors="replace") as f:
+            sample = f.read(sample_bytes)
+        return _csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+    except (_csv.Error, OSError, UnicodeDecodeError):
+        return None
+
+
 def pd_read_dataset(dataset_path: Path, opts: dict = {}) -> pd.DataFrame:
     match dataset_path.suffix:
         case ".csv":
-            return pd.read_csv(dataset_path, **opts.get("csv", {}))
+            csv_opts = dict(opts.get("csv", {}))
+            if "sep" not in csv_opts and "delimiter" not in csv_opts:
+                sniffed = _sniff_csv_separator(dataset_path)
+                if sniffed is not None:
+                    csv_opts["sep"] = sniffed
+            return pd.read_csv(dataset_path, **csv_opts)
         case ".parquet":
             return pd.read_parquet(dataset_path, **opts.get("parquet", {}))
         case _:
@@ -334,36 +369,23 @@ def prepare_dataframe(df: pd.DataFrame, alias: str, logger=None) -> pd.DataFrame
 
 import re
 
-def _is_valid_column_name(col) -> bool:
+def _is_usable_column_label(col) -> bool:
     """
-    Returns False if the column name:
-    - is a numeric type (int, float, complex)
-    - is purely numeric when represented as a string
-    - contains characters illegal in SQL identifiers or pandas query strings
+    Returns False only if the column name is unusable outright: blank or
+    whitespace-only after stripping — there's no meaningful way to label,
+    show, or reference such a column, so it's dropped.
+
+    Everything else is kept, INCLUDING names that aren't safe to reference
+    as a bare SQL/pandas identifier: purely numeric strings ("2023"), names
+    with spaces/punctuation/non-ASCII characters, or names matching a SQL
+    reserved word (e.g. "from", "group", "limit"). DuckDB and pandas accept
+    any string as a column label — such names just require a quoted/bracketed
+    reference (`"col name"` in SQL, `df["col name"]` in pandas) instead of a
+    bare identifier, which is enforced via the statement-generation prompts
+    and SQLValidator's unquoted-special-column check, not by dropping the
+    column here.
     """
-    # Reject actual numeric types (can occur with parquet/Excel column labels)
-    if isinstance(col, (int, float, complex)):
-        return False
-
-    stripped = str(col).strip()
-
-    # Discard purely numeric string representations (e.g. "0", "123", "3.14")
-    try:
-        float(stripped)
-        return False
-    except ValueError:
-        pass
-
-    # Must start with a letter or underscore (SQL/pandas identifier rule)
-    if not re.match(r'^[A-Za-z_]', stripped):
-        return False
-
-    # Discard names containing characters illegal in SQL/pandas identifiers
-    # Allowed: letters, digits, underscores
-    if re.search(r'[^\w]', stripped, re.ASCII):
-        return False
-
-    return True
+    return str(col).strip() != ""
 
 
 def _strip_numeric_formatting(series: "pd.Series") -> "pd.Series":
@@ -420,10 +442,14 @@ def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     specifically so those two call sites can never silently diverge again
     (see ``QueryExecutor``'s docstring for the history of that happening).
 
-    Drops illegally/purely-numerically named columns only (never valid
-    Python identifiers or SQL columns, so generated code can't reference
-    them anyway) — a structural requirement, not a data-quality judgment
-    call. It deliberately does NOT touch cell values anymore: no bad-token
+    Stringifies non-string column labels (int/float/complex — can occur with
+    parquet/Excel sources) rather than dropping them, then drops only blank/
+    whitespace-only labels (see ``_is_usable_column_label``) — columns with
+    spaces, punctuation, non-ASCII characters, purely-numeric names, or SQL
+    reserved words are kept as-is; generated code references them via a
+    quoted/bracketed identifier instead of a bare one (see the
+    statement-generation prompts and ``SQLValidator``'s unquoted-special-
+    column check). It deliberately does NOT touch cell values: no bad-token
     conversion, no numeric coercion, no null handling — those are now
     decisions the query planner makes explicitly (see the ``clean`` plan
     op), informed by the raw per-column statistics ``ColumnStatistics``
@@ -431,7 +457,8 @@ def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     prompt-size concern specific to the analysis view, never safe to apply
     at execution time (see ``QueryExecutor``).
     """
-    valid_columns = [c for c in df.columns if _is_valid_column_name(c)]
+    df = df.rename(columns={c: str(c) for c in df.columns if not isinstance(c, str)})
+    valid_columns = [c for c in df.columns if _is_usable_column_label(c)]
     return df[valid_columns]
 
 

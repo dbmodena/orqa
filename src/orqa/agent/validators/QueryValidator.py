@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple, Any
 import difflib
-import json
 import logging
 import math
 import pickle
@@ -514,7 +513,7 @@ class QueryValidator(ABC):
     # ------------------------------------------------------------------
     # Main validation loop
     # ------------------------------------------------------------------
-    def validate_queries(self, result: Dict) -> Tuple[bool, Dict, Dict]:
+    def validate_queries(self, result: Dict) -> Tuple[bool, Dict, Dict, List[str]]:
         all_valid = True
 
         # Sanitize table names early so downstream methods receive valid identifiers
@@ -571,9 +570,13 @@ class QueryValidator(ABC):
                 self.validation_errors.append({"query": actual_query, "error": f"{type(e).__name__}: {error_msg}"})
                 self.errors.append(f"Error {type(e).__name__}: {error_msg}")
 
-        if all_valid:
-            return True, {}, self.good_queries, self.errors
-        return False, self._build_feedback(), self.good_queries, self.errors
+        # The second element is a legacy placeholder: no caller consumes it
+        # (StatementValidator._run_static_validator discards it into
+        # `_conv_errors` and builds its own per-query correction prompts from
+        # `self.errors`/`self.validation_errors` instead — see ErrorFormatter,
+        # which corrects exactly one query per call with no cross-query
+        # batching). Kept only so the 4-tuple return shape doesn't change.
+        return all_valid, {}, self.good_queries, self.errors
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -683,12 +686,18 @@ class QueryValidator(ABC):
                 # code references that exist but were not declared are added
                 # to columns_involved so the saved metadata stays truthful.
                 if code:
-                    referenced = set(
-                        re.findall(r"['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]", code)
-                    )
+                    # Check membership directly against each real column name
+                    # (quoted form found in the code) rather than extracting
+                    # "identifier-shaped" tokens from quotes: a column with
+                    # spaces/punctuation/non-ASCII characters or a purely
+                    # numeric name (see utils.clean_columns — these are no
+                    # longer dropped) never matches `[A-Za-z_][A-Za-z0-9_]*`,
+                    # so the old token-extraction regex silently never
+                    # detected such a column as "used", even when the code
+                    # correctly referenced it in quotes.
                     undeclared = [
                         c for c in dataframe.columns
-                        if c in referenced and c not in cols
+                        if c not in cols and (f"'{c}'" in code or f'"{c}"' in code)
                     ]
                     if undeclared:
                         table["columns_involved"] = list(cols) + undeclared
@@ -724,18 +733,27 @@ class QueryValidator(ABC):
         return False
 
     def _check_table_usage(self, query_text: str, table_names: list[str] | None = None) -> bool:
+        # Word-boundary match, not plain substring: a bare `in` check treats
+        # "Table_1" as "used" whenever "Table_10" (or a sanitizer collision
+        # suffix like "Table_0_2") appears in the query, letting a query that
+        # never actually joins "Table_1" pass the all-tables-used check.
         names = table_names if table_names is not None else self.table_names
         if len(names) == 1:
-            if names[0] in query_text:
+            if re.search(rf'\b{re.escape(names[0])}\b', query_text):
                 return True
             self.unused_tables = {names[0]}
             return False
-        self.unused_tables = {t for t in names if t not in query_text}
+        self.unused_tables = {
+            t for t in names if not re.search(rf'\b{re.escape(t)}\b', query_text)
+        }
         return len(self.unused_tables) == 0
 
     def _check_table_names_in_question(self, question: str) -> bool:
         question_lower = question.lower()
-        found = {t for t in self.table_names if t.lower() in question_lower}
+        found = {
+            t for t in self.table_names
+            if re.search(rf'\b{re.escape(t.lower())}\b', question_lower)
+        }
         self.unused_tables = set(self.table_names) - found
         return len(found) > 0
 
@@ -884,73 +902,3 @@ class QueryValidator(ABC):
         truncated = raw_msg[:200] if len(raw_msg) > 200 else raw_msg
         return f"{type_name}: {truncated}"
 
-    def _find_repeated_errors(self, error_texts: list) -> list:
-        rules = []
-        checked = set()
-        patterns = [
-            (
-                "str.lower() on literal",
-                lambda e: "was called on a string literal" in e,
-                "NEVER call .str.lower() on a quoted string. Use DataFrame['col'].str.lower(). "
-                "Normalise via .assign(_key=Table_X['col'].str.lower()) before merge, then on='_key'."
-            ),
-            (
-                "stale Series in chained merge",
-                lambda e: "stale series" in e.lower() or ("stale" in e.lower() and "left_on" in e.lower()),
-                "NEVER use Table_X['col'] as left_on/right_on after a prior .merge(). "
-                "Normalise ALL keys with .assign() before the chain."
-            ),
-            (
-                "merge() with no keys",
-                lambda e: "no join keys" in e.lower(),
-                "Always specify on=, left_on=, or right_on= in every .merge() call."
-            ),
-            (
-                "NameError: merge not defined",
-                lambda e: "name 'merge' is not defined" in e,
-                "Use Table_A.merge(Table_B, ...) — not bare merge(...)."
-            ),
-            (
-                "duplicate suffixes",
-                lambda e: "duplicate columns" in e.lower() and "suffixes" in e.lower(),
-                "Suffixes must be unique across ALL merge steps: ('_T1','_T2'), ('_T12','_T3'), etc."
-            ),
-            (
-                "missing tables",
-                lambda e: "must reference all provided tables" in e.lower(),
-                "Every query MUST join ALL provided tables — none can be omitted."
-            ),
-            (
-                "disjoint sub-queries",
-                lambda e: "disjoint query" in e.lower(),
-                "All table groups must form ONE connected result via merge/join/concat — no parallel chains."
-            ),
-        ]
-        for label, matcher, rule in patterns:
-            count = sum(1 for e in error_texts if matcher(e))
-            if count >= 2 and label not in checked:
-                rules.append(f"[repeated {count}x] {rule}")
-                checked.add(label)
-        return rules
-
-    def _build_feedback(self) -> list:
-        feedback_lines = [
-            f"Invalid {self._get_language_name()} queries — fix the ones listed below:\n",
-        ]
-        queries = {"queries": []}
-
-        repeated = self._find_repeated_errors([err["error"] for err in self.validation_errors])
-        if repeated:
-            feedback_lines.insert(0,
-                "RECURRING MISTAKES — apply to ALL queries before fixing:\n"
-                + "\n".join(f"  * {r}" for r in repeated) + "\n"
-            )
-
-        for idx, err in enumerate(self.validation_errors, start=1):
-            queries["queries"].append(err["query"])
-            feedback_lines.append(f"Query {idx}:\n{err['error']}\n")
-
-        return [
-            {"role": "system", "content": json.dumps(queries, indent=2)},
-            {"role": "user",   "content": "\n".join(feedback_lines)},
-        ]

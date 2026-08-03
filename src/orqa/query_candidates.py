@@ -20,7 +20,7 @@ from conf import OrQAConfig
 
 from .graph import matches_graph
 from .schema_matching.valentine_matcher import THRESHOLD as SCHEMA_MATCH_THRESHOLD
-from .utils import save_json
+from .utils import save_json, pd_read_dataset
 from .utils.pipeline_logger import PipelineLogger
 
 # Rows read per table: enough to judge dtypes for the case-insensitive
@@ -283,7 +283,9 @@ def process_group(group: dict, tasks: dict, csv_folder: Path) -> dict | None:
     dfs: dict[str, pd.DataFrame] = {}
     for alias, dataset in aliases.items():
         try:
-            dfs[alias] = pd.read_csv(csv_folder / f"{dataset}.csv", nrows=GROUP_TABLE_NROWS)
+            dfs[alias] = pd_read_dataset(
+                csv_folder / f"{dataset}.csv", opts={"csv": {"nrows": GROUP_TABLE_NROWS}}
+            )
         except Exception as exc:
             log.group_filtered(list(aliases.values()), f"could not read {dataset}.csv ({exc})")
             return None

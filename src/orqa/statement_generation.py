@@ -13,7 +13,7 @@ from .agent.agents.StatementAgent import StatementAgent
 from .agent.agents.SingleStatementAgent import SingleStatementAgent
 from .benchmark.index import load_index
 from .benchmark.questions import get_entry, store_entry
-from .utils import load_datasets_metadata,load_normalized_datasets_metadata, load_dataset_info, save_json, load_json, prepare_dataframe
+from .utils import load_datasets_metadata,load_normalized_datasets_metadata, load_dataset_info, save_json, load_json, prepare_dataframe, pd_read_dataset
 from conf import OrQAConfig, JUDGE_MODE_COUNTS
 from dataclasses import dataclass, field
 
@@ -359,7 +359,7 @@ def _build_match_inputs(
         metadatas.append(datasets_metadata.get(dataset))
         involved_cols[alias]  = match["columns_by_table"].get(alias, [])
         try:
-            dfs[alias] = prepare_dataframe(pd.read_csv(path, low_memory=False), alias=alias)
+            dfs[alias] = prepare_dataframe(pd_read_dataset(path, opts={"csv": {"low_memory": False}}), alias=alias)
         except Exception:
             pass   # formatter degrades gracefully without the df
     return dataset_paths, aliases, metadatas, involved_cols, dfs

@@ -6,6 +6,35 @@ from .QueryValidator import QueryValidator
 import re
 
 _LITERAL_RE = re.compile(r"'(?:''|[^'])*'")
+_QUOTED_IDENT_RE = re.compile(r'"(?:""|[^"])*"')
+_BARE_IDENTIFIER_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+# DuckDB's reserved keywords (`select keyword_name from duckdb_keywords()
+# where keyword_category = 'reserved'`) — these are otherwise-legal bare
+# identifiers (e.g. "from", "group", "limit") that still break unquoted when
+# they collide with a real column name, so they're folded into the same
+# "needs quoting" bucket as columns containing spaces/punctuation.
+DUCKDB_RESERVED_KEYWORDS = frozenset({
+    'all', 'analyse', 'analyze', 'and', 'any', 'array', 'as', 'asc', 'asymmetric',
+    'both', 'case', 'cast', 'check', 'collate', 'column', 'constraint', 'create',
+    'default', 'deferrable', 'desc', 'describe', 'distinct', 'do', 'else', 'end',
+    'except', 'false', 'fetch', 'for', 'foreign', 'from', 'group', 'having', 'in',
+    'initially', 'intersect', 'into', 'lambda', 'lateral', 'leading', 'limit',
+    'not', 'null', 'offset', 'on', 'only', 'or', 'order', 'pivot', 'pivot_longer',
+    'pivot_wider', 'placing', 'primary', 'qualify', 'references', 'returning',
+    'select', 'show', 'some', 'summarize', 'symmetric', 'table', 'then', 'to',
+    'trailing', 'true', 'union', 'unique', 'unpivot', 'using', 'variadic',
+    'when', 'where', 'window', 'with',
+})
+
+
+def _needs_sql_quoting(col) -> bool:
+    """True if ``col`` is not safe to reference as a bare SQL identifier —
+    contains a space/punctuation/non-ASCII character, starts with a digit
+    (or is purely numeric), or collides with a DuckDB reserved keyword."""
+    s = str(col)
+    return not _BARE_IDENTIFIER_RE.match(s) or s.lower() in DUCKDB_RESERVED_KEYWORDS
+
 
 UNAUTHORIZED_SQL_COMMANDS = [
     # Memory/config manipulation
@@ -92,6 +121,61 @@ class SQLValidator(QueryValidator):
             msg for pattern, msg in SQL_CARTESIAN_PATTERNS
             if re.search(pattern, query, re.IGNORECASE | re.DOTALL)
         ]
+
+    def _check_unquoted_special_columns(self, query: str, dataframes: list) -> None:
+        """Catch a bare-numeric (or space/punctuation-bearing) column
+        reference DuckDB would silently misinterpret, before execution.
+
+        Columns are no longer dropped for having spaces, punctuation, or a
+        SQL-reserved-word name (see ``utils.clean_columns``); they're kept
+        and must be double-quoted instead. Deliberately restricted to
+        columns that fail ``_BARE_IDENTIFIER_RE`` (spaces/punctuation/
+        non-ASCII/leading-digit/purely-numeric) — NOT the reserved-keyword
+        collision case (a column literally named e.g. "from"): those words
+        are also ordinary SQL syntax (``FROM Table_0``, ``GROUP BY``, ...),
+        so scanning the whole query text for a bare occurrence of "from"
+        would false-positive on every normal query. An unquoted reserved
+        word instead relies on DuckDB's own ParserException (see
+        ``_run_query``'s hint) — loud, if less specific.
+
+        The case this DOES need to catch proactively rather than leave to
+        DuckDB: an unquoted purely-numeric column name (e.g. bare ``123``)
+        doesn't error at all — it silently parses as an integer LITERAL, so
+        the query executes fine and returns a constant column of the wrong
+        value instead of the real data. Space/punctuation names would also
+        throw their own ParserException, but are cheap to catch here too
+        with the same scan.
+        """
+        special_cols: set[str] = set()
+        for df in dataframes:
+            special_cols.update(
+                str(c) for c in getattr(df, "columns", [])
+                if not _BARE_IDENTIFIER_RE.match(str(c))
+            )
+        if not special_cols:
+            return
+
+        # Mask out already-quoted identifiers and string literals so a
+        # correctly quoted reference never false-positives here.
+        stripped = _QUOTED_IDENT_RE.sub("", query)
+        stripped = _LITERAL_RE.sub("", stripped)
+
+        offenders = sorted(
+            col for col in special_cols
+            if re.search(rf'\b{re.escape(col)}\b', stripped, re.IGNORECASE)
+        )
+        if not offenders:
+            return
+
+        examples = "\n".join(f'  - {col!r} -> "{col}"' for col in offenders[:8])
+        raise ValueError(
+            "Column name(s) used without double-quoting — these are not safe bare "
+            "SQL identifiers (they contain spaces/punctuation/non-ASCII characters, "
+            "or are purely numeric):\n"
+            f"{examples}\n"
+            'Wrap every reference to them in double quotes, e.g. "column name" — '
+            'double any literal " inside the name itself (col"x" -> "col""x"").'
+        )
 
     def _remove_redundant_aliases(self, query: str) -> str:
         return re.compile(
@@ -372,6 +456,8 @@ class SQLValidator(QueryValidator):
     # Execution — runs inside sandbox process via base _execute_query
     # ------------------------------------------------------------------
     def _run_query(self, query: str, dataframes: list, table_names: list) -> Any:
+        self._check_unquoted_special_columns(query, dataframes)
+
         con = duckdb.connect(database=":memory:")
         con.execute(f"SET memory_limit='{self.mem_limit_mb}MB'")
         con.execute("SET threads=2")
@@ -392,7 +478,9 @@ class SQLValidator(QueryValidator):
                 "Hint: Do not mix UNION and JOIN syntax. "
                 "UNION combines result sets of separate SELECT statements and does not use ON clauses. "
                 "JOIN connects tables within a single SELECT statement using ON clauses. "
-                "Rewrite the query using only JOINs to combine all required tables."
+                "Rewrite the query using only JOINs to combine all required tables.\n"
+                "If the error points at a column name, it may need double-quoting — "
+                'e.g. a column containing spaces or matching a keyword: "column name".'
             ) from e
 
         except duckdb.BinderException as e:

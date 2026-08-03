@@ -6,6 +6,7 @@ import importlib
 #import logging
 import os
 import sys
+import yaml
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -183,13 +184,36 @@ def resolve_target(country: str, city: str | None) -> TargetSpec:
     return target
 
 
+def _is_flat_layout(workflow_path: Path) -> bool:
+    """Cheap peek at a workflow yaml's top-level `flat_layout: true` flag.
+
+    Read before the full config load (``conf.load_config`` only receives
+    ``data_path`` already computed, so it can never influence how that path
+    is built) — this is the one flag that has to be known earlier, to decide
+    whether DATADIR is organized as <group>/<backend>/<city> (default) or
+    just <city> (flat: some DATADIR mounts are handed over pre-organized
+    without the portal-name nesting).
+    """
+    if not workflow_path.exists():
+        return False
+    with open(workflow_path, "r") as f:
+        parsed = yaml.safe_load(f) or {}
+    return bool(parsed.get("flat_layout", False))
+
+
 def resolve_data_path(spec: TargetSpec) -> Path:
     data_dir = os.environ.get("DATADIR", "").strip()
     if not data_dir:
         raise RuntimeError(
             "DATADIR is not set. Define DATADIR to the base directory used for OrQA data."
         )
-    return Path(data_dir) / spec.relative_data_path
+    relative_path = spec.relative_data_path
+    if _is_flat_layout(spec.workflow_path):
+        # Collapse <group>/<backend>/<city> down to just <city> — `backend`
+        # stays available separately via spec.backend/cfg.source for
+        # cleaning-function dispatch, this only affects the on-disk path.
+        relative_path = Path(relative_path.name)
+    return Path(data_dir) / relative_path
 
 
 def load_cfg(spec: TargetSpec, out=None) -> OrQAConfig:
@@ -203,7 +227,12 @@ def load_cfg(spec: TargetSpec, out=None) -> OrQAConfig:
         raise FileNotFoundError(f"Workflow config not found: {spec.workflow_path}")
 
     data_path = resolve_data_path(spec)
-    data_path.mkdir(parents=True, exist_ok=True)
+    # DATADIR may be a read-only mount of already-crawled-and-cleaned data
+    # (see OrQAConfig.write_path) — only attempt to create data_path when it
+    # doesn't already exist, so a pre-existing read-only target never hits a
+    # PermissionError here (mkdir on an existing dir is a no-op either way).
+    if not data_path.exists():
+        data_path.mkdir(parents=True, exist_ok=True)
 
     conf_module = importlib.import_module("conf")
     return conf_module.load_config(spec.workflow_path, data_path)

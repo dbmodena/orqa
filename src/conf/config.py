@@ -448,8 +448,19 @@ class OrQAConfig:
     polars_opts: PolarsOpts = field(init=False)
     pandas_opts: PandasOpts = field(init=False)
 
-    # The base path where OrQA data is stored
+    # The base path where OrQA data is READ from — raw crawled datasets,
+    # cleaned datasets, and the original crawl metadata are always found
+    # here, and are treated as a pre-existing, possibly read-only input.
     data_path: Path
+
+    # Where everything this run WRITES lives instead: normalized metadata,
+    # the blend/embeddings index, candidates-discovery artifacts, logs,
+    # benchmark results, and the search index (statistics_path stays on
+    # data_path — see __post_init__, it's produced by `clean`, not later
+    # stages). Defaults to data_path (today's single-shared-root behavior)
+    # when a workflow yaml doesn't set `write_path`; only needs to differ
+    # when DATADIR is a read-only mount of already-crawled-and-cleaned data.
+    write_path: Path
 
     # Where all the datasets are stored once downloaded
     crawled_datasets_path: Path = field(init=False)
@@ -481,7 +492,10 @@ class OrQAConfig:
 
     filter_filenames_patterns: tuple[str, ...] = ()
     filter_column_patterns: tuple[str, ...] = ()
-    try_separators: tuple[str, ...] = ()
+    # Default probing set for _select_best_separator (cleaning.py) — handles
+    # the delimiters actually seen across portals (comma, EU semicolon, tab,
+    # pipe) without requiring every workflow yaml to opt in explicitly.
+    try_separators: tuple[str, ...] = (",", ";", "\t", "|")
 
     statistics_path: Path = field(init=False)
 
@@ -498,21 +512,30 @@ class OrQAConfig:
             self.data_path / "datasets" / "crawling" / self.crawling.download_format
         )
 
+        # Read-side: raw crawl + clean output, always on data_path.
         self.datasets_path = self.data_path / "datasets" / self.crawling.download_format
         self.metadata_path = self.data_path / "metadata"
         self.original_metadata_filepath = self.metadata_path / "metadata.json"
-        self.normalized_metadata_filepath = self.metadata_path / "normalized_metadata.json"
+        self.statistics_path = self.data_path / "statistics"
 
-        self.mcp_search.index_path = self.data_path / "index"
+        # Write-side: everything normalize-metadata onward, on write_path
+        # (== data_path unless a workflow yaml overrides it).
+        self.normalized_metadata_filepath = (
+            self.write_path / "metadata" / "normalized_metadata.json"
+        )
+
+        self.mcp_search.index_path = self.write_path / "index"
         self.mcp_search.index_filepath = (
             self.mcp_search.index_path / "metadata_index.json"
         )
-        # e.g. data/orqa/socrata/nyc -> "orqa-socrata-nyc"
+        # e.g. data/orqa/socrata/nyc -> "orqa-socrata-nyc" — always derived
+        # from data_path (the target's identity), regardless of where
+        # write_path points.
         self.mcp_search.es_index_name = "orqa-{}-{}".format(
             self.data_path.parent.name, self.data_path.name
         ).lower()
 
-        self.benchmark_path = self.data_path / "benchmark"
+        self.benchmark_path = self.write_path / "benchmark"
         self.benchmark_results_path = (
             self.benchmark_path / self.statement_generation.kind.lower()
         )
@@ -520,10 +543,9 @@ class OrQAConfig:
             self.benchmark_results_path / "questions_todo.json"
         )
 
-        self.logging_path = self.data_path / "log"
+        self.logging_path = self.write_path / "log"
         self.prompts_path = Path(os.environ["ORQA_CONF"]) / "prompts"
         self.llm_config_path =  Path(os.environ["ORQA_CONF"]) / "llm"
-        self.statistics_path = self.data_path / "statistics"
         assert self.prompts_path.exists()
         self.pandas_opts = PandasOpts()
         self.polars_opts = PolarsOpts()
@@ -551,6 +573,16 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         parsed = yaml.safe_load(file)
 
     source = parsed["source"]
+
+    # Optional top-level `write_path` — where this run's outputs (normalized
+    # metadata, blend/embeddings index, candidates-discovery, logs,
+    # benchmark results, search index) get written, instead of data_path.
+    # Defaults to data_path (today's single-shared-root behavior) when
+    # absent — only needed when DATADIR is a read-only mount of
+    # already-crawled-and-cleaned data (see OrQAConfig.write_path).
+    write_path_raw = parsed.get("write_path")
+    write_path = Path(write_path_raw).expanduser() if write_path_raw else data_path
+    write_path.mkdir(parents=True, exist_ok=True)
 
     # we will use a unique seed for random operations
     seed = int(parsed["seed"])
@@ -590,7 +622,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     # setup the classical (BLEND) pipeline pieces, when configured
     indexing = None
     if "indexing" in parsed["tasks"]:
-        index_folder_path = data_path / "blend"
+        index_folder_path = write_path / "blend"
         indexing = Indexing(
             **parsed["tasks"]["indexing"],
             index_folder_path=index_folder_path,
@@ -619,7 +651,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
 
     # setup the Candidates Discovery step
     candidates_discovery_task = parsed["tasks"]["candidates_discovery"]
-    cand_disc_directory = data_path / "candidates_discovery"
+    cand_disc_directory = write_path / "candidates_discovery"
     cand_disc_directory.mkdir(exist_ok=True)
 
     # The workflow yaml decides the discovery method; the semantic method
@@ -734,8 +766,14 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     else:
         filter_column_patterns = tuple(filter_column_patterns)
 
-    try_separators = cleaning_task.get("try_separators", ())
-    if try_separators in (None, "..."):
+    # Sentinel so a yaml key genuinely absent (-> broad default probing set)
+    # is distinguishable from one explicitly set empty/null (-> opt out of
+    # probing entirely) — `.get(key, default)` alone can't tell those apart.
+    _unset = object()
+    try_separators = cleaning_task.get("try_separators", _unset)
+    if try_separators is _unset:
+        try_separators = OrQAConfig.__dataclass_fields__["try_separators"].default
+    elif try_separators in (None, "..."):
         try_separators = ()
     elif isinstance(try_separators, str):
         try_separators = (try_separators,)
@@ -756,6 +794,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         filter_column_patterns=filter_column_patterns,
         try_separators=try_separators,
         data_path=data_path,
+        write_path=write_path,
         datasets_format=crawling.download_format,
     )
 
