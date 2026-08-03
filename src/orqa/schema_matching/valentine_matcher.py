@@ -62,11 +62,17 @@ def schema_matching(
     """
     if verbose:
         print("Computing Schema Matching...")
-    # Table names must be at least two characters: valentine builds column
-    # guids by indexing the second character of the name, so single-letter
-    # labels crash it. The labels are stripped from the keys right below,
-    # so they never surface to callers.
-    matches: dict[Any, float] = valentine_match(Q, R, matcher, "Q_table", "R_table")
+    # Deliberately NOT passing explicit table-name args here (older valentine
+    # releases have a shorter valentine_match(df1, df2, matcher, name=...)
+    # signature than newer ones — the exact positional/keyword shape drifts
+    # across the >=0.4.1 range this repo allows, and passing more args than
+    # a given version accepts raises a TypeError). The label is stripped
+    # from the keys right below anyway, so it never surfaces to callers —
+    # every version's own default label is at least two characters (needed
+    # since valentine builds column guids by indexing the second character
+    # of the table name; a single-letter label crashes it), so relying on
+    # the library's own default is both safe and version-agnostic.
+    matches: dict[Any, float] = valentine_match(Q, R, matcher)
     matches = {(x, y): s for ((_, x), (_, y)), s in matches.items()}
     if verbose:
         print("Done.")
