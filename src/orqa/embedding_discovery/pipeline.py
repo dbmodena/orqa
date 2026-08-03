@@ -535,7 +535,7 @@ def pipeline(cfg: OrQAConfig):
         )
         save_time_statistics(
             time_stat_records,
-            cfg.statistics_path / "generation_time_stats_semantic.csv",
+            cfg.write_statistics_path / "generation_time_stats_semantic.csv",
         )
         time_stat_records = []
 

@@ -497,7 +497,14 @@ class OrQAConfig:
     # pipe) without requiring every workflow yaml to opt in explicitly.
     try_separators: tuple[str, ...] = (",", ";", "\t", "|")
 
+    # The clean step's per-dataset column statistics — read-side, stays on
+    # data_path (see write_statistics_path below for the write-side one).
     statistics_path: Path = field(init=False)
+
+    # Candidates-discovery's OWN run statistics (generation_time_stats*.csv)
+    # — a write-time artifact of the discovery run itself, not the clean
+    # step's output, so it belongs on write_path despite the similar name.
+    write_statistics_path: Path = field(init=False)
 
     # Benchmark folder, adjacent to candidates_discovery/ and metadata/.
     # Every artifact of a benchmark run (questions todo list, per-question
@@ -523,6 +530,7 @@ class OrQAConfig:
         self.normalized_metadata_filepath = (
             self.write_path / "metadata" / "normalized_metadata.json"
         )
+        self.write_statistics_path = self.write_path / "statistics"
 
         self.mcp_search.index_path = self.write_path / "index"
         self.mcp_search.index_filepath = (

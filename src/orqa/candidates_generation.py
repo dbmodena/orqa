@@ -621,7 +621,7 @@ def pipeline(cfg: OrQAConfig):
                 }
             )
             save_time_statistics(
-                time_stat_records, cfg.statistics_path / "generation_time_stats.csv"
+                time_stat_records, cfg.write_statistics_path / "generation_time_stats.csv"
             )
             visited.add(resource_id) 
         except OSError as e:
