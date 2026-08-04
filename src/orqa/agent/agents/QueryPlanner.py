@@ -81,6 +81,18 @@ def _question_leaks_implementation(question: str) -> Optional[str]:
 QueryPlan = Union[SQLQueryPlan, PandasQueryPlan]
 PlanStep = Union[SQLPlanStep, PandasPlanStep]
 
+# Neither request path below set max_tokens at all before this — relying on
+# whatever OCI's own server-side default happens to be for reasoning models
+# (openai.gpt-oss-*, google.gemini-2.5-flash) that burn hidden thinking
+# tokens out of the same budget as the visible response (see the judges'
+# own JUDGE_MAX_TOKENS in agent.py, raised after a real starvation incident
+# there). A live instrumented run never observed truncation with no cap set
+# (usage up to ~4900 tokens, always finish_reason="stop") — so this isn't a
+# fix for an observed failure, just closing the same unmanaged-parameter gap
+# the judges already had closed: an explicit, generous, inspectable ceiling
+# instead of an opaque provider default with no lever to raise it.
+GENERATION_MAX_TOKENS = 8000
+
 
 class PlanValidationError(ValueError):
     """Raised when a structured query plan fails structural validation.
@@ -334,6 +346,8 @@ class QueryPlanner:
             plans, analyses, aliases, match, involved_cols, stats, languages,
             dfs, retrievable_keywords,
         )
+        plans = [self._pin_table_descriptions(p, analyses) for p in plans]
+        plans = [self._pin_retrievable_keywords(p, retrievable_keywords) for p in plans]
 
         return plans
 
@@ -469,6 +483,86 @@ class QueryPlanner:
             result.append(candidate)
         return result
 
+    def _pin_table_descriptions(
+        self, plan: QueryPlan, analyses: Sequence[dict]
+    ) -> QueryPlan:
+        """Overwrite each `tables[].description`/`.keywords` with the cached
+        table-analysis value for that alias — deterministic, no judge
+        involved, same spirit as :meth:`_dedupe_difficulties` /
+        :meth:`_reconcile_difficulty` above.
+
+        The prompt (query_planner.md) already asks the model to copy these
+        verbatim from TABLE-LEVEL ANALYSIS, but that is a request, not a
+        guarantee: the model transcribes free text into its own structured
+        output, and was observed to reproduce a shorter/differently-worded
+        description for the SAME table across different plans in the same
+        batch (or across a correction round's fresh call). Since every
+        table's canonical description/keywords already live in `analyses`
+        (cached once per table by `TableAnalysisAgent`), pinning them here
+        removes the drift for free — no extra LLM call — and keeps every
+        plan's copy byte-identical, which is what downstream topic/temporal
+        grounding checks (and the judge panels reading `tables[].reason`
+        alongside it) assume it already was.
+        """
+        by_alias = {
+            a.get("alias"): a
+            for a in analyses
+            if isinstance(a, dict) and a.get("alias")
+        }
+        new_tables = []
+        changed = False
+        for table in plan.tables:
+            source = by_alias.get(table.name)
+            if source is None:
+                new_tables.append(table)
+                continue
+            canonical_description = source.get("table_description") or table.description
+            canonical_keywords = source.get("table_keywords") or table.keywords
+            if (
+                canonical_description != table.description
+                or canonical_keywords != table.keywords
+            ):
+                changed = True
+                table = table.model_copy(
+                    update={
+                        "description": canonical_description,
+                        "keywords": canonical_keywords,
+                    }
+                )
+            new_tables.append(table)
+        return plan.model_copy(update={"tables": new_tables}) if changed else plan
+
+    def _pin_retrievable_keywords(
+        self, plan: QueryPlan, retrievable_keywords: Optional[list[str]]
+    ) -> QueryPlan:
+        """Guarantee `question_keywords` contains every keyword the
+        pre-planning search (see `keyword_suggestion.suggest_retrievable_keywords`,
+        called before this planner ever runs — `retrievable_keywords` is
+        only ever passed in already EMPIRICALLY VERIFIED against the real
+        reverse index) proved necessary and sufficient to surface this
+        plan's tables.
+
+        Same category of gap as `_pin_table_descriptions`: the prompt asks
+        the model to "weave these terms in naturally" into the question,
+        but that's advisory — the model still freely writes its own
+        `question_keywords`, and nothing forces the verified set to survive
+        into it. A plan can read as perfectly retrievable and still lose
+        the one term that actually made it so, if the model paraphrases or
+        drops it. This makes retrievability a guarantee instead of a hope,
+        with no extra LLM call: union the verified terms into whatever the
+        model already wrote, verified terms first — no count cap on
+        `question_keywords` (see `QueryPlan.limit_question_keywords`), so
+        nothing here can ever trim one away either.
+        """
+        if not retrievable_keywords:
+            return plan
+        existing = list(plan.question_keywords or [])
+        missing = [kw for kw in retrievable_keywords if kw not in existing]
+        if not missing:
+            return plan
+        combined = list(dict.fromkeys(missing + existing))
+        return plan.model_copy(update={"question_keywords": combined})
+
     def revise_plan(
         self,
         plan: QueryPlan,
@@ -547,7 +641,10 @@ class QueryPlanner:
         # force-preserved above (see _assemble_plan's docstring).
         candidate = candidate.model_copy(update={"difficulty": plan.difficulty})
         try:
-            return self.validate_plan(candidate, aliases, known_columns), usage_total
+            validated = self.validate_plan(candidate, aliases, known_columns)
+            validated = self._pin_table_descriptions(validated, analyses)
+            validated = self._pin_retrievable_keywords(validated, retrievable_keywords)
+            return validated, usage_total
         except PlanValidationError as exc:
             first_error = str(exc)
             logger.warning(
@@ -561,7 +658,10 @@ class QueryPlanner:
         retry_candidate = self._assemble_plan(raw_retry, constraint_links)
         retry_candidate = retry_candidate.model_copy(update={"difficulty": plan.difficulty})
         try:
-            return self.validate_plan(retry_candidate, aliases, known_columns), usage_total
+            validated_retry = self.validate_plan(retry_candidate, aliases, known_columns)
+            validated_retry = self._pin_table_descriptions(validated_retry, analyses)
+            validated_retry = self._pin_retrievable_keywords(validated_retry, retrievable_keywords)
+            return validated_retry, usage_total
         except PlanValidationError as exc_retry:
             logger.warning(
                 "Revised plan re-request also failed structural validation "
@@ -652,7 +752,7 @@ class QueryPlanner:
     def _request_plan_batch(self, prompt: str) -> tuple[dict, dict]:
         if self._batch_client is None:
             self._batch_client = QueryPlanBatchClient(self.config_path, self.kind)
-        result = self._batch_client.request_plan_batch(prompt)
+        result = self._batch_client.request_plan_batch(prompt, max_tokens=GENERATION_MAX_TOKENS)
         if isinstance(result, tuple):
             plan_set, usage = result
         else:
@@ -1413,7 +1513,7 @@ class QueryPlanner:
     def _request_plan(self, prompt: str) -> tuple[dict, dict]:
         if self._client is None:
             self._client = QueryPlannerClient(self.config_path, self.kind)
-        result = self._client.request_plan(prompt)
+        result = self._client.request_plan(prompt, max_tokens=GENERATION_MAX_TOKENS)
         # Support both (dict, usage) and bare-dict clients for flexibility.
         if isinstance(result, tuple):
             plan_dict, usage = result

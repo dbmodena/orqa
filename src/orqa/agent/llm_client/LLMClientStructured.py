@@ -353,7 +353,7 @@ class LLMClientStructured(LLMClient):
         completion_args = {
             "model": "primary",
             "messages": messages,
-            "temperature": self.temperature,
+            **self._default_temperature_kwargs(self.config["model"]),
             **kwargs,
         }
         last_content: Optional[str] = None

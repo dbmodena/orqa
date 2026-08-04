@@ -100,7 +100,7 @@ class TaskProposerLLMClient(LLMClientStructured):
         completion_args = {
             "model": "primary",  # Router handles the actual model selection
             "messages": messages,
-            "temperature": self.temperature,
+            **self._default_temperature_kwargs(self.config["model"]),
             # "response_format": {"type": "json_object"},
             **kwargs,
         }
@@ -309,7 +309,7 @@ class PairTaskSelectorLLMClient(LLMClientStructured):
         completion_args = {
             "model": "primary",
             "messages": messages,
-            "temperature": self.temperature,
+            **self._default_temperature_kwargs(self.config["model"]),
             **kwargs,
         }
         last_content = None

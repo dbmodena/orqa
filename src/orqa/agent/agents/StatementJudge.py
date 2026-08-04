@@ -65,7 +65,7 @@ class LLMStatementJudge(LLMClientStructured):
                 completion_args = {
                     "model": "primary",
                     "messages": messages,
-                    "temperature": self.temperature,
+                    **self._default_temperature_kwargs(self.config["model"]),
                     **kwargs,
                 }
 

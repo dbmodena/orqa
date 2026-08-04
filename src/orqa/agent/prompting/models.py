@@ -209,8 +209,8 @@ class SQLQueryPlan(BaseModel):
     """An ordered, schema-validated decomposition of a SQL query."""
 
     question: str
-    question_keywords: List[str]  # max 10
-    plan_keywords: List[str]  # max 10
+    question_keywords: List[str]
+    plan_keywords: List[str]
     steps: List[SQLPlanStep]  # ordered decomposition
     difficulty: _DIFFICULTY_LEVELS = Field(
         default="easy", description=_DIFFICULTY_DESCRIPTION
@@ -230,7 +230,7 @@ class SQLQueryPlan(BaseModel):
     # call — see StatementClient.complete's plan-fields merge).
     query_plan: str = ""  # high-level natural-language description of the plan
     translated_question: str = ""
-    translated_question_keywords: List[str] = []  # max 10
+    translated_question_keywords: List[str] = []
     detected_language: str = ""
     topic: str = ""
     story: str = ""
@@ -240,8 +240,8 @@ class PandasQueryPlan(BaseModel):
     """An ordered, schema-validated decomposition of a Pandas query."""
 
     question: str
-    question_keywords: List[str]  # max 10
-    plan_keywords: List[str]  # max 10
+    question_keywords: List[str]
+    plan_keywords: List[str]
     steps: List[PandasPlanStep]  # ordered decomposition
     difficulty: _DIFFICULTY_LEVELS = Field(
         default="easy", description=_DIFFICULTY_DESCRIPTION
@@ -261,7 +261,7 @@ class PandasQueryPlan(BaseModel):
     # call — see StatementClient.complete's plan-fields merge).
     query_plan: str = ""  # high-level natural-language description of the plan
     translated_question: str = ""
-    translated_question_keywords: List[str] = []  # max 10
+    translated_question_keywords: List[str] = []
     detected_language: str = ""
     topic: str = ""
     story: str = ""
@@ -357,8 +357,8 @@ class TableTrace(BaseModel):
     reason: str
     columns_involved: List[str]
     description: str = ""
-    keywords: List[str] = []  # max 10
-    translated_keywords: List[str] = []  # max 10
+    keywords: List[str] = []
+    translated_keywords: List[str] = []
 
 
 class PlanningTrace(BaseModel):

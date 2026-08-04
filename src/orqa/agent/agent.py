@@ -13,6 +13,7 @@ from ..queries.query_execution import QueryExecutor
 from .utility.difficulty_estimator import estimate_plan_tier
 from .utility.generation_coordinator import GenerationCoordinator
 from .utility.keyword_searchability import check_keyword_searchability
+from .utility.plan_code_alignment import alignment_warning
 from .utility.keyword_suggestion import suggest_retrievable_keywords
 from .agents.TaskProposer import PairTaskSelectorLLMClient, TaskProposerLLMClient
 from .agents.StatementJudge import LLMStatementJudge
@@ -842,10 +843,18 @@ class JudgementResponseAgent:
         # The payload is built exactly like LLMStatementJudge.complete's so
         # both paths show the judges the identical evaluation content.
         if self._code_panel.is_configured:
+            # Deterministic, code-computed signal (see plan_code_alignment.py)
+            # folded into the payload text itself — cheaper and more visible
+            # to the judge than a separate field it has no instruction to
+            # read, same "surface it as a given fact" spirit as the
+            # difficulty estimator's feedback into the plan-revision prompt.
+            warning = alignment_warning(
+                executed_result.get("tables", []), executed_result.get("code", "")
+            )
             payload = (
                 f"Queries:\n{[single]}\n\n"
                 "Evaluate the queries above following the instructions and "
-                "return only the JSON verdict."
+                f"return only the JSON verdict.{warning}"
             )
             judgment, _ = self._code_panel.evaluate(
                 prompt_str, payload, max_tokens=self.max_tokens
@@ -1057,6 +1066,31 @@ class StatementOrchestrator:
         )
 
         self._log = PipelineLogger()
+
+    def _adaptive_top_k(self, plan_tables: list) -> int:
+        """The retrievability target window for a plan touching these tables.
+
+        Single-table plans target literal RANK 1, not a window — with only
+        one target, "near the top" has no reason to settle for less, and a
+        greedy search over a table's own real vocabulary reaching rank 1
+        costs no more than reaching rank 9 (see keyword_suggestion.py's
+        module docstring on why this fitness search is correct by
+        construction, not a heuristic estimate).
+
+        Multi-table plans keep the coefficient-scaled window
+        (``round(len(plan_tables) * keyword_search_top_k_coefficient)``):
+        two or more tables cannot all occupy rank 1 of the SAME search
+        simultaneously, so widening the window with table count is the
+        actual generalization of "as high as possible" once more than one
+        target is in play, not a looser standard.
+
+        Shared by both the pre-planning suggestion (_run) and the plan
+        judge's reactive keyword-searchability check (_judge_plans) so the
+        two never compute a different target for the same plan.
+        """
+        if len(plan_tables) <= 1:
+            return 1
+        return max(1, round(len(plan_tables) * self._keyword_search_top_k_coefficient))
 
     # ------------------------------------------------------------------
     # Backward-compatible adapter methods (task 11.4)
@@ -1290,10 +1324,7 @@ class StatementOrchestrator:
                     {"alias": alias, "resource_id": aliases.get(alias, alias)}
                     for alias in aliases
                 ]
-                adaptive_top_k = max(
-                    1,
-                    round(len(plan_tables) * self._keyword_search_top_k_coefficient),
-                )
+                adaptive_top_k = self._adaptive_top_k(plan_tables)
                 suggestion = suggest_retrievable_keywords(
                     plan_tables, self._search_index, adaptive_top_k
                 )
@@ -1877,10 +1908,7 @@ class StatementOrchestrator:
                 # ALL of them to plausibly surface together, so K scales with
                 # THIS plan's own table count rather than being one fixed
                 # constant regardless of how many tables it uses.
-                adaptive_top_k = max(
-                    1,
-                    round(len(plan_tables) * self._keyword_search_top_k_coefficient),
-                )
+                adaptive_top_k = self._adaptive_top_k(plan_tables)
                 kw_result = check_keyword_searchability(
                     getattr(current, "question_keywords", None) or [],
                     plan_tables,

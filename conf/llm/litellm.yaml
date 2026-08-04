@@ -42,6 +42,18 @@ provider_params:
     oci_compartment_id: os.environ/OCI_COMPARTMENT_ID
     #max_tokens: 4096
     timeout: 300
+    # NOTE: no temperature override here on purpose. It's tempting to
+    # assume OCI's reasoning models (openai.gpt-oss-120b/-20b,
+    # google.gemini-2.5-flash) need a fixed temperature=1 while thinking,
+    # the same real constraint Anthropic's extended thinking has above —
+    # but that was tested directly (12 live completions across
+    # temperature 0.1-1.0, both a trivial prompt and a real judge payload)
+    # and disproven: identical behavior at every value, on both models.
+    # The global `temperature: 0.1` a few lines up already applies to
+    # every oci/* deployment with nothing overriding it here. If a genuine
+    # per-model need shows up later, set it via the per-judge mapping form
+    # in judge_profiles (or add a `temperature:` key back here) — and this
+    # time, verify it against the live API before trusting the analogy.
 
 # Common parameters (applied to all models)
 

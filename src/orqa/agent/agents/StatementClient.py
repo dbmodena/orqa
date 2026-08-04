@@ -26,6 +26,12 @@ import sys
 
 logger = logging.getLogger(__name__)
 
+# See QueryPlanner.GENERATION_MAX_TOKENS for why this exists: neither call
+# site below set max_tokens before this, relying on OCI's own unmanaged
+# default for reasoning models. Not a fix for an observed failure — closing
+# the same gap the judges already had closed elsewhere in the pipeline.
+GENERATION_MAX_TOKENS = 8000
+
 
 class LLMClientStatementGenerator(LLMClientStructured):
     """
@@ -429,7 +435,8 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 completion_args = {
                     "model": self.config["model"],
                     "messages": sanitize_messages(messages),
-                    "temperature": self.temperature,
+                    "max_tokens": GENERATION_MAX_TOKENS,
+                    **self._default_temperature_kwargs(self.config["model"]),
                 }
 
                 response = self.router.completion(**completion_args)
@@ -573,7 +580,8 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 response = self.router.completion(
                     model=self.config["model"],
                     messages=sanitize_messages(retry_messages),
-                    temperature=self.temperature,
+                    max_tokens=GENERATION_MAX_TOKENS,
+                    **self._default_temperature_kwargs(self.config["model"]),
                 )
                 usage = response["usage"]
                 usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)

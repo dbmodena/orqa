@@ -110,7 +110,7 @@ tasks:
 
   # MCP dataset-search server (step: mcp_search)
   mcp_search:
-    backend: elasticsearch
+    backend: builtin  # local BM25 index under <data_path>/index/ — no external service needed
     elasticsearch_url: http://localhost:9200
     host: 127.0.0.1
     port: 8766

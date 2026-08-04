@@ -57,7 +57,7 @@ from pydantic import ValidationError
 from ..utility.alias_substitution import AliasSubstitution
 from ..utility.message_builder import sanitize_messages
 from ..utility.error_formatter import ErrorFormatter
-from .StatementClient import LLMClientStructured
+from .StatementClient import GENERATION_MAX_TOKENS, LLMClientStructured
 from ..prompting import PandasValidatorCorrectionPrompt, SQLValidatorCorrectionPrompt
 from ..validators.SQLValidator import SQLValidator
 from ..validators.PandasValidator import PandasValidator
@@ -362,7 +362,8 @@ class LLMStatementValidator(LLMClientStructured):
                 response = self.router.completion(
                     model=self.config["model"],
                     messages=sanitize_messages(messages),
-                    temperature=self.temperature,
+                    max_tokens=GENERATION_MAX_TOKENS,
+                    **self._default_temperature_kwargs(self.config["model"]),
                 )
                 _accumulate_usage(usage, response["usage"])
 

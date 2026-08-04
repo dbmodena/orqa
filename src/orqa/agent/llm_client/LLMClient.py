@@ -64,6 +64,28 @@ class LLMClient:
             return {}
         return provider_config.copy()
 
+    def _default_temperature_kwargs(
+        self, model: str, extra_overrides: dict[str, Any] | None = None
+    ) -> dict[str, float]:
+        """``{"temperature": self.temperature}`` unless the target model already
+        pins its own via provider_params or a per-call override — e.g. a
+        reasoning model that requires a fixed temperature while thinking
+        (OCI's gpt-oss/gemini-2.5-flash, Anthropic's extended thinking).
+
+        litellm's Router always lets an explicit call-time kwarg beat a
+        deployment's own ``litellm_params`` default, so unconditionally
+        passing ``temperature=self.temperature`` on every call — the
+        previous behavior — silently clobbers any such override regardless
+        of how it was configured. Returning `{}` here lets the deployment's
+        own default flow through untouched instead.
+        """
+        overrides = self._get_provider_specific_params(model)
+        if extra_overrides:
+            overrides = {**overrides, **extra_overrides}
+        if "temperature" in overrides:
+            return {}
+        return {"temperature": self.temperature}
+
     def _setup_router(self) -> Router:
         """Setup LiteLLM Router with primary and fallback models."""
         model_list = []
@@ -136,7 +158,7 @@ class LLMClient:
         completion_args = {
             "model": "primary",
             "messages": messages,
-            "temperature": self.temperature,
+            **self._default_temperature_kwargs(self.config["model"]),
             **kwargs,
         }
         last_content = None

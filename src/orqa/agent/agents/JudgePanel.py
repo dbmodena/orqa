@@ -243,7 +243,7 @@ class JudgePanel(LLMClientStructured):
                 response = self.panel_router.completion(
                     model=judge["router_name"],
                     messages=messages,
-                    temperature=self.temperature,
+                    **self._default_temperature_kwargs(judge["model"], judge["overrides"]),
                     **kwargs,
                 )
                 usage = response["usage"]

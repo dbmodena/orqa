@@ -113,7 +113,7 @@ tasks:
 
   # MCP dataset-search server (step: mcp_search)
   mcp_search:
-    backend: elasticsearch
+    backend: builtin  # local BM25 index under <data_path>/index/ — no external service needed
     elasticsearch_url: http://localhost:9200
     host: 127.0.0.1
     port: 8765
@@ -134,7 +134,11 @@ tasks:
     # PRE-planning keyword suggestion above AND the plan judge's reactive
     # keyword-searchability layer. False disables both outright, regardless
     # of whether a reverse index is otherwise available.
-    retrieval_gate_enabled: false
+    # Was false because `backend: elasticsearch` pointed at a service that
+    # isn't running here, silently no-op-ing both mechanisms; now that
+    # `backend: builtin` needs no external service, there's nothing left to
+    # gate on.
+    retrieval_gate_enabled: true
 
   # How many judges vote on each panel (see orqa.agent.agents.JudgePanel).
   # judge_profiles.plan/code in conf/llm/litellm.yaml stay the pool of

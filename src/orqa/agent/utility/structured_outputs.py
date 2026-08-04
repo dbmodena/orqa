@@ -31,7 +31,7 @@ class TableAnalysis(BaseModel):
     table_keywords: List[str] = Field(
         default_factory=list,
         description=(
-            "Retrieval keywords for this table (max 10). Each is a single word "
+            "Retrieval keywords for this table. Each is a single word "
             "or short established term — never a descriptive phrase. They are "
             "indexed in a reverse index over many portal tables and their "
             "COMBINATION must identify this table univocally: cover its "
@@ -44,10 +44,10 @@ class TableAnalysis(BaseModel):
     @field_validator("table_keywords")
     @classmethod
     def limit_table_keywords(cls, v: List[str]) -> List[str]:
-        """Limit table keywords to max 10 and remove duplicates"""
+        """Remove duplicate table keywords, preserving order. No count cap."""
         seen = set()
         unique_keywords = []
-        for kw in v[:10]:  # Take only first 10
+        for kw in v:
             if kw not in seen:
                 seen.add(kw)
                 unique_keywords.append(kw)
@@ -118,7 +118,7 @@ class QueryPlan(BaseModel):
     question_keywords: List[str] = Field(
         default_factory=list,
         description=(
-            "The question's table-identifying retrieval terms (max 10): "
+            "The question's table-identifying retrieval terms: "
             "single words or short established terms appearing in the "
             "question whose combination matches the target table's index "
             "keywords — no phrases, no generic filler words."
@@ -126,7 +126,7 @@ class QueryPlan(BaseModel):
     )
     plan_keywords: List[str] = Field(
         default_factory=list,
-        description="Keywords extracted from the query plan (max 10)."
+        description="Keywords extracted from the query plan."
     )
     table_links: List[QueryLink] = Field(
         default_factory=list,
@@ -136,10 +136,10 @@ class QueryPlan(BaseModel):
     @field_validator("question_keywords")
     @classmethod
     def limit_question_keywords(cls, v: List[str]) -> List[str]:
-        """Limit question keywords to max 10 and remove duplicates"""
+        """Remove duplicate question keywords, preserving order. No count cap."""
         seen = set()
         unique_keywords = []
-        for kw in v[:10]:  # Take only first 10
+        for kw in v:
             if kw not in seen:
                 seen.add(kw)
                 unique_keywords.append(kw)
@@ -148,10 +148,10 @@ class QueryPlan(BaseModel):
     @field_validator("plan_keywords")
     @classmethod
     def limit_plan_keywords(cls, v: List[str]) -> List[str]:
-        """Limit plan keywords to max 10 and remove duplicates"""
+        """Remove duplicate plan keywords, preserving order. No count cap."""
         seen = set()
         unique_keywords = []
-        for kw in v[:10]:  # Take only first 10
+        for kw in v:
             if kw not in seen:
                 seen.add(kw)
                 unique_keywords.append(kw)
@@ -409,20 +409,20 @@ class Table(BaseModel):
     )
     keywords: List[str] = Field(
         default_factory=list,
-        description="Keywords extracted from the table analysis that are relevant for this query (max 10)."
+        description="Keywords extracted from the table analysis that are relevant for this query."
     )
     translated_keywords: List[str] = Field(
         default_factory=list,
-        description="Translated keywords for this table in the detected language (max 10)."
+        description="Translated keywords for this table in the detected language."
     )
 
     @field_validator("keywords")
     @classmethod
     def limit_keywords(cls, v: List[str]) -> List[str]:
-        """Limit keywords to max 10 and remove duplicates"""
+        """Remove duplicate keywords, preserving order. No count cap."""
         seen = set()
         unique_keywords = []
-        for kw in v[:10]:  # Take only first 10
+        for kw in v:
             if kw not in seen:
                 seen.add(kw)
                 unique_keywords.append(kw)
@@ -431,10 +431,10 @@ class Table(BaseModel):
     @field_validator("translated_keywords")
     @classmethod
     def limit_translated_keywords(cls, v: List[str]) -> List[str]:
-        """Limit translated keywords to max 10 and remove duplicates"""
+        """Remove duplicate translated keywords, preserving order. No count cap."""
         seen = set()
         unique_keywords = []
-        for kw in v[:10]:  # Take only first 10
+        for kw in v:
             if kw not in seen:
                 seen.add(kw)
                 unique_keywords.append(kw)
@@ -509,7 +509,7 @@ class Query(BaseModel):
     question_keywords: List[str] = Field(
         default_factory=list,
         description=(
-            "Keywords capturing the question's intent (max 10). Linked to "
+            "Keywords capturing the question's intent. Linked to "
             "`question` — regenerate together if you rewrite the question."
         ),
     )
@@ -519,7 +519,7 @@ class Query(BaseModel):
     )
     translated_question_keywords: List[str] = Field(
         default_factory=list,
-        description="`question_keywords` translated the same way (max 10). Linked to `question`.",
+        description="`question_keywords` translated the same way. Linked to `question`.",
     )
     detected_language: str = Field(
         default="",
@@ -537,10 +537,10 @@ class Query(BaseModel):
     @field_validator("question_keywords")
     @classmethod
     def limit_question_keywords_query(cls, v: List[str]) -> List[str]:
-        """Limit question keywords to max 10 and remove duplicates"""
+        """Remove duplicate question keywords, preserving order. No count cap."""
         seen = set()
         unique_keywords = []
-        for kw in v[:10]:
+        for kw in v:
             if kw not in seen:
                 seen.add(kw)
                 unique_keywords.append(kw)
@@ -549,10 +549,10 @@ class Query(BaseModel):
     @field_validator("translated_question_keywords")
     @classmethod
     def limit_translated_question_keywords(cls, v: List[str]) -> List[str]:
-        """Limit translated question keywords to max 10 and remove duplicates"""
+        """Remove duplicate translated question keywords, preserving order. No count cap."""
         seen = set()
         unique_keywords = []
-        for kw in v[:10]:
+        for kw in v:
             if kw not in seen:
                 seen.add(kw)
                 unique_keywords.append(kw)
