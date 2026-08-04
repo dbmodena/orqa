@@ -260,7 +260,9 @@ def _is_connected(aliases: dict, relationships: list[dict]) -> bool:
     return len(roots) == 1
 
 
-def process_group(group: dict, tasks: dict, csv_folder: Path) -> dict | None:
+def process_group(
+    group: dict, tasks: dict, csv_folder: Path, extension: str
+) -> dict | None:
     """
     Build the flat relationship set for one group of tables.
 
@@ -284,10 +286,13 @@ def process_group(group: dict, tasks: dict, csv_folder: Path) -> dict | None:
     for alias, dataset in aliases.items():
         try:
             dfs[alias] = pd_read_dataset(
-                csv_folder / f"{dataset}.csv", opts={"csv": {"nrows": GROUP_TABLE_NROWS}}
+                csv_folder / f"{dataset}.{extension}",
+                opts={"csv": {"nrows": GROUP_TABLE_NROWS}},
             )
         except Exception as exc:
-            log.group_filtered(list(aliases.values()), f"could not read {dataset}.csv ({exc})")
+            log.group_filtered(
+                list(aliases.values()), f"could not read {dataset}.{extension} ({exc})"
+            )
             return None
 
     relationships: list[dict] = []
@@ -397,7 +402,11 @@ def generate_walk_groups(cfg: OrQAConfig, G: matches_graph.DatasetMatchesGraph) 
 
 
 def process_all_candidates(
-    groups: list[dict], tasks_file: Path, csv_folder: Path, output_file: Path
+    groups: list[dict],
+    tasks_file: Path,
+    csv_folder: Path,
+    output_file: Path,
+    extension: str,
 ) -> list[dict]:
     """Process all candidate groups and write query_candidates.json."""
     tasks = load_tasks(tasks_file)
@@ -405,7 +414,7 @@ def process_all_candidates(
 
     results = []
     for group in groups:
-        record = process_group(group, tasks, csv_folder)
+        record = process_group(group, tasks, csv_folder, extension)
         if record:
             results.append({"dataset_id": group["seed"], **record})
 
@@ -431,4 +440,5 @@ def generate_query_candidates(cfg: OrQAConfig) -> None:
         cd.tasks_results_path,
         cfg.datasets_path,
         cfg.statement_generation.query_candidates_path,
+        cfg.datasets_format,
     )
