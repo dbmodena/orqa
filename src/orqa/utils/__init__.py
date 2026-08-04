@@ -480,7 +480,7 @@ def prepare_dataset(
     # ``pd_read_dataset``'s underlying ``pd.read_csv``/``read_parquet`` —
     # that's an unambiguous "this cell is empty" signal, not a portal-
     # specific convention needing a judgment call.
-    df = pd_read_dataset(dataset_path, opts={"csv": {"low_memory": False}, "parquet": {"low_memory": False}})
+    df = pd_read_dataset(dataset_path, opts={"csv": {"low_memory": False}})
 
     if limit_to_n_rows is not None:
         df = df.head(limit_to_n_rows)

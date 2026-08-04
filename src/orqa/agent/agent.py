@@ -1537,7 +1537,10 @@ class StatementOrchestrator:
             original_ids = {str(q.get("id")) for q in pending_queries}
 
             # ── Phase 3: validator-to-judge loop ───────────────────────────
-            executor = QueryExecutor(datasets_path=Path(dataset_paths[0]).parent)
+            executor = QueryExecutor(
+                datasets_path=Path(dataset_paths[0]).parent,
+                extension=Path(dataset_paths[0]).suffix.lstrip("."),
+            )
             entry = {"tables": aliases}
             # Same {alias: DataFrame} mapping Phase 1 already prepared (dfs is
             # index-aligned with Table_0, Table_1, ... by construction, see the

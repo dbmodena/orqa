@@ -627,7 +627,7 @@ def execute_query(source: str, kind: str, entry_key: str, qnum: str) -> dict:
             status_code=404, detail=f"Query {kind}/{entry_key}/{qnum} not found"
         )
 
-    executor = QueryExecutor(cfg.datasets_path)
+    executor = QueryExecutor(cfg.datasets_path, extension=cfg.datasets_format)
     try:
         frame = executor.execute({"tables": (meta or {}).get("tables", {})}, query, kind)
         if frame is None:

@@ -55,8 +55,9 @@ class QueryExecutor:
     docstring already documents avoiding.
     """
 
-    def __init__(self, datasets_path: Path):
+    def __init__(self, datasets_path: Path, extension: str = "csv"):
         self.datasets_path = Path(datasets_path)
+        self.extension = extension
 
     def execute(self, entry: dict, query: dict, query_kind: str) -> pd.DataFrame | None:
         """
@@ -102,17 +103,14 @@ class QueryExecutor:
     def load_tables(self, tables_map: dict[str, str]) -> dict[str, pd.DataFrame]:
         dataframes: dict[str, pd.DataFrame] = {}
         for alias, dataset_id in tables_map.items():
-            csv_path = self.datasets_path / f"{dataset_id}.csv"
-            if not csv_path.exists():
+            dataset_path = self.datasets_path / f"{dataset_id}.{self.extension}"
+            if not dataset_path.exists():
                 raise FileNotFoundError(
-                    f"CSV file not found for table '{alias}': {csv_path}"
+                    f"Dataset file not found for table '{alias}': {dataset_path}"
                 )
             df = utils.pd_read_dataset(
-                csv_path,
-                opts={
-                    "csv":     {"low_memory": False},
-                    "parquet": {"low_memory": False},
-                },
+                dataset_path,
+                opts={"csv": {"low_memory": False}},
             )
             df = utils.clean_columns(df)
             dataframes[alias] = df

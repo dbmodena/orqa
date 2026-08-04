@@ -402,6 +402,7 @@ def load_recovery_state(
             "coma",
             {"use_instances": False},
             verbose=False,
+            extension=cfg.datasets_format,
         )
         G.save(cfg.candidates_discovery.matches_graph_path)
         print(f"Graph rebuilt: {len(executed_q_ids)} Q-nodes, {len(all_candidates)} edges.")
@@ -603,6 +604,7 @@ def pipeline(cfg: OrQAConfig):
                 "coma",
                 {"use_instances": False},
                 verbose=False,
+                extension=cfg.datasets_format,
             )
             print("\n" + " DONE ".center(PRINT_PAD, "="))
             a_t = time.time()

@@ -11,7 +11,6 @@ from orqa.schema_matching.valentine_matcher import instantiate_matcher, schema_m
 from orqa.sloth import sloth
 from orqa.utils import pl_read_dataset
 
-DOCUMENT_TYPE = "csv"
 THRESHOLD = 0.5
 MAX_WORKERS = 5
 ROUND = 3
@@ -104,6 +103,7 @@ def process_edge(
     matcher_name: str = "coma",
     matcher_kwargs: Optional[dict] = None,
     verbose: bool = False,
+    extension: str = "csv",
 ) -> tuple[int, str, str, str, list, dict, list] | None:
     """Compute SLOTH overlap + schema-matching metrics for one candidate edge.
 
@@ -134,8 +134,8 @@ def process_edge(
             entry.get("matches", []),
         )
 
-    Q = pl_read_dataset(datasets_folder / f"{q_node}.csv", read_opts)
-    R = pl_read_dataset(datasets_folder / f"{r_node}.csv", read_opts)
+    Q = pl_read_dataset(datasets_folder / f"{q_node}.{extension}", read_opts)
+    R = pl_read_dataset(datasets_folder / f"{r_node}.{extension}", read_opts)
 
     q_columns = r_columns = None
     q_key = r_key = None
@@ -257,6 +257,7 @@ class DatasetMatchesGraph:
         matcher_kwargs: Optional[dict] = None,
         max_workers: Optional[int] = None,
         verbose: bool = False,
+        extension: str = "csv",
     ):
         for entry in candidate_matches:
             self._G.add_node(entry["Q"])
@@ -273,6 +274,7 @@ class DatasetMatchesGraph:
                     matcher_name,
                     matcher_kwargs,
                     verbose,
+                    extension,
                 )
                 for idx, entry in enumerate(candidate_matches)
             }
