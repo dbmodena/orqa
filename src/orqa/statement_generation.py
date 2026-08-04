@@ -510,6 +510,7 @@ def create_statements(
     output_file: Path,
     kind: str,
     max_cols: int,
+    extension: str,
     datasets_metadata: dict | None = None,
     bad_tokens: list | None = None,
     enable_single_table: bool = False,
@@ -546,13 +547,15 @@ def create_statements(
     # keyword set straight from the cache, fully decoupling table analysis
     # from the statement-generation orchestrator.
     involved_paths = [
-        csv_folder / f"{dataset}.csv"
+        csv_folder / f"{dataset}.{extension}"
         for match in all_matches
         for dataset in match.get("aliases", {}).values()
     ]
     if enable_single_table and single_table_query_count > 0:
         involved_paths.extend(
-            _sample_single_table_datasets(csv_folder, single_table_query_count, seed=seed)
+            _sample_single_table_datasets(
+                csv_folder, single_table_query_count, extension=extension, seed=seed
+            )
         )
     TableAnalysisAgent(
         config_path,
@@ -578,7 +581,9 @@ def create_statements(
 # ── Single-table generation ───────────────────────────────────────────────
     if enable_single_table and single_table_query_count > 0:
         print(f"\nStarting single-table generation ({single_table_query_count} datasets)...")
-        sampled = _sample_single_table_datasets(csv_folder, single_table_query_count, seed=seed)
+        sampled = _sample_single_table_datasets(
+            csv_folder, single_table_query_count, extension=extension, seed=seed
+        )
         single_agent = SingleStatementAgent(
             config_path, kind, bad_tokens, languages=languages, seed=seed,
             analysis_cache_path=analysis_cache_path,
@@ -629,7 +634,7 @@ def create_statements(
             continue
 
         dataset_paths, aliases, metadatas, involved_cols, dfs = _build_match_inputs(
-            match, csv_folder, datasets_metadata, "csv"
+            match, csv_folder, datasets_metadata, extension
         )
 
         match_for_planner = _get_match_for_planner(match)
@@ -721,14 +726,14 @@ async def stream_generate_statements(
     # only ever READ descriptions/keywords from the cache.
     def _pre_analyze() -> None:
         involved = [
-            cfg.datasets_path / f"{dataset}.csv"
+            cfg.datasets_path / f"{dataset}.{cfg.datasets_format}"
             for match in all_matches
             for dataset in match.get("aliases", {}).values()
         ]
         if enable_single_table and single_table_query_count:
             involved.extend(
                 _sample_single_table_datasets(
-                    cfg.datasets_path, single_table_query_count, "csv", cfg.seed
+                    cfg.datasets_path, single_table_query_count, cfg.datasets_format, cfg.seed
                 )
             )
         TableAnalysisAgent(
@@ -752,7 +757,7 @@ async def stream_generate_statements(
     if enable_single_table and single_table_query_count:
         sampled = await loop.run_in_executor(
             None, _sample_single_table_datasets,
-            cfg.datasets_path, single_table_query_count, "csv", cfg.seed,
+            cfg.datasets_path, single_table_query_count, cfg.datasets_format, cfg.seed,
         )
         st_total = len(sampled)
 
@@ -831,7 +836,7 @@ async def stream_generate_statements(
 
         def _process_cross(match=match):
             dataset_paths, aliases, metadatas, involved_cols, dfs = _build_match_inputs(
-                match, cfg.datasets_path, metadata, "csv"
+                match, cfg.datasets_path, metadata, cfg.datasets_format
             )
             match_for_planner = _get_match_for_planner(match)
             if match_for_planner is None:
@@ -899,6 +904,7 @@ def generate_statements(cfg: OrQAConfig) -> None:
             cfg.statement_generation.queries_path,
             lang,
             cfg.candidates_discovery.limit_to_n_columns,
+            cfg.datasets_format,
             datasets_metadata=metadata,
             bad_tokens=cfg.statement_generation.bad_tokens,
             enable_single_table=cfg.statement_generation.enable_single_table,
