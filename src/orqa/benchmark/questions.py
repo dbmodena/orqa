@@ -32,14 +32,15 @@ of them under <data_path>/benchmark/<kind>/ (the subfolder is the
 programming language kind selected in the city's workflow yaml, e.g.
 benchmark/pandas or benchmark/sql):
 
-    benchmark/<kind>/questions_todo.json   one entry per question id with
-                                           "fetched": bool (has get_question
-                                           handed it out yet)
+    benchmark/<kind>/solver_results.json   one entry per question id with
+                                           "solved": bool and, once solved,
+                                           the stored solver `result`
+                                           (orqa.benchmark.solve.solve_benchmark)
 
-This is a retrieval benchmark for now: questions carry a hidden
-`reference.tables` (see load_questions) checked by evaluate_tables, and
-the only progress tracked is "fetched" — there is no answer to report or
-persist.
+Questions carry a hidden `reference.tables` and `reference.code` (see
+load_questions), checked against the solver's own independent answer by
+evaluate_table_retrieval (table/column selection accuracy) and
+orqa.benchmark.solve.compare_results (result value/dtype accuracy).
 """
 
 from __future__ import annotations
@@ -291,6 +292,18 @@ def load_questions(
                 "model": meta.get("model", ""),
                 "tables": _reference_tables(query, entry_tables),
                 "code": query.get("code", ""),
+                "expected_result_type": query.get("expected_result_type", "table"),
+                # alias ("Table_0", ...) -> resource_id, exactly for the
+                # aliases `code` above actually references — `tables`
+                # above is keyed by resource_id (for evaluate_table_
+                # retrieval's comparison against the solver's own
+                # resource_id-keyed selection), which loses the alias
+                # `code` needs to be executed correctly. Solely for
+                # orqa.benchmark.solve's reference-code execution.
+                "table_aliases": {
+                    t.get("name", ""): entry_tables.get(t.get("name", ""), t.get("name", ""))
+                    for t in (query.get("tables") or [])
+                },
             },
         }
     return questions
@@ -300,18 +313,19 @@ class BenchmarkTodo:
     """
     The persistent list of benchmark questions for one city/kind, read
     fresh from generated_queries(.json|_semantic.json) (whichever the
-    workflow yaml's tasks.candidates_discovery.method selects) at MCP
-    server startup.
+    workflow yaml's tasks.candidates_discovery.method selects) at
+    solve-benchmark startup.
 
-    Retrieval-only for now: the sole progress tracked per entry is
-    "fetched" — whether get_question has already handed it out — so its
-    no-argument call can walk through each question once, in order. This
-    survives restarts and re-syncs.
+    Progress tracked per entry is "solved" (bool) plus the stored solver
+    `result` once solved — solve_benchmark runs straight through every
+    not-yet-solved question and persists incrementally after each one, so
+    an interrupted run resumes without re-spending LLM calls on questions
+    already answered. Survives restarts and re-syncs.
     """
 
     def __init__(self, results_path: Path):
         self.results_path = Path(results_path)
-        self.todo_filepath = self.results_path / "questions_todo.json"
+        self.todo_filepath = self.results_path / "solver_results.json"
         self._entries: dict[str, dict] = (
             load_json(self.todo_filepath) if self.todo_filepath.exists() else {}
         )
@@ -319,47 +333,49 @@ class BenchmarkTodo:
     def sync(self, questions: dict[str, dict]) -> None:
         """
         Merge freshly loaded questions into the list: new ids start not
-        yet fetched; ids already present keep their "fetched" flag, only
-        refreshing the question definition fields.
+        yet solved; ids already present keep their "solved" flag and
+        stored result, only refreshing the question definition fields.
         """
         for qid, record in questions.items():
             existing = self._entries.get(qid)
             if existing:
                 existing.update({k: v for k, v in record.items() if k != "id"})
-                existing.setdefault("fetched", False)
+                existing.setdefault("solved", False)
                 continue
-            self._entries[qid] = {**record, "fetched": False}
+            self._entries[qid] = {**record, "solved": False}
         self._save()
 
-    def list(self, fetched: Optional[bool] = None) -> list[dict]:
+    def list(self, solved: Optional[bool] = None) -> list[dict]:
         entries = self._entries.values()
-        if fetched is not None:
-            entries = [e for e in entries if bool(e.get("fetched")) == fetched]
+        if solved is not None:
+            entries = [e for e in entries if bool(e.get("solved")) == solved]
         return [{"id": e["id"], "question": e.get("question", "")} for e in entries]
 
     def get(self, qid: str) -> Optional[dict]:
         return self._entries.get(qid)
 
-    def next_unfetched(self) -> Optional[dict]:
-        """First question not yet fetched, in todo-list order."""
-        return next((e for e in self._entries.values() if not e.get("fetched")), None)
+    def unsolved(self) -> list[dict]:
+        """Every question not yet solved, in todo-list order."""
+        return [e for e in self._entries.values() if not e.get("solved")]
 
-    def mark_fetched(self, qid: str) -> dict:
-        """Flag a question as fetched (idempotent) and return its entry."""
+    def mark_solved(self, qid: str, result: dict) -> dict:
+        """Store a question's solver result and flag it solved (persisted
+        immediately; re-solving an already-solved id overwrites the stored
+        result)."""
         entry = self._entries.get(qid)
         if entry is None:
             raise ValueError(f"No question with id {qid!r}")
-        if not entry.get("fetched"):
-            entry["fetched"] = True
-            self._save()
+        entry["solved"] = True
+        entry["result"] = result
+        self._save()
         return entry
 
     def counts(self) -> dict[str, int]:
-        fetched = sum(1 for e in self._entries.values() if e.get("fetched"))
+        solved = sum(1 for e in self._entries.values() if e.get("solved"))
         return {
             "total": len(self._entries),
-            "fetched": fetched,
-            "unfetched": len(self._entries) - fetched,
+            "solved": solved,
+            "unsolved": len(self._entries) - solved,
         }
 
     def _save(self) -> None:

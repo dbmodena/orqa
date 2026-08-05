@@ -611,6 +611,143 @@ class PipelineLogger:
         ))
 
     # ------------------------------------------------------------------ #
+    # Benchmark solver (orqa.benchmark.solve)                             #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _benchmark_outcome(result: dict) -> tuple[str, str, str]:
+        """Classify one question's result into (label, icon, color).
+
+        `status == "solved"` alone only means the pipeline ran to
+        completion on both sides — it says nothing about whether the
+        independently-derived answer actually MATCHED the hidden
+        reference (that's `result_evaluation.exact_match`). Collapsing
+        both into one green checkmark would hide the single most
+        important distinction this whole benchmark exists to draw: ran
+        fine but wrong is not the same outcome as correct, and both are
+        different again from retrieval never finding the table at all.
+        """
+        status = result.get("status", "?")
+        result_eval = result.get("result_evaluation") or {}
+        if status == "solved" and result_eval.get("comparable"):
+            if result_eval.get("exact_match"):
+                return "correct", "✔", GREEN
+            return "wrong answer", "✖", YELLOW
+        if status in ("no_viable_selection", "no_candidates", "no_keywords"):
+            return "retrieval miss", "○", YELLOW
+        if status == "exception":
+            return "crashed", "✖", RED
+        return "execution failed", "↺", YELLOW
+
+    def benchmark_start(self, total: int, solved: int, unsolved: int) -> None:
+        badge = _badge("BENCHMARK SOLVER", BG_MAGENTA)
+        print(
+            f"\n{_ts()}  {badge}  {BOLD}{total} question(s) — "
+            f"{solved} already solved, {unsolved} to go{RESET}"
+        )
+        print(_indent(_divider(), 1))
+
+    def benchmark_question(self, question_id, question: str, result: dict, elapsed: float) -> None:
+        """One question's outcome: table-retrieval F1 and (when both sides
+        executed) the result match, plus a short "why" line for anything
+        short of a correct, comparable match — mirrors query_rejected's
+        feedback line, the headline alone doesn't say what went wrong."""
+        label, icon, color = self._benchmark_outcome(result)
+        table_eval = result.get("table_evaluation") or {}
+        table_f1 = table_eval.get("f1")
+        result_eval = result.get("result_evaluation") or {}
+
+        tags = []
+        if table_f1 is not None:
+            tags.append(f"table F1 {table_f1:.2f}")
+        if result_eval.get("comparable"):
+            tags.append(f"dtype {'ok' if result_eval.get('dtype_match') else 'mismatch'}")
+        tag_str = f"  {DIM}({', '.join(tags)}){RESET}" if tags else ""
+
+        print(_indent(
+            f"{color}{icon}{RESET}  {DIM}#{question_id}{RESET}  {question}{tag_str}  "
+            f"{DIM}[{color}{label}{RESET}{DIM}, {elapsed:.1f}s]{RESET}",
+            1,
+        ))
+
+        if label == "retrieval miss":
+            reasoning = (result.get("table_selection") or {}).get("reasoning", "")
+            if reasoning:
+                print(_indent(f"{DIM}reason:{RESET} {reasoning}", 3))
+        elif label in ("execution failed", "crashed"):
+            execution = result.get("execution") or {}
+            for side in ("solver", "reference"):
+                errs = (execution.get(side) or {}).get("errors") or []
+                if errs:
+                    print(_indent(f"{DIM}{side}:{RESET} {YELLOW}{errs[0]}{RESET}", 3))
+            if not execution and result.get("errors"):
+                print(_indent(f"{DIM}error:{RESET} {RED}{result['errors'][0]}{RESET}", 3))
+        elif label == "wrong answer":
+            vd = result_eval.get("value_diff")
+            if vd and vd.get("kind") == "numeric":
+                print(_indent(
+                    f"{DIM}value diff:{RESET} {YELLOW}absolute={vd['absolute']} relative={vd['relative']}{RESET}",
+                    3,
+                ))
+            elif not result_eval.get("shape_match"):
+                print(_indent(
+                    f"{DIM}shape:{RESET} {YELLOW}reference={result_eval.get('reference_shape')} "
+                    f"candidate={result_eval.get('candidate_shape')}{RESET}",
+                    3,
+                ))
+
+    def benchmark_summary(self, results: list[dict]) -> None:
+        """Aggregate accuracy across every question solved THIS run — the
+        actual point of the round-trip benchmark: not "did it run", but how
+        often an independently-retrieved answer matches the hidden ground
+        truth, broken down by failure mode so a low score is diagnosable
+        rather than just a single discouraging number."""
+        badge = _badge("BENCHMARK SUMMARY", BG_MAGENTA)
+        print(f"\n{_ts()}  {badge}")
+        print(_indent(_divider(), 1))
+
+        if not results:
+            print(_indent(f"{DIM}No questions solved this run.{RESET}", 1))
+            return
+
+        by_label: dict[str, int] = {}
+        for r in results:
+            label, _icon, _color = self._benchmark_outcome(r)
+            by_label[label] = by_label.get(label, 0) + 1
+
+        n = len(results)
+        print(_indent(f"{BOLD}{n}{RESET} question(s) this run:", 1))
+        label_colors = {
+            "correct": GREEN, "wrong answer": YELLOW,
+            "retrieval miss": YELLOW, "crashed": RED, "execution failed": YELLOW,
+        }
+        for label, count in sorted(by_label.items(), key=lambda kv: -kv[1]):
+            color = label_colors.get(label, DIM)
+            print(_indent(f"  {color}{label}{RESET}: {count}  {DIM}({count/n:.0%}){RESET}", 1))
+
+        table_f1s = [
+            r["table_evaluation"]["f1"] for r in results
+            if r.get("table_evaluation") is not None
+        ]
+        if table_f1s:
+            mean_f1 = sum(table_f1s) / len(table_f1s)
+            print(_indent(
+                f"{BOLD}Table retrieval — mean F1 {mean_f1:.3f}{RESET} over {len(table_f1s)} question(s)",
+                1,
+            ))
+
+        comparable = [r for r in results if (r.get("result_evaluation") or {}).get("comparable")]
+        if comparable:
+            exact = sum(1 for r in comparable if r["result_evaluation"].get("exact_match"))
+            rate = exact / len(comparable)
+            color = GREEN if rate >= 0.5 else YELLOW
+            print(_indent(
+                f"{BOLD}Result accuracy — {color}{exact}/{len(comparable)} exact match "
+                f"({rate:.0%}){RESET}{DIM} (of questions where both sides executed){RESET}",
+                1,
+            ))
+
+    # ------------------------------------------------------------------ #
     # Misc helpers                                                        #
     # ------------------------------------------------------------------ #
 

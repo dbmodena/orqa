@@ -25,6 +25,9 @@ from .prompts import (
     GenerationEnrichmentPrompt,
     QueryPlannerPrompt,
     TableAnalyzerBatchPrompt,
+    BenchmarkSearchKeywordsPrompt,
+    BenchmarkTableSelectionPrompt,
+    BenchmarkSolverCodePrompt,
     build_generation_prompt,
 )
 from .models import (
@@ -58,6 +61,9 @@ __all__ = [
     "GenerationEnrichmentPrompt",
     "QueryPlannerPrompt",
     "TableAnalyzerBatchPrompt",
+    "BenchmarkSearchKeywordsPrompt",
+    "BenchmarkTableSelectionPrompt",
+    "BenchmarkSolverCodePrompt",
     "build_generation_prompt",
     "SQLPlanStep",
     "PandasPlanStep",

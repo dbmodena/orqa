@@ -323,20 +323,15 @@ class StatementGeneration:
 @dataclass
 class MCPSearch:
     """
-    Configuration for the MCP dataset-search server.
+    Configuration for the reverse-index backend shared by the plan judge's
+    retrievability check (orqa.agent.utility.keyword_suggestion/
+    keyword_searchability) and the benchmark solver (orqa.benchmark.solve).
 
-    The server exposes a keyword reverse index built from the normalized
-    metadata, so that an agent can find the CSVs needed to answer a
-    question. With the "elasticsearch" backend the reverse index lives in
-    an Elasticsearch index (created at server startup when missing); with
-    the "builtin" backend it is materialized under <data_path>/index/.
+    With the "elasticsearch" backend the reverse index lives in an
+    Elasticsearch index (created when missing); with the "builtin" backend
+    it is materialized under <data_path>/index/, no external service
+    required.
     """
-
-    # Port used when the server runs in "port" mode (streamable HTTP).
-    port: int
-
-    # Interface to bind in "port" mode.
-    host: str
 
     # Which reverse index implementation to use.
     backend: Literal["elasticsearch", "builtin"]
@@ -395,6 +390,34 @@ class MCPSearch:
         )
 
 
+@dataclass
+class BenchmarkSolver:
+    """
+    Configuration for the round-trip benchmark solver (orqa.benchmark.solve):
+    given only a question, retrieve candidate tables, relate them via
+    Valentine matching, and independently answer it for comparison against
+    the hidden ground truth (see orqa.agent.agents.BenchmarkSolver).
+    """
+
+    # How many candidate tables the reverse-index search retrieves per
+    # question — the pool Phase 2 (table selection) chooses from and the
+    # scope of the pairwise Valentine relationship pass.
+    top_k_tables: int = 10
+
+    # Valentine matcher for the pairwise relationship pass among candidates
+    # — schema-only and fast by default (same choice search_datasets used):
+    # up to C(top_k_tables, 2) pairs get matched per question, so an
+    # instance-based matcher here would scale badly.
+    matcher: str = "similarity_flooding"
+
+    def __post_init__(self):
+        self.top_k_tables = int(self.top_k_tables)
+        if self.top_k_tables < 1:
+            raise ValueError(
+                f"tasks.benchmark_solver.top_k_tables must be >= 1, got {self.top_k_tables}"
+            )
+
+
 # How many judges each panel mode resolves to — the only two values a
 # JudgePanel's judge_count is ever constructed with. "trio" caps at 3 even
 # if judge_profiles.<panel> lists more (e.g. future failover profiles); a
@@ -437,6 +460,7 @@ class OrQAConfig:
     candidates_discovery: CandidatesDiscovery
     statement_generation: StatementGeneration
     mcp_search: MCPSearch
+    benchmark_solver: BenchmarkSolver
     judges: Judges
 
     # Classical (BLEND) pipeline configuration; None when the workflow yaml
@@ -721,8 +745,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         multi_table_query_count=multi_table_query_count,
     )
 
-    # setup the MCP dataset-search server (port comes from the
-    # city's workflow yaml; defaults keep older yamls working)
+    # reverse-index backend config (defaults keep older yamls working)
     mcp_search_task = parsed["tasks"].get("mcp_search") or {}
     backend = mcp_search_task.get("backend", "elasticsearch")
     if backend not in ("elasticsearch", "builtin"):
@@ -731,8 +754,6 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
             f"'builtin', got {backend!r}"
         )
     mcp_search = MCPSearch(
-        port=int(mcp_search_task.get("port", 8765)),
-        host=str(mcp_search_task.get("host", "127.0.0.1")),
         backend=backend,
         elasticsearch_url=str(
             mcp_search_task.get("elasticsearch_url", "http://localhost:9200")
@@ -746,6 +767,13 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         retrieval_gate_enabled=mcp_search_task.get(
             "retrieval_gate_enabled", True
         ),
+    )
+
+    # benchmark solver config (see orqa.benchmark.solve)
+    benchmark_solver_task = parsed["tasks"].get("benchmark_solver") or {}
+    benchmark_solver = BenchmarkSolver(
+        top_k_tables=benchmark_solver_task.get("top_k_tables", 10),
+        matcher=str(benchmark_solver_task.get("matcher", "similarity_flooding")),
     )
 
     # How many judges vote on each plan/code panel (see JudgePanel) — the
@@ -797,6 +825,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         candidates_discovery=candidates_discovery,
         statement_generation=statement_generation,
         mcp_search=mcp_search,
+        benchmark_solver=benchmark_solver,
         judges=judges,
         filter_filenames_patterns=filter_filenames_patterns,
         filter_column_patterns=filter_column_patterns,

@@ -5,6 +5,7 @@ from .. import utils
 import textwrap
 import ast
 import logging
+import warnings
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +14,13 @@ try:
     HAS_DUCKDB = True
 except ImportError:
     HAS_DUCKDB = False
+
+# See orqa.agent.validators.QueryValidator's identical constant: generated
+# code computing df.corr()/Series.corr() over a constant (zero-variance)
+# column makes numpy print a RuntimeWarning for a mathematically
+# well-defined NaN result (0/0), not an actual problem. Silenced around
+# execution below — just this message family, not RuntimeWarning at large.
+_BENIGN_NUMPY_STATS_WARNING = r"(invalid value encountered|divide by zero encountered|Degrees of freedom)"
 
 
 class QueryExecutor:
@@ -127,7 +135,11 @@ class QueryExecutor:
         for alias, df in dataframes.items():
             con.register(alias, df)
         try:
-            result = con.execute(sql).fetchdf()
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore", category=RuntimeWarning, message=_BENIGN_NUMPY_STATS_WARNING
+                )
+                result = con.execute(sql).fetchdf()
         finally:
             con.close()
         return result
@@ -135,7 +147,11 @@ class QueryExecutor:
     def _execute_pandas(self, code: str, dataframes: dict[str, pd.DataFrame]) -> pd.DataFrame:
         code = self._inject_result(code)
         namespace: dict[str, Any] = {"pd": pd, **dataframes}
-        exec(code, namespace)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", category=RuntimeWarning, message=_BENIGN_NUMPY_STATS_WARNING
+            )
+            exec(code, namespace)
         result = namespace.get("result")
         if result is None:
             raise RuntimeError(

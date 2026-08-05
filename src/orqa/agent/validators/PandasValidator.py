@@ -9,6 +9,7 @@ from io import StringIO
 import sys
 from typing import Any
 from .QueryValidator import QueryValidator
+from ...utils import summarize_large_value
 import re
 
 UNAUTHORIZED_COMMANDS = [
@@ -583,11 +584,19 @@ class PandasValidator(QueryValidator):
 
     def _normalize_pandas_error(self, e: Exception, source: str = "") -> Exception:
         msg = str(e).lower()
-        raw = str(e).strip('"').strip("'")
+        # A conversion/cast failure (pd.to_numeric, .astype(...), ...) embeds
+        # the FULL offending cell value verbatim in str(e) — unbounded, so a
+        # huge cell (e.g. a WKT geometry blob) would otherwise blow up the
+        # correction prompt below. `raw_full` keeps the untouched message for
+        # internal parsing (e.g. the KeyError column-name extraction, which
+        # never deals with data-sized values); every `{raw}` interpolated
+        # into a message actually sent to the LLM uses the shielded copy.
+        raw_full = str(e).strip('"').strip("'")
+        raw = summarize_large_value(raw_full)
 
         if isinstance(e, KeyError):
             # Try to extract the column name and provide suggestions
-            col_name = raw.strip("'").strip('"')
+            col_name = raw_full.strip("'").strip('"')
             available_cols = []
             for df in self.dataframes:
                 if isinstance(df, pd.DataFrame):

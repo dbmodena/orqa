@@ -3,6 +3,7 @@ import pandas as pd
 import polars as pl
 from typing import Any
 from .QueryValidator import QueryValidator
+from ...utils import summarize_large_value
 import re
 
 _LITERAL_RE = re.compile(r"'(?:''|[^'])*'")
@@ -474,7 +475,7 @@ class SQLValidator(QueryValidator):
 
         except duckdb.ParserException as e:
             raise ValueError(
-                f"Malformed SQL structure: {e}\n"
+                f"Malformed SQL structure: {summarize_large_value(str(e))}\n"
                 "Hint: Do not mix UNION and JOIN syntax. "
                 "UNION combines result sets of separate SELECT statements and does not use ON clauses. "
                 "JOIN connects tables within a single SELECT statement using ON clauses. "
@@ -484,7 +485,13 @@ class SQLValidator(QueryValidator):
             ) from e
 
         except duckdb.BinderException as e:
-            error_msg = str(e)
+            # A cast/comparison mismatch can embed the full offending value
+            # (e.g. a huge WKT geometry) verbatim in DuckDB's message —
+            # shield BEFORE the substring/regex checks below and before it
+            # is echoed back to the correction LLM. Head+tail excerpting
+            # keeps both ends intact (e.g. "... to type DOUBLE" at the very
+            # end), so `_detect_type_mismatch`'s regexes still match.
+            error_msg = summarize_large_value(str(e))
             # Detect type mismatch in comparisons (string vs numeric)
             type_mismatch = self._detect_type_mismatch(error_msg)
             if type_mismatch:
@@ -503,7 +510,7 @@ class SQLValidator(QueryValidator):
             raise ValueError(f"Binder error: {error_msg}\nHint: {hint}") from e
 
         except duckdb.ConversionException as e:
-            error_msg = str(e)
+            error_msg = summarize_large_value(str(e))
             type_mismatch = self._detect_type_mismatch(error_msg)
             if type_mismatch:
                 raise ValueError(type_mismatch) from e
@@ -513,7 +520,7 @@ class SQLValidator(QueryValidator):
             ) from e
 
         except duckdb.InvalidInputException as e:
-            error_msg = str(e)
+            error_msg = summarize_large_value(str(e))
             type_mismatch = self._detect_type_mismatch(error_msg)
             if type_mismatch:
                 raise ValueError(type_mismatch) from e

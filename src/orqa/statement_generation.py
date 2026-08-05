@@ -13,7 +13,7 @@ from .agent.agents.StatementAgent import StatementAgent
 from .agent.agents.SingleStatementAgent import SingleStatementAgent
 from .benchmark.index import load_index
 from .benchmark.questions import get_entry, store_entry
-from .utils import load_datasets_metadata,load_normalized_datasets_metadata, load_dataset_info, save_json, load_json, prepare_dataframe, pd_read_dataset
+from .utils import load_datasets_metadata,load_normalized_datasets_metadata, load_dataset_info, save_json, load_json, prepare_dataframe, pd_read_dataset, summarize_large_value
 from conf import OrQAConfig, JUDGE_MODE_COUNTS
 from dataclasses import dataclass, field
 
@@ -83,11 +83,22 @@ def _format_matches_sql(match_specs: list[dict]) -> str:
 
 
 def _sample_col(df: pd.DataFrame, col: str, n: int = 3) -> list:
-    """Return up to n distinct non-null sample values from a column."""
+    """Return up to n distinct non-null sample values from a column.
+
+    ``df`` here is the FULL, uncapped table read by ``_build_match_inputs``
+    (loaded just for this sampling), and a geometry/free-text column's
+    values are typically all-distinct — so an oversized cell (e.g. a
+    full-precision WKT MULTIPOLYGON) can genuinely surface here.
+    summarize_large_value shields it before it reaches the match-description
+    block embedded in the generation prompt (see format_matches_for_prompt).
+    """
     if col not in df.columns:
         return []
     vals = df[col].dropna().unique()
-    return [v.item() if hasattr(v, "item") else v for v in vals[:n]]
+    return [
+        summarize_large_value(v.item() if hasattr(v, "item") else v)
+        for v in vals[:n]
+    ]
 
 
 def _format_matches_pandas(

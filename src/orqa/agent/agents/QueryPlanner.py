@@ -48,6 +48,7 @@ from ..prompting.models import (
 from ..prompting.prompts import QueryPlannerPrompt
 from ..utility.difficulty_estimator import build_reconciliation_feedback, estimate_plan_tier
 from ..utility.structured_outputs import QueryLink, Table
+from ...utils import shield_dataframe_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -1446,7 +1447,8 @@ class QueryPlanner:
         payload = []
         for alias, df in zip(alias_names, dfs):
             try:
-                rows = json.loads(df.head(10).to_json(orient="records", date_format="iso"))
+                shielded = shield_dataframe_for_prompt(df.head(10))
+                rows = json.loads(shielded.to_json(orient="records", date_format="iso"))
             except (TypeError, ValueError):
                 rows = []
             payload.append({"alias": alias, "rows": rows})

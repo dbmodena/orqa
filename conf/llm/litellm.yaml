@@ -118,6 +118,20 @@ plan_judge:
   module: "utility.structured_outputs"
   class: "PlanJudgment"
 
+# Benchmark solver (orqa.agent.agents.BenchmarkSolver) — three single-shot
+# phases of the round-trip benchmark loop (orqa.benchmark.solve).
+benchmark_search_keywords:
+  module: "utility.structured_outputs"
+  class: "SearchKeywords"
+
+benchmark_table_selection:
+  module: "utility.structured_outputs"
+  class: "TableSelection"
+
+benchmark_solver_code:
+  module: "utility.structured_outputs"
+  class: "SolverCode"
+
 # Local Ollama setup
 # model: ollama_chat/llama3.3:latest
 # api_base: http://localhost:11434

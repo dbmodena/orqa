@@ -1,4 +1,4 @@
-from typing import Optional, Literal
+from typing import Any, Optional, Literal
 import copy
 import json
 import logging
@@ -286,7 +286,7 @@ def load_dataset_info(
 
     coldetails, column_typings = polars_column_details(df)
 
-    sample = df.sample(min(sample_size, df.height), seed=seed)
+    sample = shield_polars_df_for_prompt(df.sample(min(sample_size, df.height), seed=seed))
 
     with pl.Config(
         tbl_formatting="MARKDOWN",
@@ -435,6 +435,191 @@ def _generalize_value_shape(value) -> str:
     return re.sub(r"\d+", "#", str(value))
 
 
+# ---------------------------------------------------------------------------
+# Prompt-size shielding for oversized cell values.
+#
+# A raw WKT geometry cell (e.g. a parking-meter rate-zone MULTIPOLYGON) can
+# run to hundreds of thousands of characters — thousands of coordinate pairs
+# concatenated at full precision, possibly bundling several disjoint rings.
+# Every place that renders a table SAMPLE or an executed RESULT into an LLM
+# prompt (task proposer, table-description generation, query planning, code
+# generation, code validation's error feedback, code judging) must go
+# through ``summarize_large_value``/``shield_dataframe_for_prompt`` below
+# instead of embedding the raw value. The dataframe used for actual code
+# EXECUTION (and the persisted query-result JSON) must stay untouched, or a
+# query that genuinely needs the real value would silently operate on the
+# summary string instead of the data.
+# ---------------------------------------------------------------------------
+
+LARGE_VALUE_CHARS = 300
+_VALUE_EDGE_CHARS = 100
+
+# Target size for a SIMPLIFIED-but-still-real WKT geometry (see
+# _simplify_wkt_geometry) — deliberately larger than LARGE_VALUE_CHARS: the
+# point of simplifying instead of just describing is to keep an actually
+# readable rough shape, not to match the terse metadata line's size.
+WKT_SIMPLIFIED_BUDGET_CHARS = 800
+_WKT_SIMPLIFY_SEED_FRACTION = 0.003   # 0.3% of the geometry's bbox diagonal
+_WKT_SIMPLIFY_GROWTH_FACTOR = 3
+_WKT_SIMPLIFY_MAX_ATTEMPTS = 8
+_WKT_ROUNDING_PRECISION = 6           # ~11cm at the equator for lon/lat data
+
+_WKT_GEOM_RE = re.compile(
+    r'^\s*(MULTI)?(POINT|LINESTRING|POLYGON|GEOMETRYCOLLECTION)\s*[ZM]{0,2}\s*\(',
+    re.IGNORECASE,
+)
+_WKT_COORD_RE = re.compile(r'(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)')
+
+try:
+    from shapely import wkt as _shapely_wkt
+    _SHAPELY_AVAILABLE = True
+except ImportError:  # pragma: no cover - shapely is a normal dependency
+    _SHAPELY_AVAILABLE = False
+
+
+def _simplify_wkt_geometry(value: str) -> Optional[str]:
+    """Shrink a WKT geometry literal to a real, valid, lower-fidelity
+    version of the SAME shape — coordinate-precision rounding plus
+    scale-aware adaptive Douglas-Peucker simplification (shapely) — rather
+    than replacing it with metadata about it.
+
+    Returns ``None`` (caller falls back to the metadata-only descriptor)
+    when shapely isn't installed, ``value`` doesn't parse as WKT, or no
+    simplification attempt fits ``WKT_SIMPLIFIED_BUDGET_CHARS`` — a
+    MULTIPOLYGON bundling thousands of disjoint rings (e.g. every census
+    block in a borough) has a hard size floor no tolerance can beat, since
+    simplify() thins vertices WITHIN a ring but never drops whole rings.
+    """
+    if not _SHAPELY_AVAILABLE:
+        return None
+    try:
+        geom = _shapely_wkt.loads(value)
+    except Exception:
+        return None
+    if geom.is_empty:
+        return None
+
+    def _serialize(g) -> str:
+        return _shapely_wkt.dumps(g, rounding_precision=_WKT_ROUNDING_PRECISION)
+
+    try:
+        minx, miny, maxx, maxy = geom.bounds
+    except Exception:
+        return None
+    diagonal = ((maxx - minx) ** 2 + (maxy - miny) ** 2) ** 0.5
+
+    # A degenerate/point-like geometry has no meaningful tolerance scale —
+    # precision-rounding alone is the only lever available.
+    if diagonal <= 0:
+        candidate = _serialize(geom)
+        return candidate if len(candidate) <= WKT_SIMPLIFIED_BUDGET_CHARS else None
+
+    tolerance = diagonal * _WKT_SIMPLIFY_SEED_FRACTION
+    for _ in range(_WKT_SIMPLIFY_MAX_ATTEMPTS):
+        try:
+            candidate = _serialize(geom.simplify(tolerance, preserve_topology=True))
+        except Exception:
+            return None
+        if len(candidate) <= WKT_SIMPLIFIED_BUDGET_CHARS:
+            return candidate
+        tolerance *= _WKT_SIMPLIFY_GROWTH_FACTOR
+    return None
+
+
+def _summarize_wkt(value: str) -> Optional[str]:
+    """Collapse a full-precision WKT geometry literal (POINT/LINESTRING/
+    POLYGON/MULTI*/GEOMETRYCOLLECTION) down to something prompt-sized.
+
+    Prefers a real, simplified version of the SAME shape (see
+    ``_simplify_wkt_geometry``) — an LLM (or a person) can still tell what
+    the shape roughly looks like, not just that one exists. Falls back to a
+    compact structural summary — geometry type, ring count, vertex count,
+    bounding box — when shapely is unavailable, the value doesn't parse, or
+    the geometry is too complex (too many disjoint rings) to fit the
+    simplification budget at any tolerance. Returns ``None`` for any string
+    that isn't WKT at all, so the caller falls back to generic truncation.
+    """
+    header = _WKT_GEOM_RE.match(value)
+    if not header:
+        return None
+
+    simplified = _simplify_wkt_geometry(value)
+    if simplified is not None:
+        return f"{simplified} [simplified: {len(value):,} -> {len(simplified):,} chars]"
+
+    geom_type = f"{(header.group(1) or '').upper()}{header.group(2).upper()}"
+
+    coords = _WKT_COORD_RE.findall(value)
+    n_vertices = len(coords)
+    n_rings = value.count("((") or (1 if coords else 0)
+
+    bbox = ""
+    if coords:
+        xs = [float(x) for x, _ in coords]
+        ys = [float(y) for _, y in coords]
+        bbox = f", bbox=[{min(xs):.6f}, {min(ys):.6f}, {max(xs):.6f}, {max(ys):.6f}]"
+
+    return (
+        f"<{geom_type} WKT: {n_rings} ring(s), {n_vertices:,} vertices{bbox}, "
+        f"{len(value):,} chars — full value omitted, too large for prompt>"
+    )
+
+
+def summarize_large_value(value: Any, max_chars: int = LARGE_VALUE_CHARS) -> Any:
+    """Return ``value`` unchanged unless it is a string longer than
+    ``max_chars`` — in which case return a compact PATTERN summary instead
+    of either the full raw blob or a context-free truncation.
+
+    A WKT geometry literal gets a real, simplified version of the SAME
+    shape when possible, otherwise a structural summary (type, ring/vertex
+    counts, bounding box) — see ``_summarize_wkt``. Any other oversized
+    string (long free text, or a validator's exception message with a huge
+    value embedded mid-sentence) gets a head+tail excerpt, so context on
+    BOTH ends survives — error messages often carry the useful part (e.g.
+    "... to type DOUBLE") at the very end, not the start.
+    """
+    if not isinstance(value, str) or len(value) <= max_chars:
+        return value
+
+    wkt_summary = _summarize_wkt(value)
+    if wkt_summary is not None:
+        return wkt_summary
+
+    head = value[:_VALUE_EDGE_CHARS]
+    tail = value[-_VALUE_EDGE_CHARS:]
+    elided = len(value) - 2 * _VALUE_EDGE_CHARS
+    return f"{head} …[{elided:,} chars elided]… {tail}"
+
+
+def shield_dataframe_for_prompt(
+    df: pd.DataFrame, max_chars: int = LARGE_VALUE_CHARS
+) -> pd.DataFrame:
+    """Return a COPY of ``df`` with oversized cell values (see
+    ``summarize_large_value``) replaced by compact pattern summaries.
+
+    For LLM-facing rendering ONLY (sample previews, table descriptions,
+    judge payloads) — never use the return value for code execution or for
+    the persisted query-result JSON.
+    """
+    return df.map(lambda v: summarize_large_value(v, max_chars))
+
+
+def shield_polars_df_for_prompt(
+    df: pl.DataFrame, max_chars: int = LARGE_VALUE_CHARS
+) -> pl.DataFrame:
+    """Polars counterpart of :func:`shield_dataframe_for_prompt` — same
+    contract, for the polars-based ``load_dataset_info`` sample view."""
+    string_cols = [c for c in df.columns if df[c].dtype == pl.Utf8]
+    if not string_cols:
+        return df
+    return df.with_columns([
+        pl.col(c).map_elements(
+            lambda v: summarize_large_value(v, max_chars), return_dtype=pl.Utf8
+        )
+        for c in string_cols
+    ])
+
+
 def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Column-level cleaning shared by ``prepare_dataset`` (the view shown to
     the LLM during analysis/planning) and ``QueryExecutor.load_tables`` (the
@@ -516,7 +701,7 @@ def extract_dataset_info(
         column_typings[col] = pd.api.types.is_numeric_dtype(df[col])
 
     sample = df.sample(min(sample_size, len(df)), random_state=seed)
-    sample_md = sample.to_markdown(index=False)
+    sample_md = shield_dataframe_for_prompt(sample).to_markdown(index=False)
 
     info = {
         "id": "dataframe",

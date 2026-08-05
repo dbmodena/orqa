@@ -8,8 +8,19 @@ import queue as queue_module
 import re
 import multiprocessing as mp
 import numbers
+import warnings
 import numpy as np
 import pandas as pd
+
+# Generated code routinely computes correlations/statistics over messy
+# real-world data, where a constant (zero-variance) column makes the result
+# mathematically undefined (0/0 = NaN) rather than wrong — numpy's
+# cov/corrcoef internals (df.corr(), Series.corr()) print a RuntimeWarning
+# for this well-defined edge case regardless, which reads as an alarming
+# crash signal it isn't. Silenced by _sandbox_worker (below) around the
+# actual execution — just this message family, not RuntimeWarning at
+# large, so a genuine numeric problem (e.g. a real overflow) still surfaces.
+_BENIGN_NUMPY_STATS_WARNING = r"(invalid value encountered|divide by zero encountered|Degrees of freedom)"
 
 from orqa.utils import prepare_dataframe
 
@@ -104,7 +115,11 @@ def _sandbox_worker(queue: mp.Queue, fn, args: tuple) -> None:
     misleading "sandbox crashed" error.
     """
     try:
-        result = fn(*args)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", category=RuntimeWarning, message=_BENIGN_NUMPY_STATS_WARNING
+            )
+            result = fn(*args)
     except MemoryError:
         queue.put((
             "error",

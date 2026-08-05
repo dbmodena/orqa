@@ -31,6 +31,7 @@ from typing import Any, List, Optional
 
 from ..llm_client.LLMClientStructured import LLMClientStructured
 from ..prompting.prompts import TableAnalyzerBatchPrompt
+from ...utils import shield_dataframe_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -337,7 +338,8 @@ class TableAnalyzer:
                 for i in miss_indices
             ]
             samples_per_table = [
-                dfs[i].head(3).to_dict(orient="records") for i in miss_indices
+                shield_dataframe_for_prompt(dfs[i].head(3)).to_dict(orient="records")
+                for i in miss_indices
             ]
             miss_metadata = [metadata_list[i] for i in miss_indices]
 

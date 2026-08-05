@@ -437,6 +437,45 @@ class TableAnalyzerBatchPrompt(Prompt):
         return self._update(aliases=aliases, languages=languages, tables=tables)
 
 
+# ── Benchmark solver prompts (orqa.agent.agents.BenchmarkSolver) ───────────
+
+class BenchmarkSearchKeywordsPrompt(Prompt):
+    """Phase 1: question -> retrieval keywords, in the question's own language."""
+    _prompt_path = PROMPT_PATH.joinpath("benchmark_search_keywords.md")
+
+    def update(self, question: str) -> str:
+        return self._update(question=question)
+
+
+class BenchmarkTableSelectionPrompt(Prompt):
+    """Phase 2: question + retrieved candidates + Valentine relationships -> table/column selection."""
+    _prompt_path = PROMPT_PATH.joinpath("benchmark_table_selection.md")
+
+    def update(self, question: str, candidates: str, relationships: str) -> str:
+        return self._update(question=question, candidates=candidates, relationships=relationships)
+
+
+class BenchmarkSolverCodePrompt(Prompt):
+    """Phase 3: question + Phase 2's selection -> code."""
+    _prompt_path = PROMPT_PATH.joinpath("benchmark_solver_code.md")
+
+    def update(
+        self,
+        question: str,
+        kind: str,
+        kind_rules: str,
+        expected_result_type: str,
+        selected_tables: str,
+    ) -> str:
+        return self._update(
+            question=question,
+            kind=kind,
+            kind_rules=kind_rules,
+            expected_result_type=expected_result_type,
+            selected_tables=selected_tables,
+        )
+
+
 def _render_plan_steps(plan: QueryPlan) -> str:
     """Render the ordered plan steps as a numbered, human-readable block.
 

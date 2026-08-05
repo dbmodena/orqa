@@ -569,6 +569,129 @@ class QuerySet(BaseModel):
     )
 
 
+# ── Benchmark solver (orqa.benchmark.solve) ─────────────────────────────────
+#
+# Three single-shot phases — keyword generation, table selection, code
+# writing — for the round-trip benchmark solver: given ONLY a question (never
+# the hidden ground truth), independently retrieve candidate tables and
+# answer it, so the answer can be compared back against the ground truth
+# (see orqa.benchmark.questions.evaluate_table_retrieval and
+# orqa.benchmark.solve.compare_results). Deliberately three separate calls,
+# not one — mirrors the QueryPlanner -> StatementClient split used by
+# generation, without the judge/correction machinery layered on top of it
+# there: a benchmark solver measures raw capability against retrieved,
+# not-guaranteed-relevant context, so no phase retries itself here.
+
+class SearchKeywords(BaseModel):
+    """Phase 1: retrieval keywords extracted from a benchmark question."""
+
+    detected_language: str = Field(
+        ...,
+        description=(
+            "The natural language the question is written in (e.g. "
+            "'English', 'Spanish', 'Italian', 'French') — your own read of "
+            "it, not assumed from any other context."
+        )
+    )
+    keywords: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Retrieval keywords extracted from the question, IN "
+            "detected_language (the reverse index only matches that "
+            "language): entities, topics, measures, place and time "
+            "expressions. Single words or short established terms, never "
+            "descriptive phrases."
+        )
+    )
+
+    @field_validator("keywords")
+    @classmethod
+    def dedupe_keywords(cls, v: List[str]) -> List[str]:
+        """Remove duplicate keywords, preserving order. No count cap."""
+        seen = set()
+        unique = []
+        for kw in v:
+            if kw not in seen:
+                seen.add(kw)
+                unique.append(kw)
+        return unique
+
+
+class SolverTableUsage(BaseModel):
+    """One retrieved table the solver decided to use, and which of its
+    columns for."""
+
+    resource_id: str = Field(
+        ...,
+        description="The dataset's resource id, exactly as returned by the reverse index search."
+    )
+    columns_used: List[str] = Field(
+        default_factory=list,
+        description="The columns from this table actually needed to answer the question."
+    )
+
+
+# Same 5 shapes as prompting.models._RESULT_TYPES, duplicated here (not
+# imported) to avoid a structured_outputs <-> prompting.models import cycle
+# (prompting.models already imports Table/QueryLink FROM this module).
+_SOLVER_RESULT_TYPES = Literal["table", "list", "number", "text", "boolean"]
+
+
+class TableSelection(BaseModel):
+    """Phase 2: which retrieved candidate table(s) — not all of them are
+    necessarily relevant — actually answer the question, and the shape of
+    that answer."""
+
+    tables: List[SolverTableUsage] = Field(
+        default_factory=list,
+        description=(
+            "The candidate table(s) that actually answer the question, "
+            "each with the columns used from it. Candidates not listed "
+            "here were judged irrelevant and must be ignored in Phase 3 — "
+            "not every retrieved table has to be used."
+        )
+    )
+    expected_result_type: _SOLVER_RESULT_TYPES = Field(
+        ...,
+        description=(
+            "The SHAPE of the final answer: number (\"how many/how "
+            "much...\"), boolean (yes/no), text (\"which single X...\"), "
+            "list (one ordered sequence of values), or table (per-group "
+            "breakdowns, rankings, any multi-column result)."
+        )
+    )
+    reasoning: str = Field(
+        default="",
+        description="1-2 sentences: why these table(s)/columns, and why the others (if any) were rejected."
+    )
+    no_viable_selection: bool = Field(
+        default=False,
+        description=(
+            "True when NONE of the retrieved candidates can answer the "
+            "question — retrieval missed. When true, `tables` may be "
+            "empty; never force a selection you don't believe answers "
+            "the question just to populate this field."
+        )
+    )
+
+
+class SolverCode(BaseModel):
+    """Phase 3: the code answering the question, given Phase 2's table/column
+    selection — code only, table usage was already decided."""
+
+    code: str = Field(
+        ...,
+        description=(
+            "Executable code (Pandas or SQL, per the requested kind) that "
+            "answers the question using exactly the tables/columns Phase 2 "
+            "selected — no other tables. Pandas: end in an assignment/"
+            "expression whose value is the answer; bracket/getitem column "
+            "access only, never dot access. SQL: a single query aliasing "
+            "table variables by their given names."
+        )
+    )
+
+
 class ViolatedCriterion(str, Enum):
     # Code/result-focused criteria only: question quality AND table
     # justification are owned by the PLAN judge panel (PlanJudgment) and are

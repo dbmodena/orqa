@@ -108,9 +108,17 @@ tasks:
     single_table_query_count: 100
     languages: ["French"]
 
-  # MCP dataset-search server (step: mcp_search)
+  # Reverse-index backend — used by the plan judge's retrievability check and the solve-benchmark step (see orqa.benchmark.solve)
   mcp_search:
     backend: builtin  # local BM25 index under <data_path>/index/ — no external service needed
     elasticsearch_url: http://localhost:9200
-    host: 127.0.0.1
-    port: 8766
+
+  # Round-trip benchmark solver (step: solve-benchmark) — see
+  # orqa.benchmark.solve / src/orqa/benchmark/readme.md.
+  benchmark_solver:
+    # How many candidate tables the reverse-index search retrieves per
+    # question, and the scope of the pairwise Valentine relationship pass.
+    top_k_tables: 10
+    # Valentine matcher for that pairwise pass — schema-only and fast:
+    # up to C(top_k_tables, 2) pairs get matched per question.
+    matcher: similarity_flooding

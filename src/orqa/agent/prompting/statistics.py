@@ -19,7 +19,12 @@ from typing import List, Optional, Sequence
 import pandas as pd
 from pandas.api import types as ptypes
 
-from ...utils import _generalize_value_shape, _numeric_parse_ratio, _strip_numeric_formatting
+from ...utils import (
+    _generalize_value_shape,
+    _numeric_parse_ratio,
+    _strip_numeric_formatting,
+    summarize_large_value,
+)
 from .models import ColumnStat, TableStats
 
 
@@ -180,7 +185,13 @@ class ColumnStatistics:
                 # Bounded top-k categorical values, most frequent first. Ties are
                 # broken deterministically by pandas' stable ordering.
                 value_counts = scan_series.value_counts(dropna=True)
-                top_values = [str(idx) for idx in value_counts.head(top_k).index]
+                # summarize_large_value shields an oversized value (e.g. a
+                # WKT geometry) — this feeds straight into the planner AND
+                # generation prompts (see QueryPlanner._render_statistics /
+                # prompts.render_column_statistics), never execution.
+                top_values = [
+                    summarize_large_value(str(idx)) for idx in value_counts.head(top_k).index
+                ]
 
                 # The TAIL beyond top_values, grouped into cheap structural
                 # shapes (see _generalize_value_shape) rather than listed raw —
@@ -214,7 +225,7 @@ class ColumnStatistics:
                         bucket = groups.setdefault(shape, {"count": 0, "examples": []})
                         bucket["count"] += int(count)
                         if len(bucket["examples"]) < 3:
-                            bucket["examples"].append(raw_str)
+                            bucket["examples"].append(summarize_large_value(raw_str))
                     ranked = sorted(
                         groups.items(), key=lambda kv: kv[1]["count"], reverse=True
                     )

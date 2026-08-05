@@ -111,12 +111,10 @@ tasks:
     multi_table_query_count: 4
     languages: ["English"]
 
-  # MCP dataset-search server (step: mcp_search)
+  # Reverse-index backend — used by the plan judge's retrievability check and the solve-benchmark step (see orqa.benchmark.solve)
   mcp_search:
     backend: builtin  # local BM25 index under <data_path>/index/ — no external service needed
     elasticsearch_url: http://localhost:9200
-    host: 127.0.0.1
-    port: 8765
     # Adaptive top-K for the plan judge's keyword-searchability gate: each
     # plan's own K = round(number_of_tables_in_plan * this coefficient), so
     # a plan joining more tables is held to a wider net than a single-table
@@ -138,7 +136,7 @@ tasks:
     # isn't running here, silently no-op-ing both mechanisms; now that
     # `backend: builtin` needs no external service, there's nothing left to
     # gate on.
-    retrieval_gate_enabled: true
+    retrieval_gate_enabled: false
 
   # How many judges vote on each panel (see orqa.agent.agents.JudgePanel).
   # judge_profiles.plan/code in conf/llm/litellm.yaml stay the pool of
@@ -152,3 +150,13 @@ tasks:
   judges:
     plan_mode: mono
     code_mode: mono
+
+  # Round-trip benchmark solver (step: solve-benchmark) — see
+  # orqa.benchmark.solve / src/orqa/benchmark/readme.md.
+  benchmark_solver:
+    # How many candidate tables the reverse-index search retrieves per
+    # question, and the scope of the pairwise Valentine relationship pass.
+    top_k_tables: 10
+    # Valentine matcher for that pairwise pass — schema-only and fast:
+    # up to C(top_k_tables, 2) pairs get matched per question.
+    matcher: similarity_flooding

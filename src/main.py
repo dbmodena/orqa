@@ -22,10 +22,8 @@ STEP_CHOICES = (
     "candidates-discovery",
     "generate-query-candidates",
     "generate-statements",
-    "mcp_search",
+    "solve-benchmark",
 )
-
-MCP_MODE_CHOICES = ("stdio", "port", "build")
 
 
 @dataclass(frozen=True)
@@ -132,17 +130,6 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         choices=STEP_CHOICES,
         help="One or more workflow steps to execute, in the order provided.",
-    )
-    parser.add_argument(
-        "--mode",
-        choices=MCP_MODE_CHOICES,
-        default="stdio",
-        help=(
-            "Transport for the mcp_search step: 'stdio' for clients that "
-            "spawn the server, 'port' to listen on the port set in the "
-            "city's workflow yaml, 'build' to only materialize the index "
-            "and exit."
-        ),
     )
     return parser
 
@@ -276,20 +263,15 @@ def _step_callable_path(step: str, spec: TargetSpec, cfg) -> str:
         "index": "orqa.indexing:create_blend_index",
         "generate-query-candidates": "orqa.query_candidates:generate_query_candidates",
         "generate-statements": "orqa.statement_generation:generate_statements",
-        "mcp_search": "orqa.benchmark.server:run_mcp_search",
+        "solve-benchmark": "orqa.benchmark.solve:solve_benchmark",
     }
     return step_paths[step]
 
 
-def run_steps(
-    cfg, spec: TargetSpec, steps: Sequence[str], mcp_mode: str = "stdio"
-) -> None:
+def run_steps(cfg, spec: TargetSpec, steps: Sequence[str]) -> None:
     for step in steps:
         step_callable = _import_callable(_step_callable_path(step, spec, cfg))
-        if step == "mcp_search":
-            step_callable(cfg, mode=mcp_mode)
-        else:
-            step_callable(cfg)
+        step_callable(cfg)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -303,13 +285,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    # In stdio mode stdout carries the MCP JSON-RPC stream, so all
-    # diagnostics must go to stderr.
-    out = (
-        sys.stderr
-        if "mcp_search" in args.steps and args.mode == "stdio"
-        else sys.stdout
-    )
+    out = sys.stdout
 
     try:
         cfg = load_cfg(spec, out=out)
@@ -322,7 +298,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Crawled datasets folder: {cfg.crawled_datasets_path}", file=out)
         print(f"Processed datasets folder: {cfg.datasets_path}", file=out)
 
-        run_steps(cfg, spec, args.steps, mcp_mode=args.mode)
+        run_steps(cfg, spec, args.steps)
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         parser.exit(status=1, message=f"{exc}\n")
 

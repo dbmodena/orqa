@@ -832,6 +832,14 @@ class JudgementResponseAgent:
         # Temporarily override id to 1 so the LLM produces a valid integer id.
         single = dict(executed_result)
         single["id"] = 1
+        # Shield the executed result's dataframe before it is embedded (via
+        # repr, both below) into the judge payload — an oversized cell (e.g.
+        # a full-precision WKT geometry) would otherwise blow up the prompt.
+        # Pandas' own default repr already truncates long strings, but that
+        # is an incidental side effect of a global display option, not a
+        # guarantee; shield explicitly instead of relying on it.
+        if isinstance(single.get("dataframe"), pd.DataFrame):
+            single["dataframe"] = utils.shield_dataframe_for_prompt(single["dataframe"])
 
         if "instructions" not in self._judge_instructions_cache:
             self._judge_instructions_cache["instructions"] = self._prompt_factory().update()
