@@ -83,7 +83,13 @@ tasks:
     method: semantic
     n_random_dataset_seeds: 50
     min_dataset_height: 10
-    limit_to_n_columns: 15
+    # Column-count ceiling for a table to enter the pipeline AT ALL. A table
+    # WIDER than this is filtered out during indexing/embedding — treated
+    # exactly like a table with no rows or no columns — so it never reaches
+    # discovery or statement generation. Tables within the ceiling are shown
+    # to the agent WHOLE (all columns), never as a vertical slice. Code
+    # execution was never capped and still isn't.
+    limit_to_n_columns: 20
     sample_size: 3
     n_paths_for_dataset: 5
     max_path_length: 5

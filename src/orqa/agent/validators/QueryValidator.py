@@ -183,6 +183,11 @@ class QueryValidator(ABC):
         self.validation_errors: list = []
         self.good_queries:      dict = {}
         self.errors:            list = []
+        # Aliases the QUESTION leaked (set by _check_table_names_in_question).
+        # Kept separate from `unused_tables`, which that check also writes but
+        # with the OPPOSITE meaning (the aliases it did NOT find) — reusing one
+        # attribute for both made the leak feedback name the wrong tables.
+        self.question_table_leaks: set = set()
 
     # ------------------------------------------------------------------
     # Table Name Sanitization
@@ -769,6 +774,7 @@ class QueryValidator(ABC):
             t for t in self.table_names
             if re.search(rf'\b{re.escape(t.lower())}\b', question_lower)
         }
+        self.question_table_leaks = found
         self.unused_tables = set(self.table_names) - found
         return len(found) > 0
 
@@ -796,30 +802,43 @@ class QueryValidator(ABC):
     # Feedback builders
     # ------------------------------------------------------------------
     def _build_tables_field_coverage_feedback(self) -> str:
-        lines = ["'tables' field must have one entry per table used."]
+        lines = [
+            "'tables' must carry exactly one entry per table this query uses — "
+            f"required aliases: {', '.join(self.table_names)}."
+        ]
         if self.tables_field_missing:
-            lines.append("Missing: " + ", ".join(sorted(self.tables_field_missing)))
+            lines.append("Missing entries: " + ", ".join(sorted(self.tables_field_missing)))
         if self.tables_field_extra:
-            lines.append("Unknown (remove): " + ", ".join(sorted(self.tables_field_extra)))
-        lines.append("Each entry needs: 'name' (exact alias) and 'columns_involved' (minimal columns used).")
+            lines.append(
+                "Unknown aliases (remove — they are not tables in this query): "
+                + ", ".join(sorted(self.tables_field_extra))
+            )
+        lines.append(
+            "Fix: each entry needs 'name' (the exact alias, verbatim) and "
+            "'columns_involved' (only the columns the code actually reads)."
+        )
         return "\n".join(lines)
 
     def _build_unused_tables_feedback(self) -> str:
-        #missing = ", ".join(
-        #    f"{t} ({self.lookup_dict.get(t, '?')})" for t in sorted(self.unused_tables)
-        #)
-        missing = ", ".join(
-            f"{t}" for t in sorted(self.unused_tables)
-        )
+        missing = ", ".join(sorted(self.unused_tables))
         return (
-            f"Query must reference ALL tables. Missing: {missing}.\n"
-            f"Required: {', '.join(self.table_names)}. Join all tables into a single result."
+            f"Unused table(s): {missing} — every table in this query's plan must be "
+            f"referenced by the code. Required aliases: {', '.join(self.table_names)}.\n"
+            "Fix: bring the missing table in through the relationship the plan declares "
+            "for it (its verified join/union keys), and actually USE one of its columns "
+            "in the output, a filter, or an aggregation — a table referenced only as a "
+            "join key still counts as unused. Never drop a table, and never invent a "
+            "relationship that the plan does not list."
         )
 
     def _build_question_tables_feedback(self) -> str:
+        leaked = ", ".join(sorted(self.question_table_leaks)) or "a table alias"
         return (
-            "Do not use table names in the question. "
-            "Write it as a business user with no knowledge of table names would."
+            f"The question names a table alias ({leaked}). It is read by someone who "
+            "has never seen these tables.\n"
+            "Fix: replace the alias with the real-world subject that table holds — the "
+            "topic, entity type, agency, place, or period from its description — and "
+            "leave the rest of the wording unchanged."
         )
 
     def _build_technical_terms_feedback(self, technical_terms_found: List[str]) -> str:

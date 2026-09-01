@@ -443,13 +443,12 @@ class QueryPlanner:
         BEFORE the plan ever reaches the judge panel — the same
         "catch what's mechanically checkable before spending a judge call"
         principle already used for keyword-searchability (see
-        ``agent._judge_plans``). The plan judge's own ``difficulty_approval``
-        layer (``plan_judge.md`` Check 5) stays the final backstop for the
-        two things this estimator can't compute — whether flag/bucket steps
-        preserve genuinely DIFFERENT messy-data patterns, and whether a
-        bucket step's branching reflects real domain judgment rather than
-        an arbitrary split — so a mismatch this pass misses is still caught
-        downstream; this pass just spares most plans that round-trip.
+        ``agent._judge_plans``). This pass is now the ONLY difficulty
+        check: the plan judge no longer votes on the tier at all, because
+        difficulty is EFFORT computed deterministically from the plan's own
+        steps, not an opinion. A mismatch this pass cannot revise away is
+        stamped with the computed tier below rather than forwarded, so a
+        knowingly-wrong label never reaches the panel or the benchmark.
 
         One revision attempt per plan, mirroring the rest of this file's
         single-retry convention — a plan still mismatched after its
@@ -475,11 +474,34 @@ class QueryPlanner:
             candidate = revised if revised is not None else plan
             re_estimate = estimate_plan_tier(candidate)
             if re_estimate.tier != candidate.difficulty:
+                # The revision could not reshape the steps to the declared
+                # tier. Forwarding the mismatch to the judge is a dead end:
+                # Check 5 declares `structural_tier` authoritative ("never
+                # re-derive or second-guess") and narrows the vote to two
+                # DATA-ENGINEERING questions, so on a purely STRUCTURAL
+                # mismatch the judge has nothing it is permitted to weigh —
+                # it can only reject, round after round, while the
+                # never-relabel rule forbids the one fix that would resolve
+                # it. Observed live: a medium-slot plan burned all four
+                # attempts on `difficulty` alone with every other layer
+                # passing.
+                #
+                # Stamp the computed tier instead. The estimator is
+                # deterministic and already authoritative, so this makes the
+                # shipped label HONEST rather than letting a knowingly wrong
+                # one reach the benchmark. It may leave the batch with a
+                # duplicate tier — an outcome _dedupe_difficulties already
+                # accepts rather than guessing (see its "no missing tier
+                # left to reassign to" branch).
                 logger.warning(
                     "Plan difficulty reconciliation: still mismatched after "
-                    "revision (declared '%s', computed '%s') — leaving as-is "
-                    "for the judge panel to catch.",
+                    "revision (declared '%s', computed '%s') — stamping the "
+                    "computed tier. %s",
                     candidate.difficulty, re_estimate.tier,
+                    re_estimate.explanation,
+                )
+                candidate = candidate.model_copy(
+                    update={"difficulty": re_estimate.tier}
                 )
             result.append(candidate)
         return result
@@ -870,6 +892,12 @@ class QueryPlanner:
         # a soft signal, not a broken plan.
         derivation_seen = False
 
+        # Columns produced by steps that name no table (`tables: []`) — a
+        # tail sort/limit/select acting on the accumulated pipeline result.
+        # Kept separate from columns_by_alias, which is keyed by alias and
+        # therefore cannot record anything for a table-less step.
+        pipeline_columns: set = set()
+
         for step in plan.steps:
             # Requirement 5.4: every referenced table must be a known alias.
             for table in step.tables:
@@ -912,10 +940,30 @@ class QueryPlanner:
             # A hallucinated physical column in a plan with no derivation
             # steps is still rejected — that's the expensive failure this
             # check exists to catch early.
-            allowed_columns: set = set()
-            for table in step.tables:
-                allowed_columns |= columns_by_alias.get(table, set())
+            # A tail `sort`/`limit`/`select` legitimately carries
+            # `tables: []` — it acts on the accumulated pipeline result, not
+            # on one named table. Scoping `allowed_columns` to `step.tables`
+            # then produced an EMPTY allow-list, so every column reference in
+            # such a step failed ("known columns for []: []") even though the
+            # pipeline plainly had those columns. With no table scope, every
+            # column known so far is in scope.
+            allowed_columns: set = set(pipeline_columns)
+            if step.tables:
+                for table in step.tables:
+                    allowed_columns |= columns_by_alias.get(table, set())
+            else:
+                for known in columns_by_alias.values():
+                    allowed_columns |= known
             allowed_columns |= declared_outputs
+
+            def register(column: str) -> None:
+                """Record a column for later steps, table-scoped when the step
+                names tables and pipeline-wide when it doesn't."""
+                if step.tables:
+                    for table in step.tables:
+                        columns_by_alias.setdefault(table, set()).add(column)
+                else:
+                    pipeline_columns.add(column)
 
             produces_columns = step.op in _COLUMN_PRODUCING_OPS
             for column in step.columns:
@@ -934,8 +982,7 @@ class QueryPlanner:
                         "it is derived upstream and continuing",
                         step.order, step.op, column,
                     )
-                for table in step.tables:
-                    columns_by_alias.setdefault(table, set()).add(column)
+                register(column)
 
             # `correlate`/`limit`/`rank` name columns inside `params.by`/
             # `params.group_by` rather than `step.columns` — those are
@@ -947,16 +994,33 @@ class QueryPlanner:
                 params = step.params or {}
                 referenced = list(params.get("by") or []) + list(params.get("group_by") or [])
                 for column in referenced:
-                    if column not in allowed_columns:
+                    if column in allowed_columns:
+                        continue
+                    # Same escape hatch the `step.columns` loop above uses:
+                    # once ANY earlier step could have produced columns, an
+                    # unresolved name here is an upstream derivation (an
+                    # aggregate's implicit output), not a hallucination.
+                    # Without this, `aggregate -> sort -> limit(by=...)` —
+                    # the commonest "top N by metric" shape — was rejected
+                    # outright while the identical name in `sort.columns`
+                    # only warned.
+                    if not derivation_seen:
                         raise PlanValidationError(
                             f"step {step.order} ({step.op}) params references "
                             f"unknown column {column!r}; known columns for "
                             f"{step.tables}: {sorted(allowed_columns)}"
                         )
+                    logger.warning(
+                        "plan step %s (%s) params references column %r that "
+                        "no referenced table or earlier step declares — "
+                        "assuming it is derived upstream and continuing",
+                        step.order, step.op, column,
+                    )
+                    register(column)
 
             # Register this step's declared outputs for LATER steps.
-            for table in step.tables:
-                columns_by_alias.setdefault(table, set()).update(declared_outputs)
+            for column in declared_outputs:
+                register(column)
 
             if produces_columns or declared_outputs:
                 derivation_seen = True
@@ -969,6 +1033,7 @@ class QueryPlanner:
             dropped_columns = self._clean_step_dropped_columns(step)
             for table in step.tables:
                 columns_by_alias.get(table, set()).difference_update(dropped_columns)
+            pipeline_columns.difference_update(dropped_columns)
 
         return plan
 

@@ -86,6 +86,14 @@ MAX_PLAN_CORRECTIONS = 3
 # by thinking alone (~1997 reasoning tokens observed) before any JSON came out.
 JUDGE_MAX_TOKENS = 4096
 
+# Keys on an executed-result record that are INTERNAL bookkeeping and must not
+# reach the code judge's payload. `_original_query` is a full deep copy of the
+# query (see _execute_queries) that the validator-to-judge loop reads to map
+# verdicts back to their source — indispensable on the record, but rendering it
+# into the payload sent the judge the same question/code/tables a second time.
+# `client_id` is an opaque internal key the judge has no instruction to read.
+_JUDGE_PAYLOAD_EXCLUDED = ("_original_query", "client_id")
+
 # Minimum rows a prepared table must have for a statement-generation run to
 # proceed. A table that comes out of ``prepare_dataset`` with (nearly) no rows
 # cannot ground question generation, and every query validated against it
@@ -125,9 +133,15 @@ class CandidatesDiscoveryAgent:
                 seed,
             )
 
+            # Skip tables that are unusable as a whole: too short, no
+            # columns, or WIDER than limit_to_n_columns. A wide table is
+            # dropped outright (not vertically sliced) so the agent only
+            # ever works with integral tables — mirrors the up-front filter
+            # the semantic pipeline applies in build_embedding_texts.
             if (
                 dataset_info["num_rows"] < min_dataset_height
                 or dataset_info["num_columns"] == 0
+                or dataset_info["num_columns_raw"] > limit_to_n_columns
             ):
                 return
 
@@ -245,7 +259,7 @@ class TableAnalysisAgent:
         bad_tokens: list | None = None,
         max_cols: int = 10,
         sample_size: int = 5,
-        max_rows: int = 2_000,
+        max_rows: int | None = None,
         batch_size: int = 8,
         seed: int = 0,
         analyzer: TableAnalyzer | None = None,
@@ -266,6 +280,7 @@ class TableAnalysisAgent:
         self,
         dataset_paths: list,
         datasets_metadata: dict | None = None,
+        involved_columns_by_dataset: dict[str, list] | None = None,
     ) -> dict:
         """Analyse (and cache) every distinct table in ``dataset_paths``.
 
@@ -274,11 +289,20 @@ class TableAnalysisAgent:
                 duplicates are fine (deduplicated by dataset name here).
             datasets_metadata: Mapping of dataset name -> normalized metadata,
                 injected into the analysis prompt when available.
+            involved_columns_by_dataset: Mapping of dataset name -> the
+                join/union/correlation columns that table contributes to any
+                candidate in this run (union across candidates). Forced into
+                the analysis column budget (see ``utils.select_columns``)
+                exactly as per-candidate generation does, so the description/
+                keywords are built from the same columns the planner will
+                actually work on — not just the first ``max_cols`` in file
+                order.
 
         Returns:
             A summary dict: ``{"total", "cached", "analyzed", "failed"}``.
         """
         datasets_metadata = datasets_metadata or {}
+        involved_columns_by_dataset = involved_columns_by_dataset or {}
 
         # Dedupe by dataset name (the cache's table id), preserving order.
         unique: dict[str, Path] = {}
@@ -311,7 +335,7 @@ class TableAnalysisAgent:
                 try:
                     df, _info = utils.prepare_dataset(
                         path,
-                        [],
+                        list(involved_columns_by_dataset.get(name, []) or []),
                         self.max_cols,
                         self.sample_size,
                         limit_to_n_rows=self.max_rows,
@@ -830,7 +854,13 @@ class JudgementResponseAgent:
         Returns the judgment dict for the query, or an empty dict on failure.
         """
         # Temporarily override id to 1 so the LLM produces a valid integer id.
-        single = dict(executed_result)
+        # Internal bookkeeping keys are dropped rather than copied through —
+        # see _JUDGE_PAYLOAD_EXCLUDED. They stay on `executed_result` itself,
+        # which the validator-to-judge loop still reads.
+        single = {
+            k: v for k, v in executed_result.items()
+            if k not in _JUDGE_PAYLOAD_EXCLUDED
+        }
         single["id"] = 1
         # Shield the executed result's dataframe before it is embedded (via
         # repr, both below) into the judge payload — an oversized cell (e.g.
@@ -1048,14 +1078,19 @@ class StatementOrchestrator:
         self._generator = generator or GenerationCoordinator()
         self._validator = validator or LLMStatementValidator(config_path, kind)
         # Plan judge panel (judge_profiles.plan in the LLM yaml): N small
-        # models vote each structured plan BEFORE code generation, in eight
+        # models vote each structured plan BEFORE code generation, in six
         # independent layers — question quality, step alignment, table
-        # usage, expected-result declaration, difficulty correspondence,
-        # result convergence, metric-combination soundness, and topic
+        # usage, result coherence, metric-combination soundness, and topic
         # linkage — each majority-aggregated on its own; the plan passes
         # only when EVERY layer majority approves (see
         # JudgePanel._aggregate). Unconfigured (older yamls) -> plans flow
         # through unjudged, as before.
+        #
+        # Two layers were deliberately retired: DIFFICULTY (it is EFFORT,
+        # computed deterministically by difficulty_estimator and reconciled
+        # before judging — never an opinion) and CONVERGENCE (subsumed by
+        # result coherence: branches left uncombined are exactly a declared
+        # result that fails to account for every analysis).
         self._plan_panel = JudgePanel(
             config_path,
             "plan",
@@ -1065,8 +1100,6 @@ class StatementOrchestrator:
                 "plan_approval",
                 "table_usage_approval",
                 "expected_result_approval",
-                "difficulty_approval",
-                "convergence_approval",
                 "metric_combination_approval",
                 "topic_linkage_approval",
             ],
@@ -1190,7 +1223,7 @@ class StatementOrchestrator:
         metadata,
         max_cols: int = 10,
         sample_size: int = 5,
-        max_rows: Optional[int] = 2000,
+        max_rows: Optional[int] = None,
     ) -> dict | None:
         """Execute the unified five-phase pipeline for one generation run.
 
@@ -1581,12 +1614,33 @@ class StatementOrchestrator:
                 extension=Path(dataset_paths[0]).suffix.lstrip("."),
             )
             entry = {"tables": aliases}
-            # Same {alias: DataFrame} mapping Phase 1 already prepared (dfs is
-            # index-aligned with Table_0, Table_1, ... by construction, see the
-            # Phase 1 loop above) — injected into the judge so execution runs
-            # against the exact schema analysis/planning/generation already
-            # saw, instead of the judge reloading its own copy from disk.
-            prepared_dataframes = {f"Table_{idx}": df for idx, df in enumerate(dfs)}
+            # Code execution — static validation AND the code judge — runs
+            # against every ROW of each table (only utils.clean_columns
+            # applied), so an aggregate/join is never approved on a truncated
+            # row slice and then found wrong at benchmark time.
+            #
+            # COLUMNS are clamped to the per-table allow list: exactly the
+            # columns the Phase-1 view exposed to analysis / statistics /
+            # planning / generation (``dfs[idx].columns`` — the involved
+            # columns plus the file-order fill up to ``max_cols``). This is a
+            # SUPERSET of each query's declared ``columns_involved``, so it
+            # does not reintroduce the "execute on a columns_involved-sliced
+            # frame" bug QueryExecutor's docstring warns about — a query may
+            # still freely use any column it was shown. What it can no longer
+            # do is reach a real-but-UNSHOWN column: a hallucinated / confused
+            # name now lands as a KeyError -> correction instead of silently
+            # resolving to unvetted data. Derived columns are created by the
+            # generated code at runtime, not loaded, so they are unaffected.
+            column_allow_list = {
+                alias: list(view_df.columns)
+                for alias, view_df in zip(aliases, dfs)
+            }
+            execution_dataframes = {
+                alias: df[[c for c in column_allow_list.get(alias, df.columns) if c in df.columns]]
+                for alias, df in executor.load_tables(aliases).items()
+            }
+            prepared_dataframes = execution_dataframes
+            execution_dfs = [execution_dataframes[a] for a in aliases]
             # Divergence: set the judge single_table flag in single mode (Req 1.5).
             judge = JudgementResponseAgent(
                 self.config_path,
@@ -1607,7 +1661,7 @@ class StatementOrchestrator:
                 empty_result_pending,
             ) = self._validator_judge_loop(
                 pending_queries=pending_queries,
-                dfs=dfs,
+                dfs=execution_dfs,
                 aliases=aliases,
                 table_schemas=table_schemas,
                 judge=judge,
@@ -1802,11 +1856,12 @@ class StatementOrchestrator:
 
         Each plan is sent (with the table analyses and per-table columns as
         context) to every judge in ``judge_profiles.plan``. Every judge casts
-        EIGHT independent votes — ``question_approval`` (realistic,
+        SIX independent votes — ``question_approval`` (realistic,
         average-user, keyword-retrievable question), ``plan_approval`` (the
         steps produce exactly what the question asks), ``table_usage_approval``
-        (every table justified by the question), ``expected_result_approval``,
-        ``difficulty_approval``, ``convergence_approval``,
+        (every table justified by the question), ``expected_result_approval``
+        (the declared result is the natural conclusion of the steps and
+        accounts for every analysis the plan performs),
         ``metric_combination_approval``, and ``topic_linkage_approval`` (the
         question names the table's specific program/initiative when its
         identity hinges on one) — and each layer is majority-aggregated
@@ -1979,8 +2034,6 @@ class StatementOrchestrator:
                         ("plan_approval", "plan"),
                         ("table_usage_approval", "tables"),
                         ("expected_result_approval", "expected-result"),
-                        ("difficulty_approval", "difficulty"),
-                        ("convergence_approval", "convergence"),
                         ("metric_combination_approval", "combination"),
                         ("topic_linkage_approval", "topic-linkage"),
                         ("keyword_searchability_approval", "keyword-search"),
@@ -2005,8 +2058,6 @@ class StatementOrchestrator:
                         "plan_approval": judgment.get("plan_approval"),
                         "table_usage_approval": judgment.get("table_usage_approval"),
                         "expected_result_approval": judgment.get("expected_result_approval"),
-                        "difficulty_approval": judgment.get("difficulty_approval"),
-                        "convergence_approval": judgment.get("convergence_approval"),
                         "metric_combination_approval": judgment.get("metric_combination_approval"),
                         "topic_linkage_approval": judgment.get("topic_linkage_approval"),
                         "keyword_searchability_approval": judgment.get("keyword_searchability_approval"),
@@ -2079,51 +2130,44 @@ class StatementOrchestrator:
                             "becomes genuinely necessary to answer it — do NOT "
                             "drop or ignore any table."
                         )
-                    # A failed expected-result layer means the promised shape
-                    # contradicts the question and/or the steps — fix the
-                    # declaration (type/description), or the steps, whichever
-                    # the feedback names as wrong.
+                    # A failed result layer means the declared result is not the
+                    # coherent conclusion of the steps — either the shape
+                    # contradicts the question/steps, or the steps compute
+                    # something the declaration never accounts for (the case the
+                    # retired convergence layer used to own).
                     if judgment.get("expected_result_approval") is False:
                         feedback_text += (
-                            "\nThe expected-result declaration was rejected: set "
+                            "\nThe declared result was rejected. Either: (a) set "
                             "expected_result_type to the shape the question "
                             "actually asks for (number/boolean/text/list/table) "
                             "and make expected_result_description concretely "
-                            "describe that result — or fix the steps if THEY are "
-                            "what contradicts the declared shape. The declared "
-                            "type is mechanically enforced against the executed "
-                            "result, so it must be right."
+                            "describe that result — the declared type is "
+                            "mechanically enforced against the executed result "
+                            "downstream, so it must be right; or (b) the steps "
+                            "compute a result the declaration never accounts "
+                            "for — every analysis the plan performs must land in "
+                            "the declared result. Fix that by folding it in (a "
+                            "join/union on a shared key, a correlation, a "
+                            "comparison or ranking across the branches, or a "
+                            "final step reporting on both together — no "
+                            "mechanism is mandatory), by widening the "
+                            "declaration to honestly cover both, or by dropping "
+                            "the step that earns nothing. Never drop a branch, "
+                            "and never reword the question instead of fixing the "
+                            "steps or the declaration."
                         )
-                    # A failed difficulty layer is NEVER fixed by relabeling —
-                    # the tier is a fixed per-slot batch assignment (one easy,
-                    # one medium, one hard); only the STEPS may change.
-                    if judgment.get("difficulty_approval") is False:
-                        feedback_text += (
-                            f"\nDifficulty correspondence was rejected: this plan "
-                            f"is assigned `{current.difficulty}` but its steps "
-                            "don't structurally match that tier — adjust the "
-                            "STEPS (add or remove operations, tables, or an ML "
-                            "step as appropriate) so the plan's actual "
-                            "complexity genuinely matches its assigned "
-                            "difficulty label; never change the difficulty "
-                            "label itself."
-                        )
-                    # A failed convergence layer means the plan's steps split
-                    # into two or more branches that are never tied back into
-                    # one final result — the fix is always in the STEPS (add
-                    # the missing combining step), never in dropping a
-                    # branch or rewording the question.
-                    if judgment.get("convergence_approval") is False:
-                        feedback_text += (
-                            "\nResult convergence was rejected: the plan's steps "
-                            "produce two or more independently-computed results "
-                            "that are never combined into one final answer. Add "
-                            "the missing step that ties them together — a "
-                            "join/union on a shared key, a correlation or "
-                            "comparison step, or a final synthesis step that "
-                            "reports on both together — without dropping either "
-                            "branch."
-                        )
+                    # NOTE: there is deliberately no difficulty directive here.
+                    # Difficulty is EFFORT, computed deterministically by
+                    # `difficulty_estimator.estimate_plan_tier` and reconciled
+                    # (and, failing that, stamped) by
+                    # `QueryPlanner._reconcile_difficulty` BEFORE the panel ever
+                    # sees the plan. The judge no longer votes on it, so
+                    # `build_reconciliation_feedback` is the single voice that
+                    # tells the planner about difficulty.
+                    # NOTE: no convergence directive here either. Branches left
+                    # uncombined ARE a declared result that fails to account for
+                    # every analysis, so the expected-result directive above
+                    # owns that case — see PlanJudgment's docstring.
                     # A failed metric-combination layer means a step blends
                     # figures from 2+ tables into one value in a way that
                     # isn't dimensionally sound — the fix is in HOW the

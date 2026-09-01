@@ -320,8 +320,6 @@ const PLAN_LAYERS = [
   ['plan_approval',            'plan'],
   ['table_usage_approval',     'tables'],
   ['expected_result_approval', 'result-type'],
-  ['difficulty_approval',      'difficulty'],
-  ['convergence_approval',     'convergence'],
   ['metric_combination_approval', 'combination'],
   ['topic_linkage_approval',   'topic-linkage'],
 ];

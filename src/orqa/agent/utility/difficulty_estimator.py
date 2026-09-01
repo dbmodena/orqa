@@ -194,6 +194,8 @@ class DifficultyEstimate:
     structural_tier: str
     data_engineering_tier: str
     structural_step_count: int
+    spanning_joins: int
+    effective_step_count: int
     op_diversity: int
     agg_correlate_count: int
     group_key_count: int
@@ -232,12 +234,30 @@ def estimate_plan_tier(plan: Any) -> DifficultyEstimate:
 
     dsu = _DisjointSet(aliases)
     deep_merge_events = 0
+    spanning_joins = 0
     for step in steps:
         if _op(step) not in ("join", "union"):
             continue
         deep_sides = dsu.union_many(_tables(step))
         if deep_sides >= 2:
             deep_merge_events += 1
+        elif _counts_structurally(step):
+            # Folding a raw table into the growing component. For an expert
+            # already handed the key (see VERIFIED TABLE RELATIONSHIPS), this
+            # is transcription, not effort — and writing it as a chain rather
+            # than one wide step is pure syntax. Counted separately so all but
+            # the FIRST can be discounted below.
+            spanning_joins += 1
+
+    # DIFFICULTY IS EFFORT, NOT STEP COUNT. Deciding WHETHER to combine and
+    # checking the joined grain is a real decision; repeating it for tables
+    # 3, 4 and 5 is not. So the first spanning join is charged and the rest
+    # are free, which makes the tier invariant to join PHRASING (one wide
+    # step vs N-1 chained ones) and to table count. Charging none of them
+    # over-corrects: measured, it makes multi-table plans systematically
+    # EASIER than single-table ones.
+    spanning_discount = max(0, spanning_joins - 1)
+    effective_step_count = structural_step_count - spanning_discount
 
     dq_signal_count = sum(1 for s in steps if _dq_technique(s) is not None)
     bucket_outputs: set[str] = set()
@@ -252,13 +272,13 @@ def estimate_plan_tier(plan: Any) -> DifficultyEstimate:
     structural_triggers = []
     if deep_merge_events >= 1:
         structural_triggers.append("hard")
-    if structural_step_count >= _HARD_STEP_MIN and op_diversity >= _HARD_OP_DIVERSITY_MIN:
+    if effective_step_count >= _HARD_STEP_MIN and op_diversity >= _HARD_OP_DIVERSITY_MIN:
         structural_triggers.append("hard")
     if group_key_count >= _HARD_GROUP_KEY_MIN and group_multi_agg:
         structural_triggers.append("hard")
     if group_multi_agg:
         structural_triggers.append("medium")
-    if structural_step_count >= _MEDIUM_STEP_MIN:
+    if effective_step_count >= _MEDIUM_STEP_MIN:
         structural_triggers.append("medium")
     if agg_correlate_count >= _MEDIUM_AGG_MIN:
         structural_triggers.append("medium")
@@ -274,8 +294,14 @@ def estimate_plan_tier(plan: Any) -> DifficultyEstimate:
     tier = max([structural_tier, data_engineering_tier], key=_TIER_ORDER.index)
 
     explanation = (
-        f"structural={structural_tier} (steps={structural_step_count}, "
-        f"op_types={op_diversity}, agg/correlate={agg_correlate_count}, "
+        f"structural={structural_tier} (effort_steps={effective_step_count}"
+        + (
+            f" [{structural_step_count} steps less {spanning_discount} "
+            f"discounted table-connection join(s) — connecting tables you were "
+            f"given the keys for is not difficulty]"
+            if spanning_discount else ""
+        )
+        + f", op_types={op_diversity}, agg/correlate={agg_correlate_count}, "
         f"group_keys={group_key_count}, group_multi_agg={group_multi_agg}, "
         f"independent_branch_merges={deep_merge_events}); "
         f"data_engineering={data_engineering_tier} (flag/bucket_steps="
@@ -287,6 +313,8 @@ def estimate_plan_tier(plan: Any) -> DifficultyEstimate:
         structural_tier=structural_tier,
         data_engineering_tier=data_engineering_tier,
         structural_step_count=structural_step_count,
+        spanning_joins=spanning_joins,
+        effective_step_count=effective_step_count,
         op_diversity=op_diversity,
         agg_correlate_count=agg_correlate_count,
         group_key_count=group_key_count,
@@ -299,10 +327,23 @@ def estimate_plan_tier(plan: Any) -> DifficultyEstimate:
 
 
 def build_reconciliation_feedback(estimate: DifficultyEstimate, declared_tier: str) -> str:
-    """Numeric, actionable feedback for a planner correction round.
+    """The SINGLE voice that tells the planner about difficulty.
 
-    Named per-trigger gaps rather than a vague "make it harder/easier" —
-    the planner gets told exactly which countable thing to change.
+    Since the plan judge no longer votes on difficulty at all, this is the
+    only difficulty feedback the planner ever receives — so it names the
+    concrete gap rather than a vague "make it harder/easier".
+
+    Phrased as DECISIONS, not step counts: difficulty is the effort a data
+    expert already versed in these tables would spend, so the gap is "one
+    more genuine decision", not "one more line". Two things it deliberately
+    never suggests: changing the `difficulty` label (a fixed per-slot batch
+    assignment), and adding tables or `join`/`union` steps — table count is
+    never a qualifier, and extra connection steps are discounted precisely
+    because joining on keys you were handed is not difficulty.
+
+    Lands inside a newline-joined stack of sibling per-layer directives (see
+    ``agent._judge_plans``), so it stays one self-contained paragraph that
+    leads with its subject.
     """
     if estimate.tier == declared_tier:
         return ""
@@ -311,11 +352,15 @@ def build_reconciliation_feedback(estimate: DifficultyEstimate, declared_tier: s
     if order(estimate.tier) < order(declared_tier):
         gaps = []
         if declared_tier in ("medium", "hard"):
-            if estimate.structural_step_count < _MEDIUM_STEP_MIN:
+            if estimate.effective_step_count < _MEDIUM_STEP_MIN:
                 gaps.append(
-                    f"add chained steps (currently {estimate.structural_step_count} "
-                    f"non-clean, non-plain-derive steps; medium needs "
-                    f"{_MEDIUM_STEP_MIN}+)"
+                    f"ask one more genuine question of the data — this plan "
+                    f"currently carries {estimate.effective_step_count} "
+                    f"effort-bearing step(s) and `{declared_tier}` expects "
+                    f"{_MEDIUM_STEP_MIN}+ (a grouped breakdown, a further "
+                    f"aggregation, a ranking). Adding a `join`/`union` will "
+                    f"NOT help: connecting tables you were given the keys for "
+                    f"is not difficulty and is not counted"
                 )
             if not estimate.group_multi_agg:
                 gaps.append(
@@ -336,11 +381,13 @@ def build_reconciliation_feedback(estimate: DifficultyEstimate, declared_tier: s
                     "further join/union, rather than folding one more raw "
                     "table into a single growing chain"
                 )
-            if not (estimate.structural_step_count >= _HARD_STEP_MIN and estimate.op_diversity >= _HARD_OP_DIVERSITY_MIN):
+            if not (estimate.effective_step_count >= _HARD_STEP_MIN and estimate.op_diversity >= _HARD_OP_DIVERSITY_MIN):
                 gaps.append(
-                    f"chain {_HARD_STEP_MIN}+ steps spanning {_HARD_OP_DIVERSITY_MIN}+ "
-                    f"distinct op types (currently {estimate.structural_step_count} "
-                    f"steps across {estimate.op_diversity} op types)"
+                    f"compose {_HARD_STEP_MIN}+ effort-bearing steps across "
+                    f"{_HARD_OP_DIVERSITY_MIN}+ distinct op types (currently "
+                    f"{estimate.effective_step_count} across "
+                    f"{estimate.op_diversity}) — more KINDS of analysis, not "
+                    f"more joins"
                 )
             if not (estimate.group_key_count >= _HARD_GROUP_KEY_MIN and estimate.group_multi_agg):
                 gaps.append(
@@ -349,15 +396,19 @@ def build_reconciliation_feedback(estimate: DifficultyEstimate, declared_tier: s
                 )
         return (
             f"Computed tier is `{estimate.tier}` but this plan is slotted "
-            f"`{declared_tier}` — it's TOO EASY for that slot. Add STEPS (not "
-            f"a difficulty relabel) via any ONE of: " + "; or ".join(gaps) + "."
+            f"`{declared_tier}` — it asks a data expert for LESS effort than "
+            f"that slot expects. Make the plan do more genuine analytical work "
+            f"(never relabel the difficulty, never add tables) via any ONE of: "
+            + "; or ".join(gaps) + "."
         )
     else:
         return (
             f"Computed tier is `{estimate.tier}` but this plan is slotted "
-            f"`{declared_tier}` — it's TOO HARD for that slot "
-            f"({estimate.explanation}). Simplify the steps (drop a join, a "
-            "chained step, or a derive-preserve step) until BOTH axes sit "
-            f"at or below `{declared_tier}`, without changing the "
-            "`difficulty` label itself."
+            f"`{declared_tier}` — it asks a data expert for MORE effort than "
+            f"that slot expects ({estimate.explanation}). Simplify the plan "
+            f"(drop an aggregation, a ranking, or a flag/bucket derive step) "
+            f"until both axes sit at or below `{declared_tier}`. Dropping a "
+            f"`join`/`union` will NOT help — connection steps are not what "
+            f"makes this plan effortful. Never change the `difficulty` label "
+            f"itself."
         )

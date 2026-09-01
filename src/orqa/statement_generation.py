@@ -6,14 +6,17 @@ import sys
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
-import pandas as pd
-
 from .agent.agent import TableAnalysisAgent
 from .agent.agents.StatementAgent import StatementAgent
 from .agent.agents.SingleStatementAgent import SingleStatementAgent
 from .benchmark.index import load_index
 from .benchmark.questions import get_entry, store_entry
-from .utils import load_datasets_metadata,load_normalized_datasets_metadata, load_dataset_info, save_json, load_json, prepare_dataframe, pd_read_dataset, summarize_large_value
+from .utils import (
+    dataset_index_shape,
+    load_normalized_datasets_metadata,
+    save_json,
+    load_json,
+)
 from conf import OrQAConfig, JUDGE_MODE_COUNTS
 from dataclasses import dataclass, field
 
@@ -30,212 +33,7 @@ def _compute_timeout(max_tokens: int) -> float:
     return buckets * _TIMEOUT_SECONDS_PER_5K_TOKENS
 
 
-# ── Match formatting ──────────────────────────────────────────────────────────
-
-def _format_matches_sql(match_specs: list[dict]) -> str:
-    """
-    Compact SQL-oriented description: one line per operation.
-    No pandas patterns, no rename maps, no chain boilerplate.
-    LOWER() note is included inline only when case_insensitive=True.
-    """
-    lines = []
-    for spec in match_specs:
-        mtype = spec.get("type")
-
-        if mtype in ("merge", "merge_correlation"):
-            left, right = spec["left"], spec["right"]
-            left_on     = spec.get("left_on",  [])
-            right_on    = spec.get("right_on", [])
-            ci          = spec.get("case_insensitive", False)
-
-            pairs = "  AND  ".join(
-                f"{left}.{lk} = {right}.{rk}"
-                for lk, rk in zip(left_on, right_on)
-            )
-            ci_note = "  [case-insensitive — wrap keys in LOWER()]" if ci else ""
-
-            if mtype == "merge_correlation":
-                corr = spec.get("correlation_cols", {})
-                l_t  = corr.get(left,  "?")
-                r_t  = corr.get(right, "?")
-                lines.append(
-                    f"JOIN  {pairs}{ci_note}\n"
-                    f"  → correlate {left}.{l_t} with {right}.{r_t} after joining"
-                )
-            else:
-                rel     = spec.get("relationship", "")
-                rel_note = f"  [{rel}]" if rel else ""
-                lines.append(f"JOIN  {pairs}{ci_note}{rel_note}")
-
-        elif mtype == "union":
-            left      = spec["left"]
-            right     = spec["right"]
-            left_cols  = spec.get("left_cols",  [])
-            right_cols = spec.get("right_cols", [])
-            lines.append(
-                f"UNION  {left}{left_cols} ∪ {right}{right_cols}"
-                "  (align columns by position)"
-            )
-        else:
-            lines.append(f"# unknown operation type '{mtype}' — skipped")
-
-    return "\n".join(lines)
-
-
-def _sample_col(df: pd.DataFrame, col: str, n: int = 3) -> list:
-    """Return up to n distinct non-null sample values from a column.
-
-    ``df`` here is the FULL, uncapped table read by ``_build_match_inputs``
-    (loaded just for this sampling), and a geometry/free-text column's
-    values are typically all-distinct — so an oversized cell (e.g. a
-    full-precision WKT MULTIPOLYGON) can genuinely surface here.
-    summarize_large_value shields it before it reaches the match-description
-    block embedded in the generation prompt (see format_matches_for_prompt).
-    """
-    if col not in df.columns:
-        return []
-    vals = df[col].dropna().unique()
-    return [
-        summarize_large_value(v.item() if hasattr(v, "item") else v)
-        for v in vals[:n]
-    ]
-
-
-def _format_matches_pandas(
-    match_specs: list[dict],
-    dfs: dict[str, pd.DataFrame] | None = None,
-    involved_cols: dict[str, list[str]] | None = None,
-    sample_n: int = 3,
-) -> str:
-    """
-    Schema-first declarative prompt block for PANDAS generation.
-
-    Tells the LLM *what* to join and *what data looks like* — not how pandas
-    works.  The LLM already knows pandas; it just needs intent + shape.
-
-    Output sections
-    ---------------
-    1. Links      — one line per join/union showing which columns connect tables
-    2. Schema     — columns available per table, join keys marked with *,
-                    correlation targets marked with ~
-    3. Samples    — 3 representative values per relevant column (skipped when
-                    no dataframes are supplied)
-
-    Args:
-        match_specs:   list of match_spec dicts from make_match()
-        dfs:           {alias: DataFrame} — when provided, sample values are
-                       included; pass None to omit the Samples section
-        involved_cols: {alias: [col, ...]} — non-key columns the LLM may use;
-                       when None, all columns in the df are listed
-        sample_n:      number of sample values per column
-    """
-    if not match_specs:
-        return "(no operations defined)"
-
-    dfs           = dfs or {}
-    involved_cols = involved_cols or {}
-
-    # ── Collect per-table metadata in one pass ────────────────────────────────
-    # key_cols[alias]  → set of join-key column names
-    # corr_cols[alias] → set of correlation-target column names
-    key_cols:  dict[str, set[str]] = {}
-    corr_cols: dict[str, set[str]] = {}
-    links: list[str] = []
-
-    for spec in match_specs:
-        mtype = spec.get("type")
-        left, right = spec.get("left", "?"), spec.get("right", "?")
-
-        if mtype in ("merge", "merge_correlation"):
-            left_on  = spec.get("left_on",  [])
-            right_on = spec.get("right_on", [])
-            ci       = spec.get("case_insensitive", False)
-            how      = spec.get("how", "inner").upper()
-
-            key_cols.setdefault(left,  set()).update(left_on)
-            key_cols.setdefault(right, set()).update(right_on)
-
-            pairs    = ", ".join(f"{lk}={rk}" for lk, rk in zip(left_on, right_on))
-            ci_note  = " [ci]" if ci else ""
-            how_note = f" [{how}]" if how != "INNER" else ""
-            link     = f"{left} → {right}  on {pairs}{ci_note}{how_note}"
-
-            if mtype == "merge_correlation":
-                cc = spec.get("correlation_cols", {})
-                lt, rt = cc.get(left, "?"), cc.get(right, "?")
-                corr_cols.setdefault(left,  set()).add(lt)
-                corr_cols.setdefault(right, set()).add(rt)
-                link += f"  correlate {lt}~{rt}"
-
-            links.append(link)
-
-        elif mtype == "union":
-            lc = spec.get("left_cols",  [])
-            rc = spec.get("right_cols", [])
-            links.append(f"{left} ∪ {right}  columns {lc} → {rc}")
-
-    # ── Section 1: Links ──────────────────────────────────────────────────────
-    sections = ["Links:\n" + "\n".join(f"  {l}" for l in links)]
-
-    # ── Section 2: Schema ─────────────────────────────────────────────────────
-    # Gather all aliases mentioned across all specs (preserving order)
-    seen: dict[str, None] = {}
-    for spec in match_specs:
-        for alias in (spec.get("left"), spec.get("right")):
-            if alias:
-                seen[alias] = None
-    all_aliases = list(seen)
-
-    schema_lines = ["Schema  (* = join key, ~ = correlation target):"]
-    for alias in all_aliases:
-        df = dfs.get(alias)
-        # Columns to show: involved_cols when provided, else all df columns
-        if involved_cols.get(alias):
-            cols = involved_cols[alias]
-        elif df is not None:
-            cols = list(df.columns)
-        else:
-            # Fall back to whatever we know from the specs
-            cols = list(
-                key_cols.get(alias, set()) | corr_cols.get(alias, set())
-            )
-
-        annotated = []
-        for c in cols:
-            marker = ""
-            if c in key_cols.get(alias, set()):
-                marker = "*"
-            elif c in corr_cols.get(alias, set()):
-                marker = "~"
-            annotated.append(f"{marker}{c}" if marker else c)
-
-        schema_lines.append(f"  {alias}: {', '.join(annotated)}")
-
-    sections.append("\n".join(schema_lines))
-
-    # ── Section 3: Samples (only when dataframes are available) ──────────────
-    if dfs:
-        sample_lines = [f"Samples (up to {sample_n} distinct values):"]
-        for alias in all_aliases:
-            df = dfs.get(alias)
-            if df is None:
-                continue
-            # Only sample columns that are relevant (keys, corr targets, involved)
-            relevant = (
-                key_cols.get(alias, set())
-                | corr_cols.get(alias, set())
-                | set(involved_cols.get(alias, []))
-            )
-            for col in relevant:
-                vals = _sample_col(df, col, sample_n)
-                if vals:
-                    sample_lines.append(f"  {alias}.{col}: {vals}")
-
-        if len(sample_lines) > 1:   # at least one column had values
-            sections.append("\n".join(sample_lines))
-
-    return "\n\n".join(sections)
-
+# ── Match formatting: relationship spec -> QueryLink dict ─────────────────────
 
 _LINK_TYPE_MAP = {"merge": "join", "merge_correlation": "join-correlation", "union": "union"}
 
@@ -318,32 +116,6 @@ def _relationships_to_links(specs: list[dict]) -> list[dict]:
     return [_relationship_to_link(spec) for spec in specs]
 
 
-def format_matches_for_prompt(
-    match_specs: list[dict],
-    kind: str = "PANDAS",
-    dfs: dict | None = None,
-    involved_cols: dict | None = None,
-    sample_n: int = 3,
-) -> str:
-    """
-    Return a compact, LLM-readable description of the match operations.
-
-    Args:
-        match_specs:   list of match_spec dicts produced by make_match().
-        kind:          "SQL" or "PANDAS" — controls which formatter is used.
-        dfs:           {alias: DataFrame} — PANDAS only; enables sample values
-                       section.  Pass None to omit samples.
-        involved_cols: {alias: [col, ...]} — PANDAS only; restricts the schema
-                       section to columns the LLM should actually use.
-        sample_n:      number of sample values per column in the Samples block.
-    """
-    if not match_specs:
-        return "(no join operations defined)"
-    if kind.upper() == "SQL":
-        return _format_matches_sql(match_specs)
-    return _format_matches_pandas(match_specs, dfs=dfs, involved_cols=involved_cols, sample_n=sample_n)
-
-
 # ── Statement generation ──────────────────────────────────────────────────────
 
 def _build_match_inputs(
@@ -354,26 +126,40 @@ def _build_match_inputs(
 
     Returns
     -------
-    dataset_paths, aliases, metadatas, involved_cols, dfs
-
-    ``dfs`` is a {alias: DataFrame} mapping loaded here so the pandas
-    formatter can pull sample values without a second CSV read.
+    dataset_paths, aliases, metadatas, involved_cols
     """
     dataset_paths, metadatas = [], []
     aliases       = {}
     involved_cols = {}
-    dfs           = {}
     for alias, dataset in match["aliases"].items():
         path = csv_folder / f"{dataset}.{extension}"
         dataset_paths.append(path)
         aliases[alias]        = dataset
         metadatas.append(datasets_metadata.get(dataset))
         involved_cols[alias]  = match["columns_by_table"].get(alias, [])
-        try:
-            dfs[alias] = prepare_dataframe(pd_read_dataset(path, opts={"csv": {"low_memory": False}}), alias=alias)
-        except Exception:
-            pass   # formatter degrades gracefully without the df
-    return dataset_paths, aliases, metadatas, involved_cols, dfs
+    return dataset_paths, aliases, metadatas, involved_cols
+
+
+def _involved_columns_by_dataset(all_matches: list[dict]) -> dict[str, list[str]]:
+    """Union of each dataset's join/union/correlation columns across every
+    candidate it appears in.
+
+    ``match["columns_by_table"]`` is keyed by alias (``Table_0`` ...); the
+    same real dataset can wear different aliases (and expose different key
+    columns) across candidates, so this resolves aliases back to dataset
+    names and merges. Feeds the pre-generation table analysis so it forces
+    the same involved columns into its budget that per-candidate generation
+    does (see ``StatementOrchestrator._run`` / ``utils.select_columns``).
+    """
+    by_dataset: dict[str, set[str]] = {}
+    for match in all_matches:
+        columns_by_table = match.get("columns_by_table", {}) or {}
+        for alias, dataset in (match.get("aliases", {}) or {}).items():
+            by_dataset.setdefault(dataset, set()).update(
+                columns_by_table.get(alias, []) or []
+            )
+    return {dataset: sorted(cols) for dataset, cols in by_dataset.items()}
+
 
 def _is_single_table_candidate(match: dict) -> bool:
     """Check if a candidate has a single dataset and no cross-table relationships."""
@@ -394,6 +180,8 @@ def _sample_single_table_datasets(
     count: int,
     extension: str = "csv",
     seed: int = 0,
+    limit_to_n_columns: int | None = None,
+    scan_opts: dict | None = None,
 ) -> list[Path]:
     """
     Return up to ``count`` randomly sampled dataset paths.
@@ -401,9 +189,36 @@ def _sample_single_table_datasets(
     The glob result is sorted and the sampler seeded with the workflow
     seed, so every run (and every sibling workflow sharing the yaml seed)
     selects the same datasets.
+
+    When ``limit_to_n_columns`` is given, a candidate is skipped (and the
+    next one drawn instead) when it has no rows, no columns, or MORE than
+    ``limit_to_n_columns`` columns — the same up-front "only ever work with
+    whole, integral tables" filter the discovery pipeline applies. Without
+    this, single-table sampling reads straight off disk and a too-wide
+    table would slip past every discovery-side gate into statement
+    generation. An unreadable file is treated as unusable and skipped.
     """
     all_files = sorted(datasets_path.glob(f"*.{extension}"))
-    return random.Random(seed).sample(all_files, min(count, len(all_files)))
+
+    if limit_to_n_columns is None:
+        return random.Random(seed).sample(all_files, min(count, len(all_files)))
+
+    scan_opts = scan_opts or {}
+    shuffled = all_files[:]
+    random.Random(seed).shuffle(shuffled)
+
+    picked: list[Path] = []
+    for filepath in shuffled:
+        if len(picked) >= count:
+            break
+        try:
+            n_columns, has_rows = dataset_index_shape(filepath, scan_opts)
+        except Exception:
+            continue
+        if n_columns == 0 or not has_rows or n_columns > limit_to_n_columns:
+            continue
+        picked.append(filepath)
+    return picked
 
 
 def _cap_matches(all_matches: list, count: Optional[int], seed: int = 0) -> list:
@@ -420,23 +235,15 @@ def _cap_matches(all_matches: list, count: Optional[int], seed: int = 0) -> list
     return random.Random(seed).sample(all_matches, count)
 
 
-def _get_formatted_match(
-    match: dict,
-    kind: str,
-    dfs: dict | None = None,
-    involved_cols: dict | None = None,
-) -> str:
+def _get_formatted_match(match: dict, kind: str) -> str:
     """
-    Return a formatted match string for the given kind (SQL or PANDAS).
-    Uses the structured ``relationships`` list when available (falling back to
-    the legacy ``match_specs`` key, then to the legacy string lists).
-    ``dfs`` and ``involved_cols`` are forwarded to the PANDAS formatter only.
+    Legacy string-list fallback for the ``match`` constraint: the flat
+    ``{kind}_matches`` prose block from pre-``relationships`` candidate
+    files. Only reached when ``_get_match_for_planner`` returns ``None``
+    (no structured ``relationships``/``match_specs`` on the match) — modern
+    ``query_candidates.json`` always carries ``relationships``, so the
+    structured path in ``_get_match_for_planner`` is what actually runs.
     """
-    specs = match.get("relationships") or match.get("match_specs")
-    if specs:
-        return format_matches_for_prompt(
-            specs, kind=kind, dfs=dfs, involved_cols=involved_cols
-        )
     return "\n".join(match.get(f"{kind}_matches", []))
 
 
@@ -535,6 +342,7 @@ def create_statements(
     retrieval_gate_enabled: bool = True,
     plan_judge_count: Optional[int] = None,
     code_judge_count: Optional[int] = None,
+    scan_opts: dict | None = None,
 ) -> list[dict]:
     bad_tokens = bad_tokens or []
 
@@ -562,10 +370,16 @@ def create_statements(
         for match in all_matches
         for dataset in match.get("aliases", {}).values()
     ]
+    # Per-DATASET union of the join/union/correlation columns across every
+    # candidate that table appears in, so table analysis is built from the
+    # same columns each candidate's generation forces into its per-table
+    # column budget (utils.select_columns), not just the first max_cols.
+    involved_columns_by_dataset = _involved_columns_by_dataset(all_matches)
     if enable_single_table and single_table_query_count > 0:
         involved_paths.extend(
             _sample_single_table_datasets(
-                csv_folder, single_table_query_count, extension=extension, seed=seed
+                csv_folder, single_table_query_count, extension=extension,
+                seed=seed, limit_to_n_columns=max_cols, scan_opts=scan_opts,
             )
         )
     TableAnalysisAgent(
@@ -575,7 +389,9 @@ def create_statements(
         bad_tokens=bad_tokens,
         max_cols=max_cols,
         seed=seed,
-    ).analyze_tables(involved_paths, datasets_metadata)
+    ).analyze_tables(
+        involved_paths, datasets_metadata, involved_columns_by_dataset
+    )
 
     cross_agent = StatementAgent(
         config_path, kind, bad_tokens, languages=languages, seed=seed,
@@ -593,7 +409,8 @@ def create_statements(
     if enable_single_table and single_table_query_count > 0:
         print(f"\nStarting single-table generation ({single_table_query_count} datasets)...")
         sampled = _sample_single_table_datasets(
-            csv_folder, single_table_query_count, extension=extension, seed=seed
+            csv_folder, single_table_query_count, extension=extension,
+            seed=seed, limit_to_n_columns=max_cols, scan_opts=scan_opts,
         )
         single_agent = SingleStatementAgent(
             config_path, kind, bad_tokens, languages=languages, seed=seed,
@@ -644,13 +461,13 @@ def create_statements(
             print(f"[{idx}] Already processed — skipping.")
             continue
 
-        dataset_paths, aliases, metadatas, involved_cols, dfs = _build_match_inputs(
+        dataset_paths, aliases, metadatas, involved_cols = _build_match_inputs(
             match, csv_folder, datasets_metadata, extension
         )
 
         match_for_planner = _get_match_for_planner(match)
         if match_for_planner is None:
-            match_for_planner = _get_formatted_match(match, kind, dfs=dfs, involved_cols=involved_cols)
+            match_for_planner = _get_formatted_match(match, kind)
 
         start = __import__("time").perf_counter()
 
@@ -741,10 +558,13 @@ async def stream_generate_statements(
             for match in all_matches
             for dataset in match.get("aliases", {}).values()
         ]
+        involved_columns_by_dataset = _involved_columns_by_dataset(all_matches)
         if enable_single_table and single_table_query_count:
             involved.extend(
                 _sample_single_table_datasets(
-                    cfg.datasets_path, single_table_query_count, cfg.datasets_format, cfg.seed
+                    cfg.datasets_path, single_table_query_count, cfg.datasets_format,
+                    cfg.seed, cfg.candidates_discovery.limit_to_n_columns,
+                    cfg.polars_opts.scan,
                 )
             )
         TableAnalysisAgent(
@@ -753,7 +573,7 @@ async def stream_generate_statements(
             bad_tokens=cfg.statement_generation.bad_tokens,
             max_cols=cfg.candidates_discovery.limit_to_n_columns,
             seed=cfg.seed,
-        ).analyze_tables(involved, metadata)
+        ).analyze_tables(involved, metadata, involved_columns_by_dataset)
 
     try:
         await loop.run_in_executor(None, _pre_analyze)
@@ -769,6 +589,7 @@ async def stream_generate_statements(
         sampled = await loop.run_in_executor(
             None, _sample_single_table_datasets,
             cfg.datasets_path, single_table_query_count, cfg.datasets_format, cfg.seed,
+            cfg.candidates_discovery.limit_to_n_columns, cfg.polars_opts.scan,
         )
         st_total = len(sampled)
 
@@ -846,12 +667,12 @@ async def stream_generate_statements(
         continue
 
         def _process_cross(match=match):
-            dataset_paths, aliases, metadatas, involved_cols, dfs = _build_match_inputs(
+            dataset_paths, aliases, metadatas, involved_cols = _build_match_inputs(
                 match, cfg.datasets_path, metadata, cfg.datasets_format
             )
             match_for_planner = _get_match_for_planner(match)
             if match_for_planner is None:
-                match_for_planner = _get_formatted_match(match, kind, dfs=dfs, involved_cols=involved_cols)
+                match_for_planner = _get_formatted_match(match, kind)
             content = cross_agent.generate_statements(
                 dataset_paths, aliases, kind,
                 match_for_planner,
@@ -929,4 +750,5 @@ def generate_statements(cfg: OrQAConfig) -> None:
             retrieval_gate_enabled=cfg.mcp_search.retrieval_gate_enabled,
             plan_judge_count=JUDGE_MODE_COUNTS[cfg.judges.plan_mode],
             code_judge_count=JUDGE_MODE_COUNTS[cfg.judges.code_mode],
+            scan_opts=cfg.polars_opts.scan,
         )

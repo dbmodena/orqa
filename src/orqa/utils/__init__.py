@@ -68,6 +68,25 @@ def pl_scan_dataset(dataset_path: Path, opts: dict = {}) -> pl.LazyFrame:
             )
 
 
+def dataset_index_shape(dataset_path: Path, scan_opts: dict = {}) -> tuple[int, bool]:
+    """Return ``(column_count, has_at_least_one_data_row)`` from a cheap lazy scan.
+
+    Only the header (schema) and a single row are ever materialized, and CSV
+    schema inference is capped since column dtypes are irrelevant to a pure
+    shape probe — this stays cheap on the large CSVs in this corpus.
+    Propagates whatever the polars scan raises on an unreadable file —
+    callers decide how to treat that.
+    """
+    opts = dict(scan_opts)
+    if dataset_path.suffix == ".csv":
+        opts["csv"] = {**opts.get("csv", {}), "infer_schema_length": 100}
+    lf = pl_scan_dataset(dataset_path, opts)
+    n_columns = len(lf.collect_schema())
+    if n_columns == 0:
+        return 0, False
+    return n_columns, lf.head(1).collect().height > 0
+
+
 def pl_write_dataset(df: pl.DataFrame, dataset_path: Path, opts: dict = {}):
     match dataset_path.suffix:
         case ".csv":
@@ -242,6 +261,13 @@ def select_columns(
 
     With no ``involved_cols`` this is simply "the first N columns" —
     deterministic and reproducible across runs/phases for the same table.
+
+    NOTE: since indexing now drops any table WIDER than
+    ``limit_to_n_columns`` outright (see ``candidates_discovery`` config /
+    ``embedding_discovery.pipeline.build_embedding_texts``), every table that
+    reaches this function has ``len(all_columns) <= limit_to_n_columns`` and
+    the result is the whole table — this call only ever re-orders columns to
+    front-load ``involved_cols``, it no longer truncates.
     """
     col_map = {str(c).strip().lower(): c for c in all_columns}
     resolved_cols = [
@@ -280,8 +306,16 @@ def load_dataset_info(
     """
     Load CSV and extract relevant information for the LLM.
     Returns a dict ready to be unpacked as kwargs for load_prompt.
+
+    ``num_columns_raw`` reports the table's true width BEFORE any column
+    selection, so callers can drop a table that is too wide to work with
+    (indexing already does this upstream for the semantic pipeline; the
+    classical discovery agent re-checks here). For a table that survives
+    that gate ``select_columns`` returns every column — the LLM sees the
+    whole table, only re-ordered to front-load relationship columns.
     """
     df = pl_read_dataset(dataset_path, polars_opts)
+    num_columns_raw = df.width
     df = df.select(select_columns(df.columns, limit_to_n_columns))
 
     coldetails, column_typings = polars_column_details(df)
@@ -300,6 +334,7 @@ def load_dataset_info(
         "dataset_name": dataset_path.stem,
         "num_rows": len(df),
         "num_columns": len(df.columns),
+        "num_columns_raw": num_columns_raw,
         "columns_details": coldetails,
         "sample_data": sample,
         "columns": df.columns,
@@ -667,6 +702,11 @@ def prepare_dataset(
     # specific convention needing a judgment call.
     df = pd_read_dataset(dataset_path, opts={"csv": {"low_memory": False}})
 
+    # Row cap for the LLM-facing view only — opt-in. The statement-generation
+    # pipeline passes ``None`` (no cap): the model still sees just a handful
+    # of sample rows, but column statistics are computed over every row, and
+    # generated code is executed against the full unfiltered table
+    # (QueryExecutor.load_tables), so nothing is judged on a truncated slice.
     if limit_to_n_rows is not None:
         df = df.head(limit_to_n_rows)
 

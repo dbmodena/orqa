@@ -347,11 +347,18 @@ class LLMStatementValidator(LLMClientStructured):
         """
         system_content = "You are a helpful assistant."
 
-        # Stateless base — rebuilt fresh for every correction call.
-        messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
-        ]
+        # Stateless base — rebuilt fresh for every correction call AND for
+        # every retry within it (see the parse-error branch below), so the
+        # message array is always exactly [system, user]. `user_content`
+        # already carries the schema via `pydantic_constraint`, so a retry
+        # never needs to restate it.
+        def build_messages(user: str) -> list[dict]:
+            return [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user},
+            ]
+
+        messages = build_messages(user_content)
 
         usage = _empty_usage()
         errors: list[str] = []
@@ -423,15 +430,17 @@ class LLMStatementValidator(LLMClientStructured):
                 logger.warning("[Validator] %s\nRaw content: %.500s", msg, last_content)
 
                 if attempt < self.max_retries - 1:
-                    # Follow parent pattern: keep context, append error feedback
-                    messages.append({"role": "assistant", "content": last_content})
-                    messages.append({
-                        "role": "user",
-                        "content": self.reform_prompt_constraint(
-                            f"Your response could not be parsed. Error: {e}\n"
-                            "Return valid JSON only."
-                        ),
-                    })
+                    # Rebuild [system, user] with the error folded into the
+                    # user message, rather than appending the failed output as
+                    # an extra assistant turn — the shared formatters already
+                    # quote a bounded excerpt of it, and `user_content` still
+                    # carries the schema.
+                    error_text = (
+                        self._format_validation_error(e)
+                        if isinstance(e, ValidationError)
+                        else self._format_json_error(last_content, e)
+                    )
+                    messages = build_messages(f"{user_content}\n\n{error_text}")
                     time.sleep(self.retry_delay)
 
             except Exception as e:

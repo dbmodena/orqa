@@ -480,9 +480,10 @@ class LLMClientStatementGenerator(LLMClientStructured):
                     "topic": plan.get("topic", ""),
                     "story": plan.get("story", ""),
                     "tables": plan.get("tables", []),
-                    # Structural-complexity tier, decided at planning time and
-                    # judged by the plan panel (PlanJudgment.difficulty_check)
-                    # — no longer part of the generation LLM's own output.
+                    # Effort tier, computed deterministically from the plan's
+                    # own steps (difficulty_estimator.estimate_plan_tier) and
+                    # reconciled before judging — never voted on, and not part
+                    # of the generation LLM's own output.
                     "difficulty": plan.get("difficulty", ""),
                     # Plan-declared result contract, judged by the plan panel
                     # (PlanJudgment.expected_result_check) and mechanically

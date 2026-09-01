@@ -141,8 +141,12 @@ class CandidatesDiscovery:
     # and usually are not very interesting
     min_dataset_height: int
 
-    # Some datasets have a lot of columns. We might
-    # limit our tasks to a smaller subset
+    # Column-count ceiling for a table to be usable at all. A table with
+    # MORE columns than this is dropped during indexing/embedding (same
+    # treatment as a table with no rows or no columns) and never reaches
+    # discovery or statement generation — the pipeline only ever works with
+    # whole, integral tables, never a vertical slice. Tables at or under the
+    # ceiling are shown to the agent in full.
     limit_to_n_columns: int
 
     # The number of randomly sampled rows we'll pass to the LLM

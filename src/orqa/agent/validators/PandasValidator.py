@@ -582,6 +582,32 @@ class PandasValidator(QueryValidator):
                 rendered.append(" " * (len(prefix) + offset - 1) + "^")
         return "\n".join(rendered)
 
+    def _per_table_column_suggestions(self, missing_col: str, max_per_table: int = 4) -> str:
+        """Closest real column names for ``missing_col``, grouped BY TABLE.
+
+        Pooling every DataFrame's columns into one flat list (which this used
+        to do) can suggest a name that exists only in a DIFFERENT table than
+        the one the code was indexing — sending the correction loop to a
+        column it still cannot use there. Grouping keeps every suggestion
+        attached to the table that actually has it. Returns "" when nothing
+        is close enough to suggest.
+        """
+        if not missing_col:
+            return ""
+        lines: list[str] = []
+        for name, df in zip(self.table_names, self.dataframes):
+            columns = getattr(df, "columns", None)
+            if columns is None:
+                continue
+            close = self._suggest_columns(
+                missing_col, [str(c) for c in columns], max_suggestions=max_per_table
+            )
+            if close:
+                lines.append(f"  {name}: {', '.join(close)}")
+        if not lines:
+            return ""
+        return "\nClosest real columns, by table:\n" + "\n".join(lines)
+
     def _normalize_pandas_error(self, e: Exception, source: str = "") -> Exception:
         msg = str(e).lower()
         # A conversion/cast failure (pd.to_numeric, .astype(...), ...) embeds
@@ -595,27 +621,22 @@ class PandasValidator(QueryValidator):
         raw = summarize_large_value(raw_full)
 
         if isinstance(e, KeyError):
-            # Try to extract the column name and provide suggestions
             col_name = raw_full.strip("'").strip('"')
-            available_cols = []
-            for df in self.dataframes:
-                if isinstance(df, pd.DataFrame):
-                    available_cols.extend(str(c) for c in df.columns)
-            available_cols = list(set(available_cols))
-            suggestions = self._suggest_columns(col_name, available_cols)
-            suggestion_msg = ""
-            if suggestions:
-                suggestion_msg = f"\nClosest columns: {', '.join(suggestions[:5])}"
+            suggestion_msg = self._per_table_column_suggestions(col_name)
 
             if "not in index" in raw.lower() or "not in index" in msg:
                 return KeyError(
-                    f"{raw}\nColumn not found — may be missing or suffixed after merge.{suggestion_msg}\n"
-                    "Never use Table_X['col'] as left_on/right_on after a prior merge.\n"
+                    f"{raw}\nColumn not found — missing, or renamed/suffixed by an earlier "
+                    f"step.{suggestion_msg}\n"
+                    "Fix: reference the post-merge name (_x/_y), or pre-normalise into a key column:\n"
                     "  ✓ Table_A.assign(_key=Table_A['col'].str.lower()).merge(..., on='_key')\n"
                     "  ✗ .merge(Table_B, left_on=Table_A['col'].str.lower())"
                 )
             return KeyError(
-                f"{raw}\nColumn not found — check spelling/case, or use suffixed name after merge (_x/_y).{suggestion_msg}"
+                f"{raw}\nColumn not found in the table it was read from.{suggestion_msg}\n"
+                "Fix: use one of the real column names above, verbatim (they are case- "
+                "and whitespace-sensitive); after a merge use the suffixed name (_x/_y). "
+                "Do not invent a column that is not listed."
             )
 
         if isinstance(e, IndexError):
@@ -722,7 +743,48 @@ class PandasValidator(QueryValidator):
             ]):
                 return ValueError(self._build_empty_result_feedback())
 
-            return ValueError(f"{raw}\nValue error — check input data types and operation parameters.")
+            if "grouper" in msg and "not 1-dimensional" in msg:
+                return ValueError(
+                    f"{raw}\nGroup key resolved to several columns — the name is duplicated "
+                    "in the frame (usually both sides of a merge kept it).\n"
+                    "Fix: group on the suffixed name (_x/_y), or drop/rename the duplicate "
+                    "right after the merge that introduced it."
+                )
+
+            if "already exists" in msg and ("cannot insert" in msg or "reset_index" in msg):
+                return ValueError(
+                    f"{raw}\n.reset_index() would overwrite an existing column of the same name.\n"
+                    "Fix: .reset_index(drop=True), or rename the index before resetting."
+                )
+
+            if "length of values" in msg and "length of index" in msg:
+                return ValueError(
+                    f"{raw}\nAssigned a sequence whose length differs from the frame's row count "
+                    "— usually a value computed from a DIFFERENT (filtered or grouped) frame.\n"
+                    "Fix: compute the value on the same frame you assign it to, or align via "
+                    ".merge()/.map() on a key instead of positional assignment."
+                )
+
+            if "tz-naive" in msg or "tz-aware" in msg:
+                return ValueError(
+                    f"{raw}\nComparing timezone-aware and timezone-naive datetimes.\n"
+                    "Fix: normalise both sides — pd.to_datetime(col, utc=True), or "
+                    ".dt.tz_localize(None) on the aware side."
+                )
+
+            if "agg function failed" in msg or "could not convert string" in msg:
+                return ValueError(
+                    f"{raw}\nAggregation hit non-numeric values in a column it had to sum/average.\n"
+                    "Fix: pd.to_numeric(df['col'], errors='coerce') before aggregating — a raw "
+                    ".astype(float) raises on the first stray token (see the clean step and "
+                    "Column Statistics' bad_token_counts)."
+                )
+
+            return ValueError(
+                f"{raw}\nValue error.\nFix: check the dtypes and the exact arguments of the "
+                "operation on the line above — most often a column holding text where a "
+                "number is required."
+            )
 
         if isinstance(e, TypeError):
             if "unsupported operand" in msg:
@@ -763,41 +825,53 @@ class PandasValidator(QueryValidator):
     # ------------------------------------------------------------------
     # Feedback
     # ------------------------------------------------------------------
+    # Shared tail for every empty-result variant. A genuinely correct query over
+    # data that simply has no matching rows is a PLAN problem, not a code one —
+    # the pipeline routes a plan-compliant empty result to a plan-level retry
+    # (see StatementOrchestrator._retry_empty_results), so the correction model
+    # must not "fix" emptiness by loosening a filter the question actually
+    # requires. Saying so here is what keeps it from silently answering a
+    # different question than the one it was given.
+    _EMPTY_RESULT_TAIL = (
+        "Only widen a predicate the question does not actually require. If every "
+        "filter is faithful to the question and the data genuinely has no matching "
+        "rows, keep the query as it is and say so in `motivation` — do not broaden "
+        "the scope to force rows."
+    )
+
     def _build_empty_result_feedback(self, query: str = "") -> str:
         q = query.lower()
-        is_concat = "concat" in q
-        is_single = len(self.table_names) == 1
-
-        if is_concat:
-            return "\n".join([
-                "Empty result — one or more concat inputs are empty due to over-filtering.",
-                "Suggestions:",
-                "  1. Normalize strings: df['col'].str.strip().str.lower() == value.lower()",
-                "  2. Relax or remove filters one at a time to find which branch is empty.",
-                "  3. Widen date ranges or numeric thresholds that may exclude all rows.",
-                "  4. Cast numeric strings: df['col'].astype(float) before comparing.",
-            ])
-        if is_single:
-            return "\n".join([
-                "Empty result — filter is too restrictive or no data matches.",
-                "Suggestions:",
-                "  1. Normalize strings: df['col'].str.strip().str.lower() == value.lower()",
-                "  2. Cast numeric strings: df['col'].astype(float) before comparing.",
-                "  3. Relax or remove filters one at a time to find the offending predicate.",
-                "  4. Widen date ranges or numeric thresholds that may exclude all rows.",
-            ])
-        return "\n".join([
-            "Empty result — merge or filter matched nothing, likely case or type mismatch on join keys.",
-            "Suggestions:",
-            "  1. Normalize join keys before merging:",
-            "     t1.assign(_k=t1['key'].str.strip().str.lower())",
-            "     .merge(t2.assign(_k=t2['key'].str.strip().str.lower()), on='_k')",
-            "  2. Normalize string filters: df[df['col'].str.lower() == value.lower()]",
-            "  3. Cast numeric strings: df['col'].astype(float) before comparing.",
-            "  4. Use how='left' to diagnose which side produces no matches.",
-            "  5. Relax or remove WHERE-equivalent filters one at a time to isolate the offending predicate.",
-            "  6. Widen date ranges or numeric thresholds that may exclude all rows.",
-        ])
+        if "concat" in q:
+            head = (
+                "Empty result — at least one pd.concat input is empty, so the union has "
+                "no rows.\n"
+                "Fix, in order: (1) check each branch separately — one filter is "
+                "excluding everything; (2) normalise string comparisons with "
+                "df['col'].str.strip().str.lower() == value.lower(); (3) cast numeric "
+                "text with pd.to_numeric(df['col'], errors='coerce') before comparing."
+            )
+        elif len(self.table_names) == 1:
+            head = (
+                "Empty result — the filter chain matched no rows.\n"
+                "Fix, in order: (1) drop the predicates one at a time to find which one "
+                "empties the frame; (2) normalise string comparisons with "
+                "df['col'].str.strip().str.lower() == value.lower() (case/whitespace "
+                "mismatch silently drops everything); (3) cast numeric text with "
+                "pd.to_numeric(df['col'], errors='coerce'); (4) check the date range "
+                "against the column's real min/max in Column Statistics."
+            )
+        else:
+            head = (
+                "Empty result — the merge produced no matching rows, or a filter after "
+                "it removed them all.\n"
+                "Fix, in order: (1) switch the merge to how='left' to see which side "
+                "fails to match; (2) normalise the join keys on BOTH sides before "
+                "merging — t1.assign(_k=t1['key'].str.strip().str.lower()).merge("
+                "t2.assign(_k=t2['key'].str.strip().str.lower()), on='_k'); (3) confirm "
+                "the two key columns hold the same kind of value (Column Statistics' "
+                "top_values shows both); (4) then drop post-merge filters one at a time."
+            )
+        return f"{head}\n{self._EMPTY_RESULT_TAIL}"
 
     def _get_language_name(self) -> str:
         return 'Python'

@@ -24,6 +24,7 @@ from conf import OrQAConfig
 from ..agent.agent import PairTaskSelectionAgent
 from ..graph import matches_graph
 from ..utils import (
+    dataset_index_shape,
     load_dataset_info,
     load_normalized_datasets_metadata,
     pl_read_dataset,
@@ -54,9 +55,21 @@ VALENTINE_MAX_ROWS = 200
 
 
 def sample_seed_datasets(
-    datasets_path: Path, n_datasets_to_sample: int, seed: int
+    datasets_path: Path,
+    n_datasets_to_sample: int,
+    seed: int,
+    allowed_ids: set[str] | None = None,
 ) -> list[tuple[str, Path, str, str]]:
     datasets = [f for f in sorted(datasets_path.iterdir()) if f.is_file()]
+
+    # Only seed the discovery BFS with datasets that actually made it into
+    # the index — i.e. not empty, not too wide (see build_embedding_texts).
+    # A wide/empty seed would just be gated a step later anyway, wasting a
+    # seed slot on a dataset we will never work with.
+    if allowed_ids is not None:
+        datasets = [
+            f for f in datasets if remove_file_extension(f.name) in allowed_ids
+        ]
 
     assert len(datasets) >= n_datasets_to_sample, (
         f"Too many datasets to sample: {len(datasets)} < {n_datasets_to_sample}"
@@ -72,9 +85,14 @@ def _queue_entry(dataset_id: str, filepath: Path) -> tuple[str, Path, str, str]:
     return (dataset_id, filepath, *parts)  # ty: ignore
 
 
-def get_seed_datasets(cfg: OrQAConfig) -> list[tuple[str, Path, str, str]]:
+def get_seed_datasets(
+    cfg: OrQAConfig, allowed_ids: set[str] | None = None
+) -> list[tuple[str, Path, str, str]]:
     return sample_seed_datasets(
-        cfg.datasets_path, cfg.candidates_discovery.n_random_dataset_seeds, cfg.seed
+        cfg.datasets_path,
+        cfg.candidates_discovery.n_random_dataset_seeds,
+        cfg.seed,
+        allowed_ids,
     )
 
 
@@ -95,12 +113,24 @@ def save_time_statistics(records: list, path: Path):
 
 
 def build_embedding_texts(cfg: OrQAConfig) -> dict[str, str]:
-    """One embedding document per dataset on disk that has metadata."""
+    """One embedding document per dataset on disk that has metadata.
+
+    A dataset is left out of the embedding set entirely — so it never
+    enters the cluster neighbor index, never seeds the BFS and is never
+    proposed as a candidate — when it has no rows, no columns, or MORE
+    than ``limit_to_n_columns`` columns. Rationale: we only ever want to
+    hand the agent whole, integral tables; a table too wide for that is
+    dropped up front (same treatment as an empty one) instead of being
+    shown as a lossy vertical slice. An unreadable file is dropped too.
+    """
     raw_metadata = load_raw_normalized_metadata(cfg.normalized_metadata_filepath)
     scan_opts = cfg.polars_opts.scan
+    max_columns = cfg.candidates_discovery.limit_to_n_columns
 
     texts: dict[str, str] = {}
     skipped = 0
+    skipped_empty = 0
+    skipped_wide = 0
     for filepath in sorted(cfg.datasets_path.iterdir()):
         if not filepath.is_file():
             continue
@@ -109,6 +139,23 @@ def build_embedding_texts(cfg: OrQAConfig) -> dict[str, str]:
         if record is None:
             skipped += 1
             continue
+
+        try:
+            n_columns, has_rows = dataset_index_shape(filepath, scan_opts)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Could not inspect %s (%s); excluding it from the index.",
+                filepath.name,
+                exc,
+            )
+            n_columns, has_rows = 0, False
+        if n_columns == 0 or not has_rows:
+            skipped_empty += 1
+            continue
+        if n_columns > max_columns:
+            skipped_wide += 1
+            continue
+
         texts[dataset_id] = build_embedding_text(
             record,
             dataset_path=filepath,
@@ -118,6 +165,13 @@ def build_embedding_texts(cfg: OrQAConfig) -> dict[str, str]:
 
     if skipped:
         print(f"Skipped {skipped} datasets without metadata records.")
+    if skipped_empty:
+        print(f"Skipped {skipped_empty} datasets with no rows or columns.")
+    if skipped_wide:
+        print(
+            f"Skipped {skipped_wide} datasets wider than "
+            f"{max_columns} columns (limit_to_n_columns)."
+        )
     return texts
 
 
@@ -321,7 +375,10 @@ def pipeline(cfg: OrQAConfig):
     print("=" * PRINT_PAD + "\n")
 
     # ── Seeds, metadata, agent ─────────────────────────────────────────────
-    seed_datasets = get_seed_datasets(cfg)
+    # Seed only from datasets that made it into the index (non-empty and
+    # within the column limit) — build_embedding_texts already dropped the
+    # rest, and ``ids`` is exactly that surviving set.
+    seed_datasets = get_seed_datasets(cfg, allowed_ids=set(ids))
     with open(cd.seeds_datasets_path, "w") as file:
         json.dump([d[0] for d in seed_datasets], file)
 
@@ -395,8 +452,12 @@ def pipeline(cfg: OrQAConfig):
             visited.add(resource_id)
             continue
 
-        if q_info["num_rows"] < cd.min_dataset_height or q_info["num_columns"] == 0:
-            log.info(f"Dataset {dataset_id} too small; skipping.")
+        if (
+            q_info["num_rows"] < cd.min_dataset_height
+            or q_info["num_columns"] == 0
+            or q_info["num_columns_raw"] > cd.limit_to_n_columns
+        ):
+            log.info(f"Dataset {dataset_id} too small or too wide; skipping.")
             visited.add(resource_id)
             continue
 
@@ -441,6 +502,7 @@ def pipeline(cfg: OrQAConfig):
             if (
                 r_info["num_rows"] < cd.min_dataset_height
                 or r_info["num_columns"] == 0
+                or r_info["num_columns_raw"] > cd.limit_to_n_columns
             ):
                 continue
 

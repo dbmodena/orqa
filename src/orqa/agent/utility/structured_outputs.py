@@ -479,8 +479,9 @@ class Query(BaseModel):
     )
     # NOTE: no `difficulty` field here either, for the same reason as
     # `tables` above. Difficulty is decided exactly once, during PLANNING
-    # (see prompting.models.SQLQueryPlan/PandasQueryPlan.difficulty) and
-    # judged there by PlanJudgment.difficulty_check. StatementClient.complete
+    # (see prompting.models.SQLQueryPlan/PandasQueryPlan.difficulty), where
+    # it is COMPUTED deterministically from the plan's own steps and never
+    # voted on by any judge. StatementClient.complete
     # stamps the plan's own `difficulty` onto every query generated from it,
     # the same way it already does for `query_plan`/`question_keywords`/etc.
     code: str = Field(
@@ -733,93 +734,61 @@ class Judgment(BaseModel):
     result_check: str = Field(
         ...,
         description=(
-            "One or two sentences: does the executed result actually answer "
-            "the question — right shape (single figure / ranked list / "
-            "per-group table) and non-degenerate values? Quote representative "
-            "value(s) from the result. This is the PRESENT-RESULT layer's "
-            "check text — empty, degenerate, or trivial results belong here, "
-            "never under requirements_check."
+            "PRESENT-RESULT layer's check text (Check 2): 1-2 sentences on "
+            "whether the executed result answers the question, quoting "
+            "representative value(s). Empty/degenerate/trivial results belong "
+            "here, never under requirements_check."
         ),
     )
     requirements_check: str = Field(
         ...,
         description=(
-            "Bidirectional coverage. List each core question requirement as "
-            "IMPLEMENTED or MISSING in the code. List each code operation as "
-            "JUSTIFIED or UNJUSTIFIED by the question, naming the specific "
-            "phrase or implied need that grounds each JUSTIFIED verdict — a "
-            "bare label with no grounding is not acceptable. Flag only "
-            "material gaps — omit minor stylistic observations. This is the "
-            "PLAN-COMPLIANCE layer's check text — whether the code correctly "
-            "implements what was asked, never whether the result it produced "
-            "is any good."
+            "PLAN-COMPLIANCE layer's check text (Check 1): the bidirectional "
+            "IMPLEMENTED/MISSING and JUSTIFIED/UNJUSTIFIED mapping, with the "
+            "grounding phrase named for each JUSTIFIED verdict."
         ),
     )
     violated_criteria: List[ViolatedCriterion] = Field(
         default_factory=list,
         description=(
-            "All triggered criteria. Empty if approved. Reject only when a flaw "
-            "is unambiguous and material. `unclear_result`/`trivial` belong to "
-            "the PRESENT-RESULT layer; every other criterion "
-            "(`partial_implementation`/`over_engineering`/`silent_filter_bias`/"
-            "`disjointed_query`) belongs to the PLAN-COMPLIANCE layer."
+            "All triggered criteria, per the criterion table in the "
+            "instructions; empty if approved."
         ),
     )
     plan_compliance_approval: bool = Field(
         ...,
         description=(
-            "Vote on the PLAN-COMPLIANCE layer: true when the code correctly "
-            "and completely implements what the question asks — no missing "
-            "core requirement, no unjustified operation, no "
-            "disjointed/unconnected query structure. False when any of "
-            "`partial_implementation`/`over_engineering`/`silent_filter_bias`/"
-            "`disjointed_query` is triggered. Independent of "
-            "present_result_approval: code can "
-            "be a fully correct implementation of the plan and still produce "
-            "an empty or degenerate result (that's a present_result failure, "
-            "not a compliance one)."
+            "Vote on Check 1 (code implements what the question asks). "
+            "See requirements_check."
         ),
     )
     present_result_approval: bool = Field(
         ...,
         description=(
-            "Vote on the PRESENT-RESULT layer: true when the executed result "
-            "actually answers the question — right shape, non-empty, "
-            "not all-null/NaN, not a meaningless constant, no obviously "
-            "corrupt values, and not something any business user could state "
-            "without querying. False when `unclear_result` or `trivial` is "
-            "triggered. Independent of plan_compliance_approval: a compliant, "
-            "correct implementation of the plan can still legitimately "
-            "produce nothing (an over-restrictive filter combination, a "
-            "mismatched join) — that's a present_result failure, not a "
-            "coding mistake, and is handled differently downstream."
+            "Vote on Check 2 (the executed result actually answers the "
+            "question). See result_check."
         ),
     )
     feedback: str = Field(
         ...,
         description=(
-            "What is missing in the code or should improve, in relation to what "
-            "the question asks. Approved: why the result is meaningful and the "
-            "code justified. Rejected: quote the exact operations or result "
-            "values that triggered each criterion."
+            "Approved: why the result is meaningful and the code justified. "
+            "Rejected: quote the exact operations or result values that "
+            "triggered each criterion."
         ),
     )
     approved: bool = Field(
         default=False,
         description=(
-            "Overall verdict; always plan_compliance_approval AND "
-            "present_result_approval (recomputed server-side, so just set it "
-            "consistently)."
+            "Derived: plan_compliance_approval AND present_result_approval "
+            "(recomputed server-side, so just set it consistently)."
         ),
     )
     response: str = Field(
         ...,
         description=(
-            "3-4 sentence business insight. Must cite the actual computed value(s) from "
-            "the result (specific numbers, names, dates, predicted values, or aggregates "
-            "such as mean/min/max) — never a generic statement about what the result "
-            "'could be used for' without stating what it actually is. Empty string if not "
-            "approved."
+            "3-4 sentence business insight citing the actual computed value(s) "
+            "from the result. Empty string if not approved."
         ),
     )
     translated_response: str = Field(
@@ -829,8 +798,9 @@ class Judgment(BaseModel):
     suggestions: str = Field(
         ...,
         description=(
-            "Empty string if approved. If rejected: one actionable sentence per "
-            "criterion prefixed [FIX QUERY], stating what to change in the code."
+            "Empty if approved. If rejected: one actionable sentence per "
+            "criterion prefixed [FIX QUERY]. Never propose removing a table or "
+            "its join/union."
         ),
     )
 
@@ -852,25 +822,29 @@ class Judgments(BaseModel):
 class PlanJudgment(BaseModel):
     """Verdict of one panel judge on a single structured query plan.
 
-    The plan judge owns QUESTION quality, TABLE justification, the
-    EXPECTED-RESULT declaration, and DIFFICULTY correspondence (the code
-    judge no longer re-judges any of them): is the question concise, pinned
-    to a specific topic, written like an average user seeking insights — do
-    the plan's steps reflect it — does the question genuinely need every
-    provided table — and does the plan's declared `difficulty` genuinely
-    match what its steps structurally do?
+    The plan judge owns QUESTION quality, TABLE justification and the
+    RESULT contract (the code judge no longer re-judges any of them): is the
+    question concise, pinned to a specific topic, written like an average
+    user seeking insights — do the plan's steps reflect it — does the
+    question genuinely need every provided table — and is the declared
+    result the coherent conclusion of everything the plan computes?
+    DIFFICULTY is deliberately absent: it is EFFORT, computed
+    deterministically from the plan's own steps (see
+    ``utility.difficulty_estimator``) and reconciled before judging, never
+    voted on.
     Deliberately small (a few flat fields) because plan panels run on small
     models: the check fields come FIRST so the model reasons before it commits
     to the votes.
 
-    Voting is LAYERED across EIGHT independent layers — ``question_approval``
+    Voting is LAYERED across SIX independent layers — ``question_approval``
     (realistic, average-user, keyword-retrievable question), ``plan_approval``
     (steps produce exactly what the question asks), ``table_usage_approval``
-    (every table justified by the question), ``expected_result_approval``,
-    ``difficulty_approval`` (the declared `difficulty` matches the steps'
-    structural complexity), ``convergence_approval`` (the steps converge
-    into ONE final result rather than leaving independent branches
-    uncombined), ``metric_combination_approval`` (any figure blended
+    (every table justified by the question), ``expected_result_approval``
+    (the declared result is the natural conclusion of the steps AND accounts
+    for every analysis the plan performs — this absorbs what used to be a
+    separate convergence layer, since two uncombined branches are exactly a
+    declaration that fails to account for both),
+    ``metric_combination_approval`` (any figure blended
     from 2+ tables into one output value is dimensionally sound, never a
     silent sum across incommensurate units or undifferentiated time
     periods), and ``topic_linkage_approval`` (the question names the
@@ -890,362 +864,135 @@ class PlanJudgment(BaseModel):
     question_check: str = Field(
         ...,
         description=(
-            "One or two sentences: does the question pinpoint ONE specific "
-            "topic in these tables, concisely, phrased like an average "
-            "non-technical user seeking an insight? Quote the anchoring "
-            "term(s), or what makes it vague/verbose/technical. Also check "
-            "PINPOINTING: does the question's vocabulary narrow to this "
-            "table's specific topic (a domain/category qualifier, a "
-            "program/agency name, a place, a period), or stay generic "
-            "enough to describe many unrelated tables just as well? Judge "
-            "this on the question's own specificity, not just whether "
-            "question_keywords happens to retrieve the table — a generic "
-            "term can retrieve it by luck of that table's own index entry "
-            "while still failing to tell a reader which real-world topic "
-            "it's about. Also check "
-            "TEMPORAL SCOPE: if the table is "
-            "tied to a fixed period (a year, a date range, a snapshot date) "
-            "rather than an ongoing feed, the question must state that "
-            "period, not read as if the data were current. Also check that "
-            "it never narrates a `clean` step's own technical criteria "
-            "(non-numeric/null exclusions, outlier filtering, bad-token "
-            "literals) — that precision belongs in "
-            "expected_result_description, not in what a curious "
-            "non-technical user would ask."
+            "1-2 sentences applying Check 1 (question quality: pinpointing, "
+            "retrievability, temporal scope). Name the specific flaw and "
+            "quote the offending phrase, or state that none applies."
         ),
     )
     alignment_check: str = Field(
         ...,
         description=(
-            "One or two sentences: do the plan's steps, in order, produce "
-            "exactly what the question asks — nothing core missing, nothing "
-            "unjustified added? Name any missing or unjustified step. A "
-            "`clean` step's basis must be a genuine data-quality defect "
-            "(missing/corrupted/sentinel), never mere statistical rarity — "
-            "dropping a `numeric_outliers`-flagged value that's otherwise a "
-            "plausible, well-formed number is an unjustified filter, not "
-            "hygiene, especially when it feeds a later `sum`/'total' step "
-            "(it silently understates the true total)."
+            "1-2 sentences applying Check 2 (steps produce exactly what the "
+            "question asks). Name the missing or unjustified step, or state "
+            "that none applies."
         ),
     )
     table_check: str = Field(
         ...,
         description=(
-            "One or two sentences: is EVERY provided table genuinely needed "
-            "to answer the question, per a CONCRETE, ARTICULATED "
-            "justification — not a bare assertion? Name any table whose "
-            "justification does not hold: topically unrelated, its "
-            "contribution changes nothing in the answer, or the "
-            "justification is generic/shallow boilerplate that names "
-            "nothing specific about that table (apply the swap test: could "
-            "the same sentence be pasted under a different table and still "
-            "sound plausible?)."
+            "1-2 sentences applying Check 3 (every table genuinely required, "
+            "per the swap test). Name each table whose justification fails, "
+            "or state that none does."
         ),
     )
     unjustified_tables: List[str] = Field(
         default_factory=list,
         description=(
-            "Aliases of tables whose justification does not hold — whether "
-            "topically unrelated, inconsequential to the answer, or too "
-            "generic/shallow to count as an articulated argument (e.g. "
-            "['Table_2']). Empty when every table has a concrete, specific "
-            "justification. Filling this means the QUESTION (and/or the "
-            "justification itself) must be reframed so it genuinely, "
-            "concretely needs the table — never that the table should be "
-            "dropped."
+            "Aliases (e.g. ['Table_2']) of tables failing Check 3; empty when "
+            "every table is justified. Filling this means the QUESTION must be "
+            "reframed to need the table — never that the table be dropped."
         ),
     )
     expected_result_check: str = Field(
         ...,
         description=(
-            "One or two sentences: do the plan's `expected_result_type` "
-            "(table/list/number/text/boolean) and "
-            "`expected_result_description` match what the question actually "
-            "asks for and what the steps produce? Name the specific mismatch "
-            "if any: a \"how many...\" question promising a table, a "
-            "per-group breakdown promising a single number, or a "
-            "description that contradicts the steps' final output."
-        ),
-    )
-    difficulty_check: str = Field(
-        ...,
-        description=(
-            "One or two sentences: the payload's `computed_difficulty` "
-            "block gives `structural_tier`/`data_engineering_tier` already "
-            "computed by CODE from this plan's `steps` (step counts, "
-            "chaining, branching, group/aggregation cardinality) — take "
-            "`structural_tier` as given, never re-derive it. Your only job "
-            "is the two things code cannot decide, both on the "
-            "DATA-ENGINEERING axis: (1) PATTERN DISTINCTNESS — when that "
-            "axis is `medium` from 2+ technique 'flag'/'bucket' derive "
-            "steps, do they actually preserve genuinely DIFFERENT "
-            "messy-data patterns, or double-mark the same signal? (2) "
-            "BUCKET-LOGIC REALISM — when "
-            "`dq_hard_pending_your_confirmation` is true (a bucket step "
-            "already structurally feeds a group/aggregate), does its "
-            "branching (3+ categories) reflect real domain judgment, or an "
-            "arbitrary split? Downgrade the data-engineering tier one "
-            "level for either failure, then compare `max(structural_tier, "
-            "data_engineering_tier)` to the declared `difficulty`. Name the "
-            "concrete mismatch using `computed_difficulty.breakdown`. The "
-            "fix is always in the STEPS, never in relabeling — do not write "
-            "'adjust/change the difficulty to X' anywhere in this check or "
-            "in `suggestions`, even as one of two options alongside a real "
-            "steps-based fix."
-        ),
-    )
-    convergence_check: str = Field(
-        ...,
-        description=(
-            "One or two sentences: do the plan's steps converge into ONE "
-            "final result, or do two or more independently-produced "
-            "branches (each from its own table(s), sharing no combining "
-            "step) get left standing side by side under one question? "
-            "Name the missing combining step if any (a join/union on a "
-            "shared key, a correlation/comparison, or a final synthesis "
-            "step) — always passes (say so briefly) for a single-table or "
-            "single-chain plan."
+            "1-2 sentences applying Check 4 (the declared result matches the "
+            "question, is the natural conclusion the steps build toward, and "
+            "accounts for EVERY analysis the plan performs). Name the specific "
+            "mismatch or the unaccounted-for result, or state that none applies."
         ),
     )
     metric_combination_check: str = Field(
         ...,
         description=(
-            "One or two sentences, only when a derive/aggregate step blends "
-            "figures from 2+ tables into ONE output value (a 'combined "
-            "total', a blended score): is the combination dimensionally "
-            "sound, or does it silently sum raw values on incommensurate "
-            "units/scales (e.g. a COUNT + a geometric-area SUM + a dollar "
-            "SUM), fold different time periods' figures into one "
-            "undifferentiated total that erases which period contributed "
-            "what, OR sum same-unit figures (e.g. two plain counts) from "
-            "conceptually unrelated categories/processes with no natural "
-            "shared identity — ask whether a domain expert would recognize "
-            "the SUM ITSELF as one coherent, nameable quantity, and treat a "
-            "generic thematic label ('combined civic activity') as NOT "
-            "sufficient evidence it is one (apply the same swap test as "
-            "Check 3: would this exact justification sound equally "
-            "plausible pasted over a different arbitrary trio of columns?). "
-            "Comparing/contrasting/ratio-ing figures ACROSS different time "
-            "periods is NOT a flaw when that comparison is the question's "
-            "own insight and each period's figure stays distinct in the "
-            "output — only an opaque additive sum across periods is. Name "
-            "the specific unsound combination if any — always passes (say "
-            "so briefly) for a plan with no cross-table blended metric."
+            "1-2 sentences applying Check 5 (a figure blended from 2+ tables "
+            "into one output value is dimensionally and conceptually sound). "
+            "Name the unsound combination, or state briefly that it passes "
+            "(as it always does with no cross-table blended metric)."
         ),
     )
     topic_linkage_check: str = Field(
         ...,
         description=(
-            "One or two sentences: does the table's own description/"
-            "keywords show its identity hinges on ONE specific NAMED "
-            "program/initiative/agency, narrower than the generic activity "
-            "it falls under? If so, does the question actually name that "
-            "specific program, or does it only describe the generic "
-            "activity in a way that could just as plausibly belong to a "
-            "different, unrelated program? SEPARATELY: is this table one "
-            "of several time-vintages of the same subject that open-data "
-            "portals routinely republish (an annual snapshot, a periodic "
-            "refresh)? If so, does the question state the SPECIFIC period "
-            "that pins this table's vintage down, or only a vague/generic "
-            "time reference ('in recent years', 'historically') or none at "
-            "all, that could equally describe a different year's edition? "
-            "Judge both independently of Check 1 — a question can be "
-            "concise, concrete, and even keyword-retrievable while still "
-            "leaving a reader unable to tell WHICH specific real-world "
-            "program or WHICH time-vintage it's about. Always passes (say "
-            "so briefly) when the table has no single named program "
-            "distinguishing it from its generic category and is not one of "
-            "several time-vintages of the same subject, or when the "
-            "question already names the specific program and period."
+            "1-2 sentences applying Check 6 (the question names the table's "
+            "specific program AND its specific time-vintage, judged "
+            "independently of Check 1). Name the generic or vague phrasing, "
+            "or state briefly that it passes."
         ),
     )
     question_approval: bool = Field(
         ...,
-        description=(
-            "Vote on the QUESTION layer (Check 1): true when the question "
-            "reads like an average, non-technical user wrote it AND its "
-            "topical vocabulary overlaps the tables' keywords enough to be "
-            "retrievable."
-        ),
+        description="Vote on Check 1 (question quality). See question_check.",
     )
     plan_approval: bool = Field(
         ...,
-        description=(
-            "Vote on the PLAN layer (Check 2): true when the steps, in "
-            "order, produce exactly what the question asks — nothing core "
-            "missing, nothing unjustified added."
-        ),
+        description="Vote on Check 2 (steps match the question). See alignment_check.",
     )
     table_usage_approval: bool = Field(
         ...,
         description=(
-            "Vote on the TABLE-USAGE layer (Check 3): true when every "
-            "provided table is genuinely required by the question. Must be "
-            "false whenever unjustified_tables is non-empty."
+            "Vote on Check 3 (every table required). Must be false whenever "
+            "unjustified_tables is non-empty."
         ),
     )
     expected_result_approval: bool = Field(
         default=True,
         description=(
-            "Vote on the EXPECTED-RESULT layer (Check 4): true when the "
-            "plan's expected_result_type and expected_result_description "
-            "match both the question's ask and the steps' final output. "
-            "False when the promised shape contradicts either (e.g. a "
-            "\"how many...\" question with expected_result_type 'table', "
-            "or a per-borough breakdown promising 'number'). The declared "
-            "shape is mechanically enforced against the executed result "
-            "downstream, so a wrong declaration here dooms every "
-            "generation attempt."
-        ),
-    )
-    difficulty_approval: bool = Field(
-        default=True,
-        description=(
-            "Vote on the DIFFICULTY layer (Check 5): true when the declared "
-            "`difficulty` equals `max(computed_difficulty.structural_tier, "
-            "data_engineering_tier)` — the structural half is a given, "
-            "code-computed fact; the data-engineering half may be one tier "
-            "lower than `computed_difficulty` claims if pattern-distinctness "
-            "or bucket-logic-realism (see `difficulty_check`) doesn't hold. "
-            "False on any resulting mismatch. This layer NEVER approves "
-            "changing the difficulty label itself — a mismatch is always "
-            "fixed by adjusting the STEPS to match the label, since in a "
-            "batch the label is a fixed per-slot assignment (one easy, one "
-            "medium, one hard)."
-        ),
-    )
-    convergence_approval: bool = Field(
-        default=True,
-        description=(
-            "Vote on the CONVERGENCE layer (Check 6): true when the plan's "
-            "steps converge into ONE final result — via a join/union on a "
-            "shared key, a correlation or comparison, or a final "
-            "synthesizing step — OR the plan is single-table/single-chain "
-            "(this layer always passes then). False when the plan computes "
-            "two or more genuinely independent results from separate "
-            "branches and never combines them, leaving them reported side "
-            "by side under one question. Independent of Check 3: every "
-            "table can be individually well-justified (table_usage_approval "
-            "true) while nothing ever ties their outputs together "
-            "(convergence_approval false)."
+            "Vote on Check 4 (the declared result is the coherent, natural "
+            "conclusion of the steps AND accounts for every analysis the plan "
+            "performs). See expected_result_check."
         ),
     )
     metric_combination_approval: bool = Field(
         default=True,
         description=(
-            "Vote on the METRIC-COMBINATION layer (Check 7): true when "
-            "either no step blends figures from 2+ tables into one output "
-            "value, OR it does and the combination is dimensionally AND "
-            "conceptually sound. False when a step sums/averages raw "
-            "values on incommensurate units/scales (a count + an area + a "
-            "dollar sum), sums figures from genuinely different time "
-            "periods into one undifferentiated total, OR sums same-unit "
-            "figures (e.g. two plain counts) from unrelated categories/"
-            "processes with no natural shared identity — a generic "
-            "thematic label alone does not establish one. NOT false merely "
-            "because the plan spans multiple time periods or tables — only "
-            "when their figures are summed away into one opaque number "
-            "rather than kept distinct or combined via a dimensionally-"
-            "valid ratio/rate. Independent of Check 6: branches can "
-            "converge via a sound join (convergence_approval true) through "
-            "an unsound additive step (metric_combination_approval false)."
+            "Vote on Check 5 (cross-table blended figures are sound); always "
+            "true when no step blends any. See metric_combination_check."
         ),
     )
     topic_linkage_approval: bool = Field(
         default=True,
         description=(
-            "Vote on the TOPIC-LINKAGE layer (Check 8): true when the "
-            "table has no single named program/initiative distinguishing "
-            "it from its generic category (or the question names that "
-            "specific program), AND either the table is not one of several "
-            "time-vintages of the same subject or the question states the "
-            "specific period that pins this table's vintage down. False "
-            "when the table's identity hinges on a specific named program/"
-            "initiative/agency but the question only ever describes the "
-            "generic activity it falls under, OR when this table is one of "
-            "several period-vintages of the same subject (an annual "
-            "snapshot, a periodic refresh — per its own description) but "
-            "the question states no period, or only a vague one ('in "
-            "recent years', 'historically') that wouldn't distinguish this "
-            "vintage from a different year's edition — even if that "
-            "phrasing is concrete and retrievable. Independent of Check 1: "
-            "a question can pass question_approval (concise, retrievable, "
-            "no jargon, and even mentioning *some* period so it doesn't "
-            "read as live data) while still failing here, because "
-            "retrievability and live/current phrasing are about whether a "
-            "search index finds the table and whether the tense is right — "
-            "not whether a reader of the question alone would know which "
-            "real-world program or which specific year's edition it's "
-            "about."
+            "Vote on Check 6 (question names the table's specific program and "
+            "time-vintage), judged independently of Check 1. See "
+            "topic_linkage_check."
         ),
     )
     approved: bool = Field(
         default=False,
         description=(
-            "Overall verdict; always question_approval AND plan_approval "
-            "AND table_usage_approval AND expected_result_approval AND "
-            "difficulty_approval AND convergence_approval AND "
-            "metric_combination_approval AND topic_linkage_approval "
-            "(recomputed server-side, so just set it consistently)."
+            "Derived: the AND of all six layer votes above (recomputed "
+            "server-side, so just set it consistently)."
         ),
     )
 
     feedback: str = Field(
         ...,
         description=(
-            "What is missing or should improve. Approved: one sentence on why "
-            "the question, plan, and table usage are sound. Rejected: the "
+            "Approved: one sentence on why all layers hold. Rejected: the "
             "specific flaw per failed layer, quoting the offending question "
-            "part, step, or table justification."
+            "part, step, or justification."
         ),
     )
     suggestions: str = Field(
         ...,
         description=(
-            "Empty string if approved. If rejected: one actionable sentence "
-            "per failed layer — a rewrite of the question and/or the concrete "
-            "step fix. For an unjustified table, ALWAYS suggest reframing the "
-            "question so the table becomes necessary; NEVER suggest dropping "
-            "the table (the code is required to use every table). For "
-            "a wrong expected-result layer, state the correct "
-            "expected_result_type and/or the corrected description — "
-            "whichever of the declaration or the steps is actually wrong. "
-            "For a difficulty mismatch, name the concrete step(s)/table(s) "
-            "to add, remove, or simplify so the plan's actual "
-            "complexity genuinely matches its assigned tier (e.g. 'cut this "
-            "down to a single filter and one aggregate to match `easy`', or "
-            "'add a second grouped aggregation to match `medium`') — NEVER "
-            "suggest changing the `difficulty` value itself; it is a fixed "
-            "per-slot batch assignment, not yours (or the planner's) to "
-            "reassign here. Relabeling is always wrong, even when the steps "
-            "genuinely read as a different tier — the fix is still to "
-            "simplify/compound the STEPS back down to the declared tier, "
-            "never to relabel, and this holds even if you also name a "
-            "legitimate steps-based fix in the SAME sentence — state ONLY "
-            "the steps-based fix, with no relabeling option alongside it. "
-            "For a convergence failure, name "
-            "the specific combining step the plan is missing (a join/union "
-            "on a shared key, a correlation/comparison, or a final "
-            "synthesis step) — never suggest dropping either branch, and "
-            "never suggest changing the question instead of adding the "
-            "missing step. For a metric-combination failure, name the "
-            "specific dimensionally-invalid combination and the fix — "
-            "report the components as separate columns instead of summing "
-            "them, or replace the additive sum with a dimensionally-sound "
-            "rate/ratio/normalized index; never suggest dropping a table "
-            "(that is Check 3's territory, not this one's). For a "
-            "topic-linkage failure, name the table's specific program/"
-            "initiative/agency (from its description or keywords) and say "
-            "the question's own prose must weave it in — not just "
-            "question_keywords — while still reading like an average "
-            "user's question."
+            "Empty when approved. Otherwise one actionable sentence per failed "
+            "layer, following that Check's own fix guidance. Three absolute "
+            "prohibitions: never suggest dropping a table (Checks 3 and 5), "
+            "never suggest dropping a branch or changing the question instead "
+            "of the steps (Check 4), and never suggest changing the "
+            "`difficulty` value or phrase the fix as 'lower'/'raise' it — "
+            "always 'simplify the plan by...' / 'make the plan more complex "
+            "by...', and never as one option alongside a steps-based fix in "
+            "the same sentence."
         ),
     )
 
     @model_validator(mode="after")
     def _force_consistent_verdicts(self) -> "PlanJudgment":
         """The overall verdict and the table layer are derived, never free:
-        ``approved`` is the AND of the eight layer votes, and flagged
+        ``approved`` is the AND of the six layer votes, and flagged
         unjustified tables force the table layer down — so a judge can't
         e.g. list an unjustified table while voting the layer up."""
         if self.unjustified_tables:
@@ -1255,8 +1002,6 @@ class PlanJudgment(BaseModel):
             and self.plan_approval
             and self.table_usage_approval
             and self.expected_result_approval
-            and self.difficulty_approval
-            and self.convergence_approval
             and self.metric_combination_approval
             and self.topic_linkage_approval
         )

@@ -14,6 +14,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# How much of a failed response is quoted back in a retry's error message.
+# The model needs to SEE what it produced to repair it, but the raw output can
+# run to the full completion cap (8000 tokens for generation), so it is quoted
+# as a bounded excerpt rather than echoed whole as an extra `assistant` turn.
+_FAILED_OUTPUT_EXCERPT_CHARS = 1200
+
 
 class LLMClientStructured(LLMClient):
     """
@@ -297,32 +303,40 @@ class LLMClientStructured(LLMClient):
     # Error formatting helpers
     # ------------------------------------------------------------------
 
+    # NOTE (both formatters): the response schema is deliberately NOT repeated
+    # here. Every call site that renders these already carries the schema in
+    # the SAME request — in the system message for the generation/judge clients
+    # (see `schema_constraint`, kept there so it extends the static prefix), or
+    # in the original user message for the correction/task-proposer clients
+    # (via `reform_prompt_constraint`). Interpolating it again cost a second —
+    # and, on a third attempt, a third — full copy of a schema that runs to
+    # ~19.5k characters for the plan judge, for no added information.
+
     def _format_json_error(self, content: str, error: Exception) -> str:
+        excerpt = (content or "").strip()[:_FAILED_OUTPUT_EXCERPT_CHARS]
+        truncated = "\n…(truncated)" if len(content or "") > _FAILED_OUTPUT_EXCERPT_CHARS else ""
+        quoted = f"\nYour previous output started:\n{excerpt}{truncated}\n" if excerpt else ""
         return (
-            "❌ JSON PARSING ERROR – Your response is not valid JSON.\n\n"
-            f"Error: {error}\n\n"
-            "Required Pydantic schema:\n"
-            f"{json.dumps(self.response_model.model_json_schema(), indent=2)}\n\n"
-            "⚠️ Common issues:\n"
-            "  - Missing quotes around strings\n"
-            "  - Trailing commas\n"
-            "  - Unescaped special characters\n"
-            "  - Text before or after the JSON object\n\n"
-            "Please generate ONLY a valid JSON object matching the schema above."
+            "JSON PARSING ERROR — your previous response was not valid JSON.\n"
+            f"Parser error: {error}\n"
+            f"{quoted}"
+            "Return ONLY a valid JSON object matching the schema already given "
+            "above — no prose before or after it. Usual causes: missing quotes, "
+            "a trailing comma, an unescaped character, or text wrapped around "
+            "the JSON."
         )
 
     def _format_validation_error(self, error: ValidationError) -> str:
-        lines = []
-        for err in error.errors():
-            field_path = " -> ".join(str(x) for x in err["loc"])
-            lines.append(f"  • Field '{field_path}': {err['msg']} (type: {err['type']})")
+        lines = [
+            f"  - {' -> '.join(str(x) for x in err['loc'])}: {err['msg']} ({err['type']})"
+            for err in error.errors()
+        ]
         return (
-            "❌ VALIDATION ERROR – Your JSON response does not match the required schema.\n\n"
-            "Required Pydantic schema:\n"
-            f"{json.dumps(self.response_model.model_json_schema(), indent=2)}\n\n"
-            "Validation errors found:\n"
+            "SCHEMA VALIDATION ERROR — your JSON did not match the required "
+            "schema on these fields:\n"
             + "\n".join(lines)
-            + "\n\n⚠️ Please fix these issues and generate a valid JSON response."
+            + "\nFix exactly these fields and return the full JSON object again, "
+            "matching the schema already given above."
         )
 
     # ------------------------------------------------------------------
@@ -343,13 +357,19 @@ class LLMClientStructured(LLMClient):
         # lives in the system message: it is static per response model, so
         # keeping it ahead of the (dynamic) user prompt maximises the stable
         # prefix served from the provider's prompt cache.
-        messages = [
-            {
-                "role": "system",
-                "content": f"You are a helpful assistant.\n\n{self.schema_constraint()}",
-            },
-            {"role": "user", "content": prompt},
-        ]
+        # Rebuilt (never appended to) on every retry — see the retry branches
+        # below. A growing [system, user, assistant, user, …] list echoed the
+        # model's entire failed output back at it once per attempt, so a third
+        # attempt carried two full generations plus three schema copies.
+        system_message = {
+            "role": "system",
+            "content": f"You are a helpful assistant.\n\n{self.schema_constraint()}",
+        }
+
+        def build_messages(user_content: str) -> list[dict]:
+            return [system_message, {"role": "user", "content": user_content}]
+
+        messages = build_messages(prompt)
         completion_args = {
             "model": "primary",
             "messages": messages,
@@ -388,8 +408,9 @@ class LLMClientStructured(LLMClient):
                     last_error = e
                     logger.warning("JSON parsing error on attempt %d: %s", attempt + 1, e)
                     if attempt < self.max_retries - 1:
-                        messages.append({"role": "assistant", "content": content})
-                        messages.append({"role": "user", "content": self._format_json_error(cleaned, e)})
+                        messages = build_messages(
+                            f"{prompt}\n\n{self._format_json_error(cleaned, e)}"
+                        )
                         time.sleep(self.retry_delay)
 
                 except ValidationError as e:
@@ -402,8 +423,9 @@ class LLMClientStructured(LLMClient):
                         "Validation error on attempt %d: %s", attempt + 1, field_errors
                     )
                     if attempt < self.max_retries - 1:
-                        messages.append({"role": "assistant", "content": content})
-                        messages.append({"role": "user", "content": self._format_validation_error(e)})
+                        messages = build_messages(
+                            f"{prompt}\n\n{self._format_validation_error(e)}"
+                        )
                         time.sleep(self.retry_delay)
 
             except Exception as e:
