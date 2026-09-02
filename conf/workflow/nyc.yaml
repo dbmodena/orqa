@@ -1,6 +1,18 @@
 seed: 42
 source: socrata
+flat_layout: false
+#write_path: "/home/bilel/gits/orqa/data/nyc"
 
+# Folder under this target's data directory that holds the tables every step
+# after `clean` reads (index, candidates-discovery, query generation,
+# benchmark). The download-format subfolder is still appended, so the default
+# below resolves to <DATADIR>/orqa/socrata/nyc/datasets/csv — and, with
+# flat_layout: true, to <DATADIR>/nyc/datasets/csv.
+# Omit the key to get "datasets"; set it to point the run at a separately
+# prepared table folder, e.g. "cleaned_datasets" -> .../cleaned_datasets/csv.
+# The crawler always downloads into the literal "datasets" folder regardless,
+# so `crawl`/`clean` keep working when this is overridden.
+#table_dir: "cleaned_datasets"
 pandas:
   read:
     csv:
@@ -166,3 +178,4 @@ tasks:
     # Valentine matcher for that pairwise pass — schema-only and fast:
     # up to C(top_k_tables, 2) pairs get matched per question.
     matcher: similarity_flooding
+

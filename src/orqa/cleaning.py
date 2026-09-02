@@ -126,7 +126,7 @@ def _prepare_cleaning_environment(
     if move_downloaded_datasets:
         try:
             cfg.crawled_datasets_path.mkdir(parents=True, exist_ok=True)
-            cfg.datasets_path.rename(cfg.crawled_datasets_path)
+            cfg.downloaded_datasets_path.rename(cfg.crawled_datasets_path)
         except OSError:
             pass
 

@@ -1,6 +1,18 @@
 seed: 42
 source: ckan
+flat_layout: false
+#write_path: "/home/bilel/gits/orqa/data/uk"
 
+# Folder under this target's data directory that holds the tables every step
+# after `clean` reads (index, candidates-discovery, query generation,
+# benchmark). The download-format subfolder is still appended, so the default
+# below resolves to <DATADIR>/orqa/ckan/uk/datasets/parquet — and, with
+# flat_layout: true, to <DATADIR>/uk/datasets/parquet.
+# Omit the key to get "datasets"; set it to point the run at a separately
+# prepared table folder, e.g. "cleaned_datasets" -> .../cleaned_datasets/parquet.
+# The crawler always downloads into the literal "datasets" folder regardless,
+# so `crawl`/`clean` keep working when this is overridden.
+#table_dir: "cleaned_datasets"
 pandas:
   read:
     csv:
@@ -56,7 +68,7 @@ tasks:
     from_dataset_index: 0
     batch_fetch_metadata: 10
     accept_zip: True
-    download_format: csv 
+    download_format: parquet 
     engine: pandas
     max_resource_size: 20MB
     max_workers: 4
@@ -68,7 +80,7 @@ tasks:
 
   candidates_discovery:
     # discovery pipeline: 'blend' (BLEND+SLOTH) or 'semantic' (embeddings+HNSW)
-    method: blend
+    method: semantic
     n_random_dataset_seeds: 20
     min_dataset_height: 10
     # Column-count ceiling for a table to enter the pipeline AT ALL. A table
@@ -77,7 +89,7 @@ tasks:
     # discovery or statement generation. Tables within the ceiling are shown
     # to the agent WHOLE (all columns), never as a vertical slice. Code
     # execution was never capped and still isn't.
-    limit_to_n_columns: 15
+    limit_to_n_columns: 20
     sample_size: 3
     n_paths_for_dataset: 5
     max_path_length: 5

@@ -68,7 +68,7 @@ def _uk_filter_resource_metadata(metadata: dict[str, Any]) -> bool:
 def rename_crawled_datasets_folder(cfg: OrQAConfig):
     import shutil
 
-    shutil.move(cfg.datasets_path, cfg.crawled_datasets_path)
+    shutil.move(cfg.downloaded_datasets_path, cfg.crawled_datasets_path)
 
 
 def _canada_create_links_for_unzipped_folder(datasets_path: Path, cfg: OrQAConfig):
@@ -114,9 +114,7 @@ def crawl_canada(cfg: OrQAConfig):
 
     ckan_download_datasets(download_cfg, canada)
 
-    _canada_create_links_for_unzipped_folder(
-        download_destination.joinpath("datasets", cfg.crawling.download_format), cfg
-    )
+    _canada_create_links_for_unzipped_folder(cfg.downloaded_datasets_path, cfg)
 
 
 def crawl_uk(cfg: OrQAConfig):

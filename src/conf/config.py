@@ -490,6 +490,12 @@ class OrQAConfig:
     # when DATADIR is a read-only mount of already-crawled-and-cleaned data.
     write_path: Path
 
+    # Where the crawler lands freshly downloaded datasets. The download
+    # layout is fixed by the ulod bulk downloaders (they always write
+    # <destination>/datasets/<format>), so this one ignores table_dir; the
+    # `clean` step moves it aside into crawled_datasets_path.
+    downloaded_datasets_path: Path = field(init=False)
+
     # Where all the datasets are stored once downloaded
     crawled_datasets_path: Path = field(init=False)
 
@@ -518,6 +524,17 @@ class OrQAConfig:
     # The format with which datasets are stored locally
     datasets_format: str
 
+    # Name of the folder under data_path holding the tables every stage
+    # after `clean` reads (indexing, discovery, generation, benchmark) —
+    # the format subfolder is still appended, so "datasets" resolves to
+    # <data_path>/datasets/<download_format>. Overridable per workflow yaml
+    # (top-level `table_dir:`) when the tables to run on live in a
+    # differently-named folder, e.g. a separately prepared
+    # <data_path>/cleaned_datasets/<download_format>. Only the READ side
+    # moves: the crawler always lands its downloads in the literal
+    # "datasets" folder (see downloaded_datasets_path).
+    table_dir: str = "datasets"
+
     filter_filenames_patterns: tuple[str, ...] = ()
     filter_column_patterns: tuple[str, ...] = ()
     # Default probing set for _select_best_separator (cleaning.py) — handles
@@ -543,12 +560,17 @@ class OrQAConfig:
     questions_todo_filepath: Path = field(init=False)
 
     def __post_init__(self):
+        self.downloaded_datasets_path = (
+            self.data_path / "datasets" / self.crawling.download_format
+        )
         self.crawled_datasets_path = (
             self.data_path / "datasets" / "crawling" / self.crawling.download_format
         )
 
         # Read-side: raw crawl + clean output, always on data_path.
-        self.datasets_path = self.data_path / "datasets" / self.crawling.download_format
+        self.datasets_path = (
+            self.data_path / self.table_dir / self.crawling.download_format
+        )
         self.metadata_path = self.data_path / "metadata"
         self.original_metadata_filepath = self.metadata_path / "metadata.json"
         self.statistics_path = self.data_path / "statistics"
@@ -619,6 +641,13 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     write_path_raw = parsed.get("write_path")
     write_path = Path(write_path_raw).expanduser() if write_path_raw else data_path
     write_path.mkdir(parents=True, exist_ok=True)
+
+    # Optional top-level `table_dir` — the folder under data_path holding
+    # the tables to run on (the <download_format> subfolder is still
+    # appended). Defaults to "datasets", i.e. the folder the `clean` step
+    # writes; set it when the run should read a differently-named,
+    # separately prepared table folder such as "cleaned_datasets".
+    table_dir = str(parsed.get("table_dir") or "datasets")
 
     # we will use a unique seed for random operations
     seed = int(parsed["seed"])
@@ -837,6 +866,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         data_path=data_path,
         write_path=write_path,
         datasets_format=crawling.download_format,
+        table_dir=table_dir,
     )
 
     for engine in ["pandas", "polars"]:
