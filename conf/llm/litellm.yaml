@@ -11,7 +11,7 @@ fallback_models:
 
 # Embedding model for candidates discovery (metadata embeddings).
 # Must be multilingual: the portals include Italian, Spanish and French datasets.
-embedding_model: "oci/cohere.embed-multilingual-v3.0"
+embedding_model: "oci/cohere.embed-v4.0"
 
 # Provider-specific parameters
 provider_params:

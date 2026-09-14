@@ -224,9 +224,10 @@ class CandidatesDiscovery:
     correlation_method: str = "pearson"
     min_joined_rows_for_correlation: int = 10
 
-    # Embedding computation
+    # Embedding computation. Each table's metadata text is fitted to the
+    # embedding model's own per-input token limit (see
+    # embedding_discovery.embeddings.build_embedding_text).
     embedding_batch_size: int = 64
-    embedding_text_max_chars: int = 4000
 
     # Valentine matcher used for the pair schema gate
     sm_matcher: str = "coma"

@@ -11,6 +11,8 @@ from __future__ import annotations
 import html
 import json
 import re
+from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
@@ -25,7 +27,9 @@ REQUIRED_SCHEMA_KEYS = [
     "title",
     "description",
     "publisher",
+    "responsible_entity",
     "tags",
+    "temporal_coverage",
     "created_at",
     "modified_at",
     "dataset_url",
@@ -116,6 +120,20 @@ def _normalize_ckan_record(record: dict[str, Any]) -> list[dict[str, Any]]:
         or _clean_text(extras.get("dcat_publisher_name"))
     )
     tags = _unique_strings(tag.get("display_name") or tag.get("name") for tag in record.get("tags", []))
+    responsible_entity = _distinct_entity(
+        _clean_text(record.get("datasource")) or _clean_text(record.get("author")),
+        publisher,
+    )
+    temporal_coverage = _format_temporal_coverage(
+        record.get("hasBegining")
+        or record.get("time_period_coverage_start")
+        or extras.get("temporal_start")
+        or extras.get("temporal_coverage-from"),
+        record.get("hasEnd")
+        or record.get("time_period_coverage_end")
+        or extras.get("temporal_end")
+        or extras.get("temporal_coverage-to"),
+    )
     created_at = _clean_text(record.get("metadata_created")) or _clean_text(extras.get("dcat_issued"))
     modified_at = _clean_text(record.get("metadata_modified")) or _clean_text(extras.get("dcat_modified"))
     dataset_url = (
@@ -148,7 +166,9 @@ def _normalize_ckan_record(record: dict[str, Any]) -> list[dict[str, Any]]:
                     "title": title,
                     "description": description,
                     "publisher": publisher,
+                    "responsible_entity": responsible_entity,
                     "tags": tags,
+                    "temporal_coverage": temporal_coverage,
                     "created_at": created_at,
                     "modified_at": _clean_text(resource.get("metadata_modified")) or modified_at,
                     "dataset_url": dataset_url,
@@ -172,6 +192,8 @@ def _normalize_ods_record(record: dict[str, Any]) -> dict[str, Any] | None:
     fields = record.get("fields", [])
 
     dataset_url = _build_ods_dataset_url(dataset_id)
+    creator = _clean_text(dcat_meta.get("creator"))
+    publisher = _clean_text(default_meta.get("publisher")) or creator
 
     return _post_process_record(
         {
@@ -180,10 +202,16 @@ def _normalize_ods_record(record: dict[str, Any]) -> dict[str, Any] | None:
             "source": "ods",
             "title": _clean_text(default_meta.get("title")) or dataset_id,
             "description": _clean_html(default_meta.get("description")),
-            "publisher": _clean_text(default_meta.get("publisher")) or _clean_text(dcat_meta.get("creator")),
+            "publisher": publisher,
+            "responsible_entity": _distinct_entity(creator, publisher),
             "tags": _unique_strings(
                 list(default_meta.get("keyword", []) or [])
                 + list(default_meta.get("theme", []) or [])
+            ),
+            "temporal_coverage": _format_temporal_coverage(
+                dcat_meta.get("temporal_coverage_start"),
+                dcat_meta.get("temporal_coverage_end"),
+                fallback=dcat_meta.get("temporal"),
             ),
             "created_at": _clean_text(dcat_meta.get("created")) or _clean_text(dcat_meta.get("issued")),
             "modified_at": _clean_text(default_meta.get("modified")),
@@ -207,6 +235,9 @@ def _normalize_socrata_record(record: dict[str, Any]) -> dict[str, Any] | None:
     dataset_url = _clean_text(resource.get("permalink")) or _build_socrata_dataset_url(dataset_id)
     download_url = _build_socrata_download_url(resource)
 
+    agency = _clean_text(domain_metadata.get("Dataset-Information_Agency"))
+    publisher = _clean_text(resource.get("attribution")) or agency
+
     return _post_process_record(
         {
             "dataset_id": dataset_id,
@@ -214,7 +245,8 @@ def _normalize_socrata_record(record: dict[str, Any]) -> dict[str, Any] | None:
             "source": "socrata",
             "title": _clean_text(resource.get("name")) or dataset_id,
             "description": _clean_html(resource.get("description")),
-            "publisher": _clean_text(resource.get("attribution")) or _clean_text(domain_metadata.get("Dataset-Information_Agency")),
+            "publisher": publisher,
+            "responsible_entity": _distinct_entity(agency, publisher),
             "tags": _unique_strings(
                 list(classification.get("domain_tags", []) or [])
                 + list(classification.get("tags", []) or [])
@@ -278,7 +310,9 @@ def _post_process_record(record: dict[str, Any]) -> dict[str, Any]:
         "title": _clean_text(record.get("title")),
         "description": _clean_html(record.get("description")),
         "publisher": _clean_text(record.get("publisher")),
+        "responsible_entity": _clean_text(record.get("responsible_entity")),
         "tags": _unique_strings(record.get("tags") or []),
+        "temporal_coverage": _clean_text(record.get("temporal_coverage")),
         "created_at": _clean_text(record.get("created_at")),
         "modified_at": _clean_text(record.get("modified_at")),
         "dataset_url": _clean_text(record.get("dataset_url")),
@@ -308,6 +342,91 @@ def _normalize_columns(columns: Iterable[dict[str, Any]]) -> list[dict[str, Any]
             continue
         normalized.append(cleaned)
     return normalized
+
+
+_UNINFORMATIVE_VALUES = {"other", "n/a", "na", "none", "unknown", "unlimited", "-"}
+_PARENTHETICAL_RE = re.compile(r"\(([^)]*)\)")
+# Entity names at least this similar are spellings of one body: typos,
+# "and" / "&", or a translation ("Ajuntament" / "Ayuntamiento de València").
+_SAME_ENTITY_SIMILARITY = 0.8
+
+
+def _distinct_entity(entity: str | None, publisher: str | None) -> str | None:
+    """Return ``entity`` only when it names a body other than the publisher.
+
+    Portals often carry a second responsible body next to the publisher (the
+    producing department, an external data owner, the city agency behind an
+    attribution). Variants of the publisher's own name — acronym forms,
+    typos, "and" / "&", translations — and placeholders add nothing. A more
+    specific unit of the publisher ("Comune di Bologna - Ufficio Statistica"
+    under "Comune di Bologna") is kept.
+    """
+    if entity is None or entity.casefold() in _UNINFORMATIVE_VALUES:
+        return None
+    if publisher is None:
+        return entity
+    entity_key, publisher_key = _entity_key(entity), _entity_key(publisher)
+    if not entity_key:
+        return None
+    if not publisher_key:
+        return entity
+    entity_acronyms, publisher_acronyms = _entity_acronyms(entity), _entity_acronyms(publisher)
+    if (
+        f" {entity_key} " in f" {publisher_key} "
+        or entity_key in publisher_acronyms
+        or publisher_key in entity_acronyms
+        or entity_acronyms & publisher_acronyms
+        or SequenceMatcher(None, entity_key, publisher_key).ratio() >= _SAME_ENTITY_SIMILARITY
+    ):
+        return None
+    return entity
+
+
+def _entity_key(name: str) -> str:
+    """Words of an entity name, ignoring case, punctuation and parentheticals."""
+    return " ".join(re.findall(r"\w+", _PARENTHETICAL_RE.sub(" ", name.casefold())))
+
+
+def _entity_acronyms(name: str) -> set[str]:
+    """Parenthesised short forms of an entity name, e.g. ``dof``."""
+    return {" ".join(re.findall(r"\w+", m)) for m in _PARENTHETICAL_RE.findall(name.casefold())}
+
+
+def _format_temporal_coverage(start: Any, end: Any, fallback: Any = None) -> str | None:
+    """Render the period a dataset covers as ``<start> to <end>``.
+
+    Either bound may be missing; with neither, the portal's free-text period
+    (``fallback``) is kept verbatim.
+    """
+    start_date, end_date = _coverage_date(start), _coverage_date(end)
+    if start_date and end_date:
+        return f"{start_date} to {end_date}"
+    if start_date:
+        return f"from {start_date}"
+    if end_date:
+        return f"until {end_date}"
+    fallback = _clean_text(fallback)
+    if fallback is None or fallback.casefold() in _UNINFORMATIVE_VALUES:
+        return None
+    return fallback
+
+
+def _coverage_date(value: Any) -> str | None:
+    """Date of a coverage bound, as ``YYYY-MM-DD`` when it parses.
+
+    Timestamps are rounded to the nearest day first: ODS stores local midnight
+    in UTC, so Paris' ``2005-12-30T23:00:00+00:00`` means 2005-12-31.
+    """
+    text = _clean_text(value)
+    if text is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    if "T" in text or " " in text:
+        parsed += timedelta(hours=12)
+    return parsed.date().isoformat()
 
 
 def _extras_to_dict(extras: Iterable[dict[str, Any]]) -> dict[str, Any]:

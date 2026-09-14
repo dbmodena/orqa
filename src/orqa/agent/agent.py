@@ -347,7 +347,9 @@ class TableAnalysisAgent:
                     continue
                 aliases[f"Table_{len(dfs)}"] = name
                 dfs.append(df)
-                metadata.append(datasets_metadata.get(name) or {})
+                metadata.append(
+                    datasets_metadata.get(utils.dataset_id_to_resource_id(name)) or {}
+                )
 
             if not dfs:
                 continue

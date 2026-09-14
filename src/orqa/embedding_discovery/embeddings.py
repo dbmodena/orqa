@@ -2,19 +2,23 @@
 Metadata embeddings for candidates discovery.
 
 Builds one text document per dataset from the raw normalized metadata
-(title, publisher, tags, description, per-column name/label/type), embeds
-them through :class:`EmbeddingClient` (the LiteLLM embedding API wrapper —
+(title, publisher, responsible entity, temporal coverage, tags, per-column
+name/label/type, description), fitted to the embedding model's token limit;
+embeds them through :class:`EmbeddingClient` (the LiteLLM embedding API wrapper —
 see ``agent.llm_client.EmbeddingClient``) and caches the vectors on disk so
 reruns never re-pay the API cost for unchanged metadata.
 """
 
+import functools
 import hashlib
 import json
 import logging
 import os
 from pathlib import Path
 
+import litellm
 import numpy as np
+import tiktoken
 
 from ..agent.llm_client.EmbeddingClient import EmbeddingClient
 from ..utils import pl_scan_dataset
@@ -22,15 +26,38 @@ from ..utils.pipeline_logger import PipelineLogger
 
 logger = logging.getLogger(__name__)
 
-SEP = "__"
 
+def embedding_max_input_tokens(model: str, default: int = 512) -> int:
+    """Per-input token limit of ``model``, from litellm's model map.
 
-def dataset_id_to_resource_id(dataset_id: str) -> str:
-    """Map a dataset filename stem to its metadata resource id.
-
-    Stems are either ``<resource_id>`` or ``<name>__<resource_id>``.
+    ``default`` (Cohere embed v3's limit) covers models litellm doesn't know.
     """
-    return dataset_id.split(SEP)[-1] if SEP in dataset_id else dataset_id
+    try:
+        return int(litellm.get_model_info(model)["max_input_tokens"])
+    except Exception:
+        return default
+
+
+@functools.lru_cache(maxsize=1)
+def _tokenizer() -> tiktoken.Encoding:
+    # Stand-in for the provider's tokenizer, which isn't available locally:
+    # close enough to fit a document to the limit.
+    return tiktoken.get_encoding("cl100k_base")
+
+
+def _count_tokens(text: str) -> int:
+    return len(_tokenizer().encode(text, disallowed_special=()))
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Cut ``text`` to at most ``max_tokens`` tokens, at a word boundary."""
+    if max_tokens <= 0:
+        return ""
+    tokens = _tokenizer().encode(text, disallowed_special=())
+    if len(tokens) <= max_tokens:
+        return text
+    cut = _tokenizer().decode(tokens[:max_tokens]).rstrip("\ufffd")
+    return cut[: cut.rfind(" ")] if " " in cut else cut
 
 
 def load_raw_normalized_metadata(metadata_path: Path) -> dict[str, dict]:
@@ -56,23 +83,45 @@ def build_embedding_text(
     record: dict,
     dataset_path: Path | None = None,
     scan_opts: dict | None = None,
-    max_chars: int = 4000,
+    max_tokens: int = 512,
 ) -> str:
     """Build the text document embedded for one dataset.
+
+    The embedding API cuts inputs past the model's token limit from the end,
+    so the document is fitted to ``max_tokens`` here instead: the identifying
+    fields and the column list come first and are kept whole, and the
+    description — usually the longest field — fills the remaining budget.
 
     Falls back to the CSV header (via a zero-row polars scan) when the
     metadata carries no column information (CKAN portals).
     """
     lines = [
-        f"Title: {record.get('title', '')}",
-        f"Publisher: {record.get('publisher', '')}",
-        f"Tags: {', '.join(record.get('tags') or [])}",
-        f"Description: {(record.get('description') or '')[:1500]}",
+        f"Title: {record.get('title') or ''}",
+        f"Publisher: {record.get('publisher') or ''}",
     ]
+    if record.get("responsible_entity"):
+        lines.append(f"Responsible entity: {record['responsible_entity']}")
+    if record.get("temporal_coverage"):
+        lines.append(f"Temporal coverage: {record['temporal_coverage']}")
+    lines.append(f"Tags: {', '.join(record.get('tags') or [])}")
+    lines.extend(_column_lines(record, dataset_path, scan_opts))
 
+    text = "\n".join(lines)
+    description = record.get("description")
+    if description:
+        remaining = max_tokens - _count_tokens(f"{text}\nDescription: ")
+        description = _truncate_to_tokens(description, remaining)
+        if description:
+            text = f"{text}\nDescription: {description}"
+    return _truncate_to_tokens(text, max_tokens)
+
+
+def _column_lines(
+    record: dict, dataset_path: Path | None, scan_opts: dict | None
+) -> list[str]:
     columns = record.get("columns") or []
     if columns:
-        lines.append("Columns:")
+        lines = ["Columns:"]
         for col in columns:
             name = col.get("name", "")
             label = col.get("label", "")
@@ -80,19 +129,19 @@ def build_embedding_text(
             label_part = f" ({label})" if label and label != name else ""
             type_part = f" [{ctype}]" if ctype else ""
             lines.append(f"- {name}{label_part}{type_part}")
-    elif dataset_path is not None:
-        try:
-            schema = pl_scan_dataset(dataset_path, scan_opts or {}).collect_schema()
-            lines.append("Columns:")
-            lines.extend(f"- {name} [{dtype}]" for name, dtype in schema.items())
-        except Exception as exc:
-            logger.warning(
-                "Could not read CSV header for %s (%s); embedding metadata only.",
-                dataset_path.name,
-                exc,
-            )
-
-    return "\n".join(lines)[:max_chars]
+        return lines
+    if dataset_path is None:
+        return []
+    try:
+        schema = pl_scan_dataset(dataset_path, scan_opts or {}).collect_schema()
+    except Exception as exc:
+        logger.warning(
+            "Could not read CSV header for %s (%s); embedding metadata only.",
+            dataset_path.name,
+            exc,
+        )
+        return []
+    return ["Columns:", *(f"- {name} [{dtype}]" for name, dtype in schema.items())]
 
 
 class EmbeddingCache:

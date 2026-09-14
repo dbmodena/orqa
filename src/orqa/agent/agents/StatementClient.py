@@ -17,6 +17,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..llm_client.LLMClientStructured import LLMClientStructured
 from ..utility.alias_substitution import AliasSubstitution
+from ..utility.column_provenance import plan_derived_columns
 from ..utility.message_builder import ClientMessageBuilder, sanitize_messages
 from ..prompting import DatasetDescription, GenerationEnrichmentPrompt
 from ..utility.structured_outputs import Query, TableAnalyses, QueryPlan
@@ -491,6 +492,13 @@ class LLMClientStatementGenerator(LLMClientStructured):
                     # (QueryValidator._check_expected_result_type).
                     "expected_result_type": plan.get("expected_result_type", ""),
                     "expected_result_description": plan.get("expected_result_description", ""),
+                    # Columns the plan's steps declare they CREATE (see each
+                    # step's `produces`). Resolved and checked at planning
+                    # time, so the validator can tell a legitimate derived
+                    # column from a hallucinated one by exact lookup instead
+                    # of pattern-matching the generated code — see
+                    # QueryValidator.prefilter_dataframes.
+                    "derived_columns": sorted(plan_derived_columns(plan)),
                 }
                 for q in result_dict.get('queries', []):
                     q.update(plan_fields)

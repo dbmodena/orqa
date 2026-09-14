@@ -12,6 +12,7 @@ from .agent.agents.SingleStatementAgent import SingleStatementAgent
 from .benchmark.index import load_index
 from .benchmark.questions import get_entry, store_entry
 from .utils import (
+    dataset_id_to_resource_id,
     dataset_index_shape,
     load_normalized_datasets_metadata,
     save_json,
@@ -135,7 +136,7 @@ def _build_match_inputs(
         path = csv_folder / f"{dataset}.{extension}"
         dataset_paths.append(path)
         aliases[alias]        = dataset
-        metadatas.append(datasets_metadata.get(dataset))
+        metadatas.append(datasets_metadata.get(dataset_id_to_resource_id(dataset)))
         involved_cols[alias]  = match["columns_by_table"].get(alias, [])
     return dataset_paths, aliases, metadatas, involved_cols
 
@@ -436,7 +437,7 @@ def create_statements(
 
             content = single_agent.generate_statements(
                 csv_path, aliases, kind,
-                datasets_metadata.get(dataset_name),
+                datasets_metadata.get(dataset_id_to_resource_id(dataset_name)),
                 max_cols, sample_size=5,
             )
 
@@ -611,7 +612,7 @@ async def stream_generate_statements(
             def _process_single(csv_path=csv_path, aliases=aliases):
                 content = single_agent.generate_statements(
                     csv_path, aliases, kind,
-                    metadata.get(csv_path.stem),
+                    metadata.get(dataset_id_to_resource_id(csv_path.stem)),
                     cfg.candidates_discovery.limit_to_n_columns, sample_size=5,
                 )
                 return content

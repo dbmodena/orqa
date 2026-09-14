@@ -1,6 +1,7 @@
 {task_statement}PLAN REQUIREMENTS (apply to every plan):
 - `steps`: an ordered list; each step has an `op`, a `description`, the `tables` (aliases) it touches, and the concrete `columns` it reads or writes.
-- Use only the provided table aliases and columns that exist in those tables.
+- Use only the provided table aliases and columns that exist in those tables. Any OTHER column your plan needs must be declared as a derived column (below) — a column name that exists in no table and is declared nowhere fails validation before any judge sees the plan.
+
 {ops_statement}- Also provide `question`, `question_keywords`, `plan_keywords`, `query_plan` (a short natural-language description of how the steps build the answer), `topic` (one short business theme), and `story` (a short business narrative behind the plan).
 - `expected_result_type`: the SHAPE of the final answer — exactly one of `number` ("how many/how much"), `boolean` (yes/no), `text` ("which single X"), `list` (one ordered sequence), or `table` (per-group breakdowns, rankings, any multi-column result). Take it from the question: a question asking for one figure must not promise a table. This is mechanically enforced against the executed result.
 - `expected_result_description`: one or two sentences concretely describing that result — what the value(s) represent, their unit/granularity, and for `table`/`list` what each row and column holds (e.g. "one row per borough with the total permits issued there in 2023, sorted descending"). The code generator shapes its final result from this.
@@ -11,6 +12,15 @@
   - `columns_involved`: the minimal columns from that table this plan's steps actually use.
   - `description`/`keywords`/`translated_keywords`: copy from the matching entry in TABLE-LEVEL ANALYSIS (leave `translated_keywords` empty if none given).
 - `detected_language`: the dominant language from the table analyses / DETECTED LANGUAGES below. Also provide `translated_question` and `translated_question_keywords` (identical to the originals when already in that language).
+
+### DERIVED COLUMNS
+A step often creates a column no table contains: an aggregate's result, a flag or bucket, a rank position, a renamed column. Declare each one in that step's `produces`, with what it was computed from:
+- `produces`: `[{{"name": <new column>, "operation": <short label: "sum", "mean", "count", "flag", "bucket", "ratio", "year_extract", "rename", ...>, "sources": [<column it comes from>, ...]}}]`
+- Write a source that is a real column of a table as `Alias.column` (e.g. `Table_0.amount`). Write a source an EARLIER step derived as its bare name (e.g. `total_spend`) — that column may itself come from several tables, so qualifying it would be wrong. Never guess an alias.
+- `sources` may be empty ONLY for an operation that genuinely reads no column (`count`, `size`, `row_number`, `rank`, `literal`, `constant`). Every other operation must say what it was computed from.
+- Wherever a step also declares an output in `params` (`output_column`, `new_column`, or the keys of `aggregations`), declare it in `produces` too — `params` carries the shape each op needs, `produces` carries the origin.
+
+DECLARE ONCE. A derived column is declared only in the step that creates it. From that step onward it behaves exactly like a real column of the data: any later step may reference it by name in `columns` or `params` for any purpose — filtering, grouping, aggregating, sorting, ranking, joining, correlating, or as the origin of a further derived column. Never re-declare it in a later step, and never declare a name that a table already has.
 
 ### WRITING THE QUESTION
 Write as an average, curious open-data user would — NOT a data expert: no knowledge of the underlying data, never seen a table, no querying competence. Conversational, plain everyday language, aimed at one specific concrete insight (a real place, group, category, or period from the data) rather than a generic exploration.

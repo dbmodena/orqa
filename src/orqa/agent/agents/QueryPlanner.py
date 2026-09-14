@@ -46,18 +46,12 @@ from ..prompting.models import (
     TableStats,
 )
 from ..prompting.prompts import QueryPlannerPrompt
+from ..utility.column_provenance import compose_feedback, resolve_plan_columns
 from ..utility.difficulty_estimator import build_reconciliation_feedback, estimate_plan_tier
 from ..utility.structured_outputs import QueryLink, Table
 from ...utils import shield_dataframe_for_prompt
 
 logger = logging.getLogger(__name__)
-
-# Ops whose entire purpose is to produce a NEW column rather than read an
-# existing one (a groupby's count/sum output, a derive's computed column).
-# validate_plan's column-existence check (Requirement 5.5) exempts these ops:
-# an unrecognized column name here is the step's own output, not a bad
-# reference.
-_COLUMN_PRODUCING_OPS = frozenset({"aggregate", "derive"})
 
 # An underscore between two letters in a QUESTION is a near-certain sign a
 # raw column identifier got pasted in verbatim (natural language never uses
@@ -797,7 +791,14 @@ class QueryPlanner:
         Assigns contiguous ``1..N`` ``order`` values to the steps (Requirement
         5.3), then verifies that every table referenced by a step is a known
         alias (Requirement 5.4) and that every column referenced by a step
-        exists in one of the tables that step references (Requirement 5.5).
+        resolves (Requirement 5.5) — either to a real column of a table the
+        step names, or to a derived column an earlier step declared in its
+        ``produces``, whose own sources transitively root in real columns.
+
+        Column resolution lives in
+        :mod:`orqa.agent.utility.column_provenance`. It reports EVERY column
+        problem at once rather than the first, because there is only one
+        re-request before :meth:`_free_text_fallback` degrades the plan.
 
         Also verifies ``plan.tables`` (the ``Table`` entries carrying each
         table's planning-time justification): every known alias must appear
@@ -854,186 +855,82 @@ class QueryPlanner:
             dupes = sorted({n for n in plan_table_names if plan_table_names.count(n) > 1})
             raise PlanValidationError(
                 f"plan.tables lists duplicate alias(es) {dupes}; each table "
-                "alias must appear exactly once"
+                "alias must appear exactly once\n"
+                "→ merge the duplicate entries into one."
             )
         missing_tables = known_aliases - plan_table_set
         if missing_tables:
             raise PlanValidationError(
                 f"plan.tables is missing an entry for alias(es) "
                 f"{sorted(missing_tables)}; every provided table alias must "
-                "appear in `tables` with a `reason`"
+                "appear in `tables` with a `reason`\n"
+                "→ add one entry per missing alias, each with a justification "
+                "specific to that table."
             )
         unknown_tables = plan_table_set - known_aliases
         if unknown_tables:
             raise PlanValidationError(
                 f"plan.tables references unknown alias(es) {sorted(unknown_tables)}; "
-                f"known aliases: {sorted(known_aliases)}"
+                f"known aliases: {sorted(known_aliases)}\n"
+                "→ use the aliases exactly as given in TABLE ALIASES."
             )
         for t in plan.tables:
             if not (t.reason or "").strip():
                 raise PlanValidationError(
                     f"plan.tables entry for {t.name!r} has an empty `reason` "
-                    "— every table needs a well-articulated justification"
+                    "— every table needs a well-articulated justification\n"
+                    "→ state which step(s) it feeds, the specific columns the "
+                    "answer depends on it for, and why the question could not "
+                    "be answered without it."
                 )
 
-        # Normalise known_columns values into sets for membership checks.
-        columns_by_alias = {
+        # Normalise known_columns into sets. This is the RAW schema and the
+        # resolver treats it as read-only — derived names are never folded in
+        # here. Keeping the two namespaces apart is precisely what the old
+        # single-set approach could not do, and why a hallucinated name became
+        # indistinguishable from a real one a step later.
+        raw_columns_by_alias = {
             alias: set(cols) for alias, cols in (known_columns or {}).items()
         }
 
-        # Whether any earlier step could have produced new columns (aggregate/
-        # derive, or explicitly declared outputs in params). Once true, an
-        # unresolved column reference is downgraded to a warning: `params` is
-        # free-form, so output harvesting is best-effort, and a false
-        # rejection costs a full planner re-request that tends to yield a
-        # WORSE plan (derived names pushed into prose where no validator —
-        # or generator — can see them). The statement generator reads the
-        # whole plan including descriptions, so an unresolved derived name is
-        # a soft signal, not a broken plan.
-        derivation_seen = False
-
-        # Columns produced by steps that name no table (`tables: []`) — a
-        # tail sort/limit/select acting on the accumulated pipeline result.
-        # Kept separate from columns_by_alias, which is keyed by alias and
-        # therefore cannot record anything for a table-less step.
-        pipeline_columns: set = set()
-
+        # Structural per-step checks that must still fail fast: an unknown
+        # alias or a malformed correlate/limit/rank `params` shape leaves the
+        # column resolver nothing meaningful to resolve against, so there is
+        # no point collecting further column violations on top of them.
         for step in plan.steps:
             # Requirement 5.4: every referenced table must be a known alias.
             for table in step.tables:
                 if table not in known_aliases:
                     raise PlanValidationError(
                         f"step {step.order} ({step.op}) references unknown table "
-                        f"alias {table!r}; known aliases: {sorted(known_aliases)}"
+                        f"alias {table!r}; known aliases: {sorted(known_aliases)}\n"
+                        "→ use one of the aliases exactly as given in TABLE ALIASES."
                     )
-
-            # Structural checks for correlate/limit/rank's fixed `params`
-            # shape (see _STEP_PARAMS_DESCRIPTION) — kind-aware, since SQL
-            # plans are restricted to a narrower method vocabulary than
-            # Pandas plans for both `correlate` and `rank`.
             new_op_error = self._validate_new_op_params(step)
             if new_op_error:
                 raise PlanValidationError(new_op_error)
 
-            # Register outputs this step declares in params (derive's
-            # new_column, aggregate's output_column / aggregations keys,
-            # correlate/rank's output_column) BEFORE the column-existence
-            # check below, so a step that lists its own forward-declared
-            # output inside its own `columns` (the established `derive`
-            # convention — "output_column must also appear in the step's
-            # columns") is never rejected just because it's the first
-            # producing step in the plan and _COLUMN_PRODUCING_OPS doesn't
-            # cover its op (correlate/rank deliberately don't, since their
-            # SOURCE columns must always already exist — only their
-            # declared output is new).
-            declared_outputs = self._declared_output_columns(step)
-
-            # Requirement 5.5: every referenced column must exist in at least
-            # one of the tables the step references — physical schema columns
-            # plus outputs registered by earlier steps (or this step's own,
-            # per above). Exceptions:
-            #   * ops that legitimately produce NEW columns (`aggregate`,
-            #     `derive`): an unrecognized name there is the step's own
-            #     output, registered for later steps rather than rejected;
-            #   * unresolved names AFTER some step could have produced columns:
-            #     warned and registered (see derivation_seen above).
-            # A hallucinated physical column in a plan with no derivation
-            # steps is still rejected — that's the expensive failure this
-            # check exists to catch early.
-            # A tail `sort`/`limit`/`select` legitimately carries
-            # `tables: []` — it acts on the accumulated pipeline result, not
-            # on one named table. Scoping `allowed_columns` to `step.tables`
-            # then produced an EMPTY allow-list, so every column reference in
-            # such a step failed ("known columns for []: []") even though the
-            # pipeline plainly had those columns. With no table scope, every
-            # column known so far is in scope.
-            allowed_columns: set = set(pipeline_columns)
-            if step.tables:
-                for table in step.tables:
-                    allowed_columns |= columns_by_alias.get(table, set())
-            else:
-                for known in columns_by_alias.values():
-                    allowed_columns |= known
-            allowed_columns |= declared_outputs
-
-            def register(column: str) -> None:
-                """Record a column for later steps, table-scoped when the step
-                names tables and pipeline-wide when it doesn't."""
-                if step.tables:
-                    for table in step.tables:
-                        columns_by_alias.setdefault(table, set()).add(column)
-                else:
-                    pipeline_columns.add(column)
-
-            produces_columns = step.op in _COLUMN_PRODUCING_OPS
-            for column in step.columns:
-                if column in allowed_columns:
-                    continue
-                if not produces_columns and not derivation_seen:
-                    raise PlanValidationError(
-                        f"step {step.order} ({step.op}) references column "
-                        f"{column!r} not present in any referenced table "
-                        f"{step.tables}"
-                    )
-                if not produces_columns:
-                    logger.warning(
-                        "plan step %s (%s) references column %r that no "
-                        "referenced table or earlier step declares — assuming "
-                        "it is derived upstream and continuing",
-                        step.order, step.op, column,
-                    )
-                register(column)
-
-            # `correlate`/`limit`/`rank` name columns inside `params.by`/
-            # `params.group_by` rather than `step.columns` — those are
-            # otherwise invisible to the loop above, so check their
-            # existence separately here (using the now-finalised
-            # allowed_columns, which already includes this step's own
-            # declared output).
-            if step.op in ("correlate", "limit", "rank"):
-                params = step.params or {}
-                referenced = list(params.get("by") or []) + list(params.get("group_by") or [])
-                for column in referenced:
-                    if column in allowed_columns:
-                        continue
-                    # Same escape hatch the `step.columns` loop above uses:
-                    # once ANY earlier step could have produced columns, an
-                    # unresolved name here is an upstream derivation (an
-                    # aggregate's implicit output), not a hallucination.
-                    # Without this, `aggregate -> sort -> limit(by=...)` —
-                    # the commonest "top N by metric" shape — was rejected
-                    # outright while the identical name in `sort.columns`
-                    # only warned.
-                    if not derivation_seen:
-                        raise PlanValidationError(
-                            f"step {step.order} ({step.op}) params references "
-                            f"unknown column {column!r}; known columns for "
-                            f"{step.tables}: {sorted(allowed_columns)}"
-                        )
-                    logger.warning(
-                        "plan step %s (%s) params references column %r that "
-                        "no referenced table or earlier step declares — "
-                        "assuming it is derived upstream and continuing",
-                        step.order, step.op, column,
-                    )
-                    register(column)
-
-            # Register this step's declared outputs for LATER steps.
-            for column in declared_outputs:
-                register(column)
-
-            if produces_columns or declared_outputs:
-                derivation_seen = True
-
-            # A `clean` step's drop_column actions remove the column from
-            # what later steps may reference — enforced by simply subtracting
-            # it from the known-columns set, so it trips the SAME
-            # column-existence check above for whichever later step
-            # references it, rather than a parallel special-cased error path.
-            dropped_columns = self._clean_step_dropped_columns(step)
-            for table in step.tables:
-                columns_by_alias.get(table, set()).difference_update(dropped_columns)
-            pipeline_columns.difference_update(dropped_columns)
+        # Requirement 5.5: every column a step names must resolve to a real
+        # schema column or to a derived column an earlier step declared in its
+        # `produces` (see orqa.agent.utility.column_provenance). ALL violations
+        # are collected and reported together: the planner gets exactly one
+        # re-request before degrading to _free_text_fallback, so surfacing one
+        # problem per round-trip would spend that retry on a plan with two
+        # mistakes.
+        violations, _derived = resolve_plan_columns(
+            plan.steps,
+            raw_columns_by_alias,
+            known_aliases=known_aliases,
+            declared_output_columns=self._declared_output_columns,
+            clean_dropped_columns=self._clean_step_dropped_columns,
+        )
+        if violations:
+            raise PlanValidationError(
+                compose_feedback(
+                    violations,
+                    example_source=self._example_source(raw_columns_by_alias),
+                )
+            )
 
         return plan
 
@@ -1107,6 +1004,20 @@ class QueryPlanner:
         return None
 
     @staticmethod
+    def _example_source(raw_columns_by_alias: dict) -> str:
+        """A real ``Alias.column`` pair to use in the retry message's example.
+
+        The feedback shows one inline ``produces`` snippet; building it from
+        THIS plan's own tables makes it copy-pasteable instead of something
+        the model has to translate to its own aliases first.
+        """
+        for alias in sorted(raw_columns_by_alias):
+            columns = sorted(raw_columns_by_alias[alias] or [])
+            if columns:
+                return f"{alias}.{columns[0]}"
+        return "Table_0.column"
+
+    @staticmethod
     def _declared_output_columns(step) -> set:
         """Output column names a step declares in its free-form ``params``.
 
@@ -1164,14 +1075,21 @@ class QueryPlanner:
 
     @staticmethod
     def _retry_prompt(prompt: str, error: str) -> str:
-        """Append validation feedback so the re-request can self-correct."""
-        return (
-            f"{prompt}\n\n### VALIDATION FEEDBACK\n"
-            "Your previous plan failed validation with the following error:\n"
-            f"{error}\n"
-            "Return a corrected plan that references only the provided table "
-            "aliases and only columns that exist in those tables."
-        )
+        """Append validation feedback so the re-request can self-correct.
+
+        The feedback goes at the TAIL, after the unchanged prompt, so the
+        static planning prefix stays cacheable across the retry.
+
+        No generic closing instruction is added: ``error`` is already a
+        self-contained message that states the rule it broke and the fix for
+        each problem (see
+        :func:`orqa.agent.utility.column_provenance.compose_feedback`). The
+        boilerplate that used to live here ("return a corrected plan...")
+        both repeated that preamble and worked against its closing line by
+        implying the whole plan should be rewritten, which tends to lose
+        question quality the earlier checks already cleared.
+        """
+        return f"{prompt}\n\n### VALIDATION FEEDBACK\n{error}"
 
     def _empty_plan(self, constraint_links: List[QueryLink]) -> QueryPlan:
         """A schema-valid, step-less plan used only as a fallback seed."""

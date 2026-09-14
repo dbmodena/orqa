@@ -41,6 +41,53 @@ def _indent(text: str, level: int = 1) -> str:
     return "\n".join(pad + line for line in str(text).splitlines())
 
 
+def _derived_lineage(steps: list) -> list:
+    """Every column the plan's steps declare they CREATE, with its origin.
+
+    Returns one ``(step_order, name, operation, sources, roots)`` tuple per
+    declared column, in declaration order. ``sources`` is what the step named
+    directly; ``roots`` is that closed over — a source that is itself an
+    earlier derived column is replaced by whatever IT came from, so a chained
+    derivation still reports the real table columns underneath it.
+
+    Structural only: it needs no table schema, since a source that is not the
+    name of another declared column is by definition where the trail ends.
+    """
+    declared = {}
+    for step in steps or []:
+        for entry in (step.get("produces") or []):
+            name = (entry.get("name") or "").strip()
+            if name and name not in declared:
+                declared[name] = [s for s in (entry.get("sources") or []) if s]
+
+    def roots_of(name: str, seen: frozenset = frozenset()) -> list:
+        # `seen` guards against a self- or mutually-referential declaration:
+        # the planner rejects those, but the logger must never be the thing
+        # that hangs the pipeline.
+        out = []
+        for source in declared.get(name, []):
+            if source in declared and source not in seen:
+                out.extend(roots_of(source, seen | {source}))
+            elif source not in declared:
+                out.append(source)
+        return out
+
+    lineage = []
+    for step in steps or []:
+        for entry in (step.get("produces") or []):
+            name = (entry.get("name") or "").strip()
+            if not name:
+                continue
+            sources = [s for s in (entry.get("sources") or []) if s]
+            roots = sorted(dict.fromkeys(roots_of(name, frozenset({name}))))
+            lineage.append((
+                step.get("order", "?"), name,
+                (entry.get("operation") or "?").strip() or "?",
+                sources, roots,
+            ))
+    return lineage
+
+
 class PipelineLogger:
     """
     Drop-in pretty logger for the query generation pipeline.
@@ -147,6 +194,42 @@ class PipelineLogger:
                     print(_indent(f"tables: {', '.join(tables)}", 4))
                 if columns:
                     print(_indent(f"columns: {', '.join(columns)}", 4))
+                # What this step CREATES, with the column(s) it came from.
+                # `columns` above mixes reads and writes, so without this the
+                # log cannot show which names are new — the same ambiguity
+                # that made a hallucinated column indistinguishable from a
+                # real one before `produces` existed.
+                for entry in (step.get("produces") or []):
+                    name = entry.get("name", "?")
+                    operation = entry.get("operation", "?")
+                    sources = ", ".join(entry.get("sources") or [])
+                    print(_indent(
+                        f"{MAGENTA}produces:{RESET} {BOLD}{name}{RESET} "
+                        f"{DIM}←{RESET} {operation}({sources})", 4
+                    ))
+
+        # Every column the plan invents, gathered in one place with its
+        # origin. Per-step lines above show each in context; this block
+        # answers "where does this number ultimately come from?" for the
+        # whole plan, including chains where a derived column feeds another.
+        lineage = _derived_lineage(steps)
+        if lineage:
+            print(_indent(f"{CYAN}Derived columns:{RESET}", 2))
+            width = max(len(name) for _, name, _, _, _ in lineage)
+            for order, name, operation, sources, roots in lineage:
+                # Pad OUTSIDE the escape codes: padding inside them colours
+                # trailing whitespace and throws the column alignment off in
+                # terminals that render the background.
+                padded = f"{BOLD}{name}{RESET}" + " " * (width - len(name))
+                print(_indent(
+                    f"{padded} {DIM}←{RESET} {operation}({', '.join(sources)})"
+                    f" {DIM}[step {order}]{RESET}", 3
+                ))
+                # Only when the trail runs through another derived column —
+                # otherwise the roots ARE the sources and repeating them is
+                # noise.
+                if roots and roots != sources:
+                    print(_indent(f"{DIM}↳ from {', '.join(roots)}{RESET}", 4))
 
     # ------------------------------------------------------------------ #
     # Stage 0 — table analysis (TableAnalysisAgent)                       #

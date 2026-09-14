@@ -27,6 +27,37 @@ PANDAS_KEYWORDS = {
     "stack", "unstack", "explode", "resample", "rolling", "expanding", "fit","predict"
 }
 
+_SEP_RUN_RE = re.compile(r"_{2,}")
+
+
+def split_dataset_stem(stem: str) -> tuple[str, str]:
+    """Split a dataset filename stem into (name_prefix, resource_id).
+
+    Downloaders join an optional human-readable name and the resource id
+    with a run of underscores whose length isn't fixed across portals/runs
+    (ulod's CKAN bulk downloader has produced both ``__`` and ``___``), so
+    this splits on the LAST run of two-or-more underscores rather than a
+    hardcoded separator string. A single underscore belongs to the id itself
+    (ODS dataset ids such as ``troncon_voie``), so a stem with no such run is
+    a bare resource id: ``("", stem)``.
+    """
+    last_run = None
+    for last_run in _SEP_RUN_RE.finditer(stem):
+        pass
+    if last_run is None:
+        return "", stem
+    return stem[: last_run.start()], stem[last_run.end() :]
+
+
+def dataset_id_to_resource_id(dataset_id: str) -> str:
+    """Map a dataset filename stem to its metadata resource id.
+
+    Stems are either ``<resource_id>`` or ``<name>__<resource_id>``. Normalized
+    metadata is keyed by resource id, so look records up through this rather
+    than by the raw stem (which never matches for name-prefixed CKAN files).
+    """
+    return split_dataset_stem(dataset_id)[1]
+
 
 def _pl_csv_opts_with_sniffed_separator(dataset_path: Path, opts: dict) -> dict:
     """Merge in a sniffed delimiter for Polars' CSV reader, unless the caller
@@ -236,7 +267,9 @@ def prepare_normalized_metadata_for_prompt(record: dict) -> dict:
         "title": record.get("title", "N/A"),
         "description": record.get("description", "N/A"),
         "publisher": record.get("publisher", "N/A"),
+        "responsible_entity": record.get("responsible_entity", "N/A"),
         "tags": record.get("tags", []),
+        "temporal_coverage": record.get("temporal_coverage", "N/A"),
         "source": record.get("source", "N/A"),
         "dataset_id": record.get("dataset_id", "N/A"),
         "resource_id": record.get("resource_id", "N/A"),

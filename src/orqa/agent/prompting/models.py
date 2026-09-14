@@ -10,6 +10,7 @@ from typing import List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
+from ..utility.column_provenance import SOURCE_FREE_OPERATIONS
 from ..utility.structured_outputs import QueryLink, Table
 
 
@@ -177,8 +178,73 @@ _STEP_PARAMS_DESCRIPTION = (
     "it is already auto-registered for later steps via `params.output_column` alone. "
     "For every other op, `params` "
     "keeps its existing free-form meaning (e.g. {\"how\": \"inner\", "
-    "\"keys\": [...]} for a join)."
+    "\"keys\": [...]} for a join). "
+    "WHEREVER a step declares an output column here — `params.output_column`, "
+    "`params.new_column`, or the keys of `params.aggregations` — it must ALSO "
+    "appear in that step's `produces` with the column(s) it was computed "
+    "from. `params` stays the fixed-shape carrier each op needs; `produces` "
+    "is the authoritative record of where a new column came from."
 )
+
+
+# The provenance contract. A plan may legitimately reference a column no raw
+# table contains (a `derive` output, an `aggregate` result, a `rank`
+# position); before `produces` existed there was no way to SAY so, and
+# QueryPlanner.validate_plan had to fall back on "once any step could have
+# derived something, stop checking columns" — which silently accepted every
+# hallucinated name after the first derivation. Declaring the origin makes
+# the check exact.
+#
+# `sources` entries are flat strings rather than {table, column} objects: the
+# alias is only ever a scope hint for RAW columns (it is ignored outright
+# when the source is itself a derived column, since such a column's roots may
+# span several tables and no single alias would be correct). Splitting is
+# exact, not heuristic — aliases are the machine-generated `Table_N`
+# vocabulary, so a source is qualified iff the text before its first "." is a
+# known alias, and a column containing a literal dot can never be misread.
+_PRODUCES_DESCRIPTION = (
+    "Every column THIS step creates that does not already exist in a raw "
+    "table — an aggregate's result, a derive's output, a rank position, a "
+    "renamed column. Each entry is `{\"name\": <new column>, \"operation\": "
+    "<short label: \"sum\", \"mean\", \"count\", \"flag\", \"bucket\", "
+    "\"ratio\", \"year_extract\", \"rename\", ...>, \"sources\": [<column "
+    "it is computed from>, ...]}`. "
+    "Write a source that is a real column of a table as `Alias.column` "
+    "(e.g. `Table_0.amount`); write a source an EARLIER step derived as its "
+    "bare name (e.g. `total_spend`) — that column may itself come from "
+    "several tables, so qualifying it would be wrong. Never guess an alias. "
+    "`sources` may be empty ONLY for an operation that genuinely reads no "
+    "column (" + ", ".join(sorted(SOURCE_FREE_OPERATIONS)) + ") — every "
+    "other operation must name what it was computed from. "
+    "DECLARE ONCE: a derived column is declared only in the step that "
+    "creates it. From that step onward it behaves exactly like a real column "
+    "of the data — any later step may reference it by name in `columns` or "
+    "`params` for any purpose (filtering, grouping, aggregating, sorting, "
+    "ranking, joining, correlating, or as the origin of a further derived "
+    "column). Never re-declare it in a later step. "
+    "This is checked mechanically before any judge sees the plan: a column "
+    "that exists in no table and that no step declares here is rejected, as "
+    "is a source that resolves to nothing."
+)
+
+
+class DerivedColumn(BaseModel):
+    """One column a step creates that no raw table contains.
+
+    See ``_PRODUCES_DESCRIPTION`` for the source-string convention and
+    ``QueryPlanner.validate_plan`` for how origins are resolved.
+    """
+
+    name: str  # the new column this step creates
+    operation: str  # short label: "sum", "flag", "bucket", "ratio", ...
+    sources: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Columns this one is computed from: `Alias.column` for a raw "
+            "table column, the bare name for a column an earlier step "
+            "derived. Empty only for a count-like operation."
+        ),
+    )
 
 
 class SQLPlanStep(BaseModel):
@@ -191,6 +257,9 @@ class SQLPlanStep(BaseModel):
     columns: List[str]  # concrete columns this step reads/writes
     columns_role: dict = {}  # free-form role->columns annotation, e.g. {"primary": [...]}
     params: dict = Field(default_factory=dict, description=_STEP_PARAMS_DESCRIPTION)
+    produces: List[DerivedColumn] = Field(
+        default_factory=list, description=_PRODUCES_DESCRIPTION
+    )
 
 
 class PandasPlanStep(BaseModel):
@@ -203,6 +272,9 @@ class PandasPlanStep(BaseModel):
     columns: List[str]  # concrete columns this step reads/writes
     columns_role: dict = {}  # free-form role->columns annotation, e.g. {"primary": [...]}
     params: dict = Field(default_factory=dict, description=_STEP_PARAMS_DESCRIPTION)
+    produces: List[DerivedColumn] = Field(
+        default_factory=list, description=_PRODUCES_DESCRIPTION
+    )
 
 
 class SQLQueryPlan(BaseModel):

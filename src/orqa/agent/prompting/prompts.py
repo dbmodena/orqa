@@ -505,6 +505,19 @@ def _render_plan_steps(plan: QueryPlan) -> str:
             lines.append(f"   - tables: {', '.join(step.tables)}")
         if step.columns:
             lines.append(f"   - columns: {', '.join(step.columns)}")
+        # Columns this step CREATES, with what each is computed from. The
+        # generator previously saw only `columns`, which mixes what a step
+        # reads with what it writes — so the lineage the planner already
+        # resolved (and had validated) was thrown away right before the code
+        # that has to implement it was written.
+        produces = getattr(step, "produces", None) or []
+        if produces:
+            rendered = ", ".join(
+                f"{d.name} ← {d.operation}({', '.join(d.sources)})"
+                if d.sources else f"{d.name} ← {d.operation}()"
+                for d in produces
+            )
+            lines.append(f"   - produces: {rendered}")
         if step.columns_role:
             lines.append(
                 f"   - columns_role: {json.dumps(step.columns_role, ensure_ascii=False)}"

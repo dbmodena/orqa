@@ -24,21 +24,22 @@ from conf import OrQAConfig
 from ..agent.agent import PairTaskSelectionAgent
 from ..graph import matches_graph
 from ..utils import (
+    dataset_id_to_resource_id,
     dataset_index_shape,
     load_dataset_info,
     load_normalized_datasets_metadata,
     pl_read_dataset,
     remove_file_extension,
     select_columns,
+    split_dataset_stem,
 )
 from ..utils.pipeline_logger import PipelineLogger
 from ..agent.llm_client.EmbeddingClient import EmbeddingClient
 from .clustering import ClusterNeighborIndex, compute_cluster_projection, save_cluster_projection
 from .embeddings import (
-    SEP,
     EmbeddingCache,
     build_embedding_text,
-    dataset_id_to_resource_id,
+    embedding_max_input_tokens,
     load_raw_normalized_metadata,
 )
 from .verification import (
@@ -81,7 +82,7 @@ def sample_seed_datasets(
 
 
 def _queue_entry(dataset_id: str, filepath: Path) -> tuple[str, Path, str, str]:
-    parts = dataset_id.split(SEP) if SEP in dataset_id else ("", dataset_id)
+    parts = split_dataset_stem(dataset_id)
     return (dataset_id, filepath, *parts)  # ty: ignore
 
 
@@ -112,7 +113,7 @@ def save_time_statistics(records: list, path: Path):
         pl.DataFrame(records).write_csv(path, float_precision=3)
 
 
-def build_embedding_texts(cfg: OrQAConfig) -> dict[str, str]:
+def build_embedding_texts(cfg: OrQAConfig, max_tokens: int) -> dict[str, str]:
     """One embedding document per dataset on disk that has metadata.
 
     A dataset is left out of the embedding set entirely — so it never
@@ -160,7 +161,7 @@ def build_embedding_texts(cfg: OrQAConfig) -> dict[str, str]:
             record,
             dataset_path=filepath,
             scan_opts=scan_opts,
-            max_chars=cfg.candidates_discovery.embedding_text_max_chars,
+            max_tokens=max_tokens,
         )
 
     if skipped:
@@ -338,10 +339,10 @@ def pipeline(cfg: OrQAConfig):
 
     # ── Embeddings + cluster neighbor index ─────────────────────────────────
     print(" BUILDING METADATA EMBEDDINGS ".center(PRINT_PAD, "="))
-    texts = build_embedding_texts(cfg)
     client = EmbeddingClient(
         cfg.llm_config_path / "litellm.yaml", batch_size=cd.embedding_batch_size
     )
+    texts = build_embedding_texts(cfg, embedding_max_input_tokens(client.model))
     cache = EmbeddingCache(cd.embeddings_cache_path)
     ids, vectors = cache.get_or_compute(texts, client)
 

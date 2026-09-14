@@ -35,6 +35,33 @@ from ...utils import shield_dataframe_for_prompt
 
 logger = logging.getLogger(__name__)
 
+# Bump when the analysis prompt, or the metadata it is shown, changes in a way
+# that should regenerate cached descriptions/keywords: entries stored under
+# another version are cache misses.
+ANALYSIS_VERSION = 2
+
+# The only metadata fields shown to the analyzer: what the table is, who is
+# responsible for it and which period it covers. Ids, URLs, format and
+# publication dates add noise, and a publication date is easily mistaken for
+# the period the data covers.
+DISTINGUISHING_METADATA_FIELDS = (
+    "title",
+    "description",
+    "publisher",
+    "responsible_entity",
+    "temporal_coverage",
+    "tags",
+)
+
+
+def distinguishing_metadata(metadata: dict) -> dict:
+    """Project normalized metadata onto the fields that tell a table apart."""
+    return {
+        key: metadata[key]
+        for key in DISTINGUISHING_METADATA_FIELDS
+        if metadata.get(key) not in (None, "", [], "N/A")
+    }
+
 
 class TableAnalyzerLLMClient(LLMClientStructured):
     """Dedicated LLM client for batched table analysis.
@@ -148,7 +175,7 @@ class TableAnalyzer:
     def _cache_lookup(self, cache: dict, table_id: str, alias: str) -> Optional[dict]:
         """Return the cached analysis for (table_id, configured model), if any."""
         entry = (cache.get(table_id) or {}).get(self._cache_model)
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or entry.get("version") != ANALYSIS_VERSION:
             return None
         description = entry.get("description", "")
         keywords = entry.get("keywords", [])
@@ -169,6 +196,7 @@ class TableAnalyzer:
         cache.setdefault(table_id, {})[self._cache_model] = {
             "description": description,
             "keywords": keywords,
+            "version": ANALYSIS_VERSION,
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         return True
@@ -232,7 +260,7 @@ class TableAnalyzer:
             block = (
                 f"Alias: {alias}"
                 f"\nColumns:\n{json.dumps(columns_per_table[idx], indent=2, ensure_ascii=False)}"
-                f"\nMetadata:\n{json.dumps(metadata_list[idx], indent=2, ensure_ascii=False, default=str)}"
+                f"\nMetadata:\n{json.dumps(distinguishing_metadata(metadata_list[idx]), indent=2, ensure_ascii=False, default=str)}"
                 f"\nSample rows:\n{json.dumps(samples_per_table[idx], indent=2, ensure_ascii=False, default=str)}"
             )
             table_blocks.append(block)

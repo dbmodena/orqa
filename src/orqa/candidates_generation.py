@@ -35,6 +35,7 @@ from wrapt_timeout_decorator import timeout
 from conf import OrQAConfig
 
 from .agent.agent import CandidatesDiscoveryAgent
+from .utils import split_dataset_stem
 from .graph import matches_graph
 from .utils import (
     load_normalized_datasets_metadata,
@@ -42,7 +43,6 @@ from .utils import (
     remove_file_extension,
 )
 
-SEP = "__"
 COMPLETION_CALLS_TIMEOUT = 1
 PRINT_PAD = 120
 
@@ -133,11 +133,7 @@ def sample_seed_datasets(
     sample = [(remove_file_extension(f), datasets_path / f) for f in sample]
 
     sample = [
-        (
-            filename,
-            filepath,
-            *(filename.split(SEP) if SEP in filename else ("", filename)),
-        )
+        (filename, filepath, *split_dataset_stem(filename))
         for filename, filepath in sample
     ]
 
@@ -415,7 +411,7 @@ def load_recovery_state(
     recovered_q: set[tuple] = set()
     for r_id in unvisited_r:
         filepath = cfg.datasets_path / f"{r_id}.{cfg.datasets_format}"
-        parts    = r_id.split(SEP) if SEP in r_id else ("", r_id)
+        parts    = split_dataset_stem(r_id)
         recovered_q.add((r_id, filepath, *parts))
 
     return G, executed_q_ids, recovered_q, tokens_spent, len(executed_q_ids)
@@ -589,7 +585,7 @@ def pipeline(cfg: OrQAConfig):
                     (
                         candidate["R"],
                         cfg.datasets_path / f"{candidate['R']}.{cfg.datasets_format}",
-                        *(filename.split(SEP) if SEP in filename else ("", filename)),
+                        *split_dataset_stem(filename),
                     )
                 )
 

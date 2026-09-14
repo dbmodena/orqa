@@ -545,7 +545,9 @@ class QueryValidator(ABC):
             actual_query = q
             try:
                 dataframes, ordered_names = self.prefilter_dataframes(
-                    actual_query['tables'], q.get("code") or ""
+                    actual_query['tables'],
+                    q.get("code") or "",
+                    frozenset(q.get("derived_columns") or ()),
                 )
                 raw_code = q.get("code") or ""
                 if not raw_code.strip():
@@ -632,7 +634,29 @@ class QueryValidator(ABC):
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
-    def prefilter_dataframes(self, tables, code: str = ""):
+    def prefilter_dataframes(self, tables, code: str = "", derived_columns=frozenset()):
+        """Resolve each declared table to its prepared DataFrame.
+
+        Also checks each entry's ``columns_involved`` against the real frame.
+        A declared column that is missing from the raw table is an error
+        UNLESS the plan itself creates it: ``derived_columns`` is the set of
+        names the planner declared and resolved to a column of origin (see
+        :mod:`orqa.agent.utility.column_provenance`), and it is authoritative.
+        ``code`` only feeds the legacy fallback for plans that predate those
+        declarations — see :meth:`_is_column_created_by_code`.
+
+        Args:
+            tables: The query's ``tables`` entries (name + columns_involved).
+            code: The generated code, for the legacy derived-column fallback.
+            derived_columns: Names the plan declared it creates.
+
+        Returns:
+            ``(dataframes, ordered_names)`` aligned with *tables*.
+
+        Raises:
+            KeyError: On an unknown table, or a ``columns_involved`` entry that
+                is neither a real column nor a declared derived one.
+        """
         df_by_name = dict(zip(self.table_names, self.dataframes))
         # Build reverse map: file-path/UUID → canonical table name (e.g. "xahu-rkwn" → "Table_0")
         # so that tables[].name entries still holding raw dataset IDs are resolved correctly.
@@ -667,20 +691,31 @@ class QueryValidator(ABC):
             cols = table.get("columns_involved") or []
             if cols:
                 missing = [c for c in cols if c not in dataframe.columns]
-                if missing and code:
+                if missing:
                     # A `derive`/`aggregate` step's own OUTPUT column
                     # legitimately doesn't exist in the raw table yet — the
                     # code creates it itself (df['x'] = ..., .assign(x=...),
                     # a named-aggregation x=('col', 'func'), or a rename
-                    # target). columns_involved is copied straight from the
-                    # plan's declared columns (structured_outputs.py Table.
-                    # columns_involved), which doesn't distinguish "read
-                    # from the raw table" from "produced by this plan's own
-                    # steps" — so a missing column the code itself creates
-                    # is not a hallucinated/typo'd raw-column reference.
+                    # target).
+                    #
+                    # `derived_columns` is the AUTHORITATIVE answer to which
+                    # columns those are: the planner resolved every one
+                    # against its declared column of origin (each step's
+                    # `produces`, see orqa.agent.utility.column_provenance)
+                    # and rejected the plan otherwise. A name in that set is
+                    # known-good; a name outside it gets no free pass.
+                    #
+                    # _is_column_created_by_code is a LEGACY fallback for
+                    # plans predating `produces` (older traces, the free-text
+                    # fallback plan, single-table paths that bypass the
+                    # planner). It re-derives the answer by pattern-matching
+                    # the generated code and is deliberately biased toward
+                    # false positives, so it is consulted only when the
+                    # declared set does not already settle the question.
                     missing = [
                         c for c in missing
-                        if not self._is_column_created_by_code(c, code)
+                        if c not in derived_columns
+                        and not (code and self._is_column_created_by_code(c, code))
                     ]
                 if missing:
                     available_cols = list(dataframe.columns)
@@ -877,16 +912,26 @@ class QueryValidator(ABC):
 
     @staticmethod
     def _is_column_created_by_code(col: str, code: str) -> bool:
-        """Whether *code* itself creates column *col* rather than reading it
-        from the raw table — a `derive`/`aggregate` step's own output,
-        legitimately absent from the raw DataFrame before the code runs.
+        """LEGACY fallback: whether *code* itself creates column *col*.
+
+        Superseded by the plan's own ``produces`` declarations, which name
+        every created column and the column(s) it came from, resolved at
+        planning time (see
+        :mod:`orqa.agent.utility.column_provenance`). Callers pass that set as
+        ``prefilter_dataframes(derived_columns=...)`` and it settles the
+        question exactly; this function is consulted only when it does not —
+        a plan predating the declarations, the free-text fallback plan, or a
+        path that bypasses the planner.
 
         Heuristic, not a parse: matches the common ways pandas code
         introduces a new column, so a false POSITIVE just lets a query
         through to real execution (which still raises an accurate error if
         the column genuinely never materializes) — cheaper than a false
         NEGATIVE, which permanently kills a correct query on a misleading
-        "typo" message before it ever runs.
+        "typo" message before it ever runs. That bias is why it is a fallback
+        and not the primary check: it is deliberately permissive, so a
+        hallucinated column can slip past it, which is exactly what the
+        declared set closes off.
         """
         if not code:
             return False
