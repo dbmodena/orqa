@@ -179,6 +179,7 @@ class QueryPlanner:
         stats: Sequence[TableStats],
         languages: Optional[Sequence[str]] = None,
         dfs: Optional[Sequence[Any]] = None,
+        table_metadata: Optional[dict] = None,
     ) -> QueryPlan:
         """Produce a structured query plan.
 
@@ -195,6 +196,10 @@ class QueryPlanner:
                 a real up-to-10-row sample per table so questions ground their
                 concrete values in actually observed data rather than invented
                 ones.
+            table_metadata: Mapping of alias -> the table's portal metadata
+                (see ``table_analyzer.portal_metadata``), shown next to the
+                analyses so a question's period and program come from the
+                source rather than the analysis summary.
 
         Returns:
             A :class:`SQLQueryPlan` or :class:`PandasQueryPlan` (per ``self.kind``)
@@ -208,6 +213,7 @@ class QueryPlanner:
 
         prompt = self._build_prompt(
             analyses, aliases, constraint_links, stats, languages, dfs=dfs,
+            table_metadata=table_metadata,
         )
 
         # Known columns per alias are derived from the column statistics so plan
@@ -258,6 +264,8 @@ class QueryPlanner:
         num_plans: int = 3,
         dfs: Optional[Sequence[Any]] = None,
         retrievable_keywords: Optional[list[str]] = None,
+        distinguishing_facets: Optional[dict] = None,
+        table_metadata: Optional[dict] = None,
     ) -> List[QueryPlan]:
         """Produce several independent query plans in a single LLM call.
 
@@ -289,18 +297,26 @@ class QueryPlanner:
                 ones.
             retrievable_keywords: A keyword set EMPIRICALLY VERIFIED (see
                 ``orqa.agent.utility.keyword_suggestion.
-                suggest_retrievable_keywords``) to surface every table in
-                ``aliases`` within the plan judge's own keyword-searchability
-                top-K, computed BEFORE this call against the real reverse
-                index — not a guess. When given, every plan's `question`
-                must weave these terms in naturally (not just list them in
-                `question_keywords`), so the run starts from a proven-
-                retrievable footing instead of discovering retrievability by
-                trial and error across correction rounds. ``None``/empty
-                when unavailable (no index configured, or the group could
-                not be resolved — see the pre-planning check in
-                ``StatementOrchestrator._run``) — the prompt then falls back
+                suggest_retrievable_keywords``) to surface every table's
+                FAMILY within a bounded metadata-vocabulary search, computed
+                BEFORE this call against the real reverse index — not a
+                guess. Offered to the model as suggested question vocabulary
+                (see :meth:`_render_retrievable_keywords`) — a HINT only:
+                nothing here forces it into the returned plan, since actual
+                retrievability is now checked deterministically against the
+                question text itself (see
+                ``orqa.agent.utility.retrievability_gate.
+                check_question_retrievability``, run by the plan judge).
+                ``None``/empty when unavailable — the prompt then falls back
                 to its ordinary retrievability guidance alone.
+            distinguishing_facets: ``{alias: [detail, ...]}`` — the details
+                (a period, a qualifying word, a data-scope value; see
+                ``orqa.benchmark.families.distinguishing_facets``) that rule
+                a gold table's same-family siblings out. Rendered as a
+                DISTINGUISHING DETAILS prompt section the question must
+                state; also checked deterministically by the plan judge.
+            table_metadata: Same as :meth:`plan`; also forwarded to every
+                revision this batch triggers.
 
         Returns:
             A non-empty list of kind-appropriate query plans, each independently
@@ -316,6 +332,8 @@ class QueryPlanner:
             analyses, aliases, constraint_links, stats, languages,
             num_plans=num_plans, dfs=dfs,
             retrievable_keywords=retrievable_keywords,
+            distinguishing_facets=distinguishing_facets,
+            table_metadata=table_metadata,
         )
         raw_set, _usage = self._request_plan_batch(prompt)
         raw_plans = self._extract_raw_plans(raw_set)
@@ -335,14 +353,13 @@ class QueryPlanner:
 
         plans = self._dedupe_difficulties(
             plans, analyses, aliases, match, involved_cols, stats, languages,
-            dfs, retrievable_keywords,
+            dfs, retrievable_keywords, distinguishing_facets, table_metadata,
         )
         plans = self._reconcile_difficulty(
             plans, analyses, aliases, match, involved_cols, stats, languages,
-            dfs, retrievable_keywords,
+            dfs, retrievable_keywords, distinguishing_facets, table_metadata,
         )
         plans = [self._pin_table_descriptions(p, analyses) for p in plans]
-        plans = [self._pin_retrievable_keywords(p, retrievable_keywords) for p in plans]
 
         return plans
 
@@ -357,6 +374,8 @@ class QueryPlanner:
         languages: Sequence[str],
         dfs: Optional[Sequence[Any]],
         retrievable_keywords: Optional[list[str]],
+        distinguishing_facets: Optional[dict],
+        table_metadata: Optional[dict] = None,
     ) -> List[QueryPlan]:
         """Ensure a batch has no duplicate difficulty tiers — deterministic,
         code-level, no judge involved.
@@ -407,6 +426,8 @@ class QueryPlanner:
                 retarget, feedback, analyses, aliases, match, involved_cols,
                 stats, languages, dfs=dfs,
                 retrievable_keywords=retrievable_keywords,
+                distinguishing_facets=distinguishing_facets,
+                table_metadata=table_metadata,
             )
             seen.add(target)
             result.append(revised if revised is not None else retarget)
@@ -423,6 +444,8 @@ class QueryPlanner:
         languages: Sequence[str],
         dfs: Optional[Sequence[Any]],
         retrievable_keywords: Optional[list[str]],
+        distinguishing_facets: Optional[dict],
+        table_metadata: Optional[dict] = None,
     ) -> List[QueryPlan]:
         """Verify each plan's declared `difficulty` against the deterministic
         structural/data-engineering estimate (see
@@ -464,6 +487,8 @@ class QueryPlanner:
                 plan, feedback, analyses, aliases, match, involved_cols,
                 stats, languages, dfs=dfs,
                 retrievable_keywords=retrievable_keywords,
+                distinguishing_facets=distinguishing_facets,
+                table_metadata=table_metadata,
             )
             candidate = revised if revised is not None else plan
             re_estimate = estimate_plan_tier(candidate)
@@ -549,37 +574,6 @@ class QueryPlanner:
             new_tables.append(table)
         return plan.model_copy(update={"tables": new_tables}) if changed else plan
 
-    def _pin_retrievable_keywords(
-        self, plan: QueryPlan, retrievable_keywords: Optional[list[str]]
-    ) -> QueryPlan:
-        """Guarantee `question_keywords` contains every keyword the
-        pre-planning search (see `keyword_suggestion.suggest_retrievable_keywords`,
-        called before this planner ever runs — `retrievable_keywords` is
-        only ever passed in already EMPIRICALLY VERIFIED against the real
-        reverse index) proved necessary and sufficient to surface this
-        plan's tables.
-
-        Same category of gap as `_pin_table_descriptions`: the prompt asks
-        the model to "weave these terms in naturally" into the question,
-        but that's advisory — the model still freely writes its own
-        `question_keywords`, and nothing forces the verified set to survive
-        into it. A plan can read as perfectly retrievable and still lose
-        the one term that actually made it so, if the model paraphrases or
-        drops it. This makes retrievability a guarantee instead of a hope,
-        with no extra LLM call: union the verified terms into whatever the
-        model already wrote, verified terms first — no count cap on
-        `question_keywords` (see `QueryPlan.limit_question_keywords`), so
-        nothing here can ever trim one away either.
-        """
-        if not retrievable_keywords:
-            return plan
-        existing = list(plan.question_keywords or [])
-        missing = [kw for kw in retrievable_keywords if kw not in existing]
-        if not missing:
-            return plan
-        combined = list(dict.fromkeys(missing + existing))
-        return plan.model_copy(update={"question_keywords": combined})
-
     def revise_plan(
         self,
         plan: QueryPlan,
@@ -592,6 +586,8 @@ class QueryPlanner:
         languages: Optional[Sequence[str]] = None,
         dfs: Optional[Sequence[Any]] = None,
         retrievable_keywords: Optional[list[str]] = None,
+        distinguishing_facets: Optional[dict] = None,
+        table_metadata: Optional[dict] = None,
     ) -> tuple[Optional[QueryPlan], dict]:
         """Re-request ONE plan corrected against reviewer feedback.
 
@@ -624,6 +620,8 @@ class QueryPlanner:
         base_prompt = self._build_prompt(
             analyses, aliases, constraint_links, stats, languages, dfs=dfs,
             retrievable_keywords=retrievable_keywords,
+            distinguishing_facets=distinguishing_facets,
+            table_metadata=table_metadata,
         )
         correction_prompt = (
             f"{base_prompt}\n\n"
@@ -660,7 +658,6 @@ class QueryPlanner:
         try:
             validated = self.validate_plan(candidate, aliases, known_columns)
             validated = self._pin_table_descriptions(validated, analyses)
-            validated = self._pin_retrievable_keywords(validated, retrievable_keywords)
             return validated, usage_total
         except PlanValidationError as exc:
             first_error = str(exc)
@@ -677,7 +674,6 @@ class QueryPlanner:
         try:
             validated_retry = self.validate_plan(retry_candidate, aliases, known_columns)
             validated_retry = self._pin_table_descriptions(validated_retry, analyses)
-            validated_retry = self._pin_retrievable_keywords(validated_retry, retrievable_keywords)
             return validated_retry, usage_total
         except PlanValidationError as exc_retry:
             logger.warning(
@@ -1284,6 +1280,8 @@ class QueryPlanner:
         num_plans: int = 1,
         dfs: Optional[Sequence[Any]] = None,
         retrievable_keywords: Optional[list[str]] = None,
+        distinguishing_facets: Optional[dict] = None,
+        table_metadata: Optional[dict] = None,
     ) -> str:
         if num_plans <= 1:
             task_statement = (
@@ -1366,6 +1364,18 @@ class QueryPlanner:
             column_statistics=self._render_statistics(stats),
             detected_languages=json.dumps(list(languages), ensure_ascii=False),
             retrievable_keywords=self._render_retrievable_keywords(retrievable_keywords),
+            distinguishing_details=self._render_distinguishing_details(distinguishing_facets),
+            table_metadata=self._render_table_metadata(table_metadata, aliases),
+        )
+
+    @staticmethod
+    def _render_table_metadata(table_metadata: Optional[dict], aliases: dict) -> str:
+        """The "### TABLE METADATA" section body: each alias's portal metadata."""
+        if not table_metadata or not any(table_metadata.values()):
+            return "(no portal metadata available)"
+        return json.dumps(
+            {alias: table_metadata.get(alias) or {} for alias in aliases},
+            indent=2, ensure_ascii=False, default=str,
         )
 
     @staticmethod
@@ -1374,27 +1384,64 @@ class QueryPlanner:
         omitted entirely, not printed as "none") when no pre-verified set is
         available, so older behavior (retrievability guidance alone, no
         anchor) is unchanged for portals with no reverse index configured.
+
+        A VOCABULARY HINT ONLY: unlike the old behavior, nothing pins these
+        into `question_keywords` — actual retrievability is checked
+        deterministically against the question TEXT by the plan judge (see
+        `orqa.agent.utility.retrievability_gate.
+        check_question_retrievability`), so a plan that ignores this hint is
+        still free to pass, and one that copies it verbatim into
+        `question_keywords` without also using it in the question's own
+        prose is still free to fail.
         """
         if not retrievable_keywords:
             return ""
         terms = ", ".join(f"`{kw}`" for kw in retrievable_keywords)
         return (
-            "\n### RETRIEVABLE KEYWORDS (pre-verified — do not skip this)\n"
-            f"These exact terms — {terms} — were EMPIRICALLY VERIFIED just now "
-            "against the real reverse index: searching with them surfaces "
-            "EVERY table in TABLE ALIASES within the retrievability check's "
-            "own top-K window. This is not a guess or a suggestion, it is a "
-            "proven-working anchor. Every plan's `question` MUST weave ALL of "
-            "these terms into its own natural prose (not just list them in "
-            "`question_keywords` while the question text stays silent on "
-            "them — see the question-writing rule above: `question_keywords` "
-            "must literally appear in or be directly implied by the question "
-            "text). You may freely add other natural topical words alongside "
-            "them; you may NOT drop, paraphrase, or merge any of these terms "
-            "into a different word — a paraphrase (e.g. one merged word "
-            "instead of a real multi-word term above) is exactly what breaks "
-            "retrieval even when it means the same thing to a person.\n"
+            "\n### RETRIEVABLE KEYWORDS (suggested vocabulary, not a "
+            "requirement)\n"
+            f"These exact terms — {terms} — were found, in a bounded search, "
+            "to surface every table's FAMILY within the retriever panel's "
+            "own top-K window. Not a checklist: treat them as the vocabulary "
+            "most likely to work, and lean on them for the terms that "
+            "actually pin this data down (a program or agency name, a "
+            "place, a period). Skip any that would only make the prose read "
+            "like a machine wrote it — a column header, a bare number, a "
+            "fragment that no person would say — and add whatever other "
+            "natural topical words the question needs. What actually "
+            "matters for retrieval is the QUESTION'S OWN PROSE, not this "
+            "list or `question_keywords` — a term copied into "
+            "`question_keywords` without also appearing in (or being "
+            "directly implied by) the question text does nothing.\n"
         )
+
+    @staticmethod
+    def _render_distinguishing_details(distinguishing_facets: Optional[dict]) -> str:
+        """The "### DISTINGUISHING DETAILS" prompt section — empty when no
+        table in this group has same-family siblings a facet needs to rule
+        out (the common case for a family of one).
+
+        Unlike RETRIEVABLE KEYWORDS above, this is NOT a hint: the plan
+        judge's `check_question_retrievability` deterministically rejects a
+        question missing one of these, the same way it deterministically
+        rejects one whose family isn't reachable.
+        """
+        if not distinguishing_facets or not any(distinguishing_facets.values()):
+            return ""
+        lines = [
+            "\n### DISTINGUISHING DETAILS (must be stated in the question)\n"
+            "Each alias below shares its CKAN dataset with other files "
+            "(same title/topic, a different period/variant/scope) that this "
+            "question's PROSE must rule out by stating the listed detail(s) "
+            "in plain words — not just in `question_keywords`. A question "
+            "that would equally describe a sibling file is not retrievable "
+            "down to the right FILE even when it finds the right dataset."
+        ]
+        for alias, facets in distinguishing_facets.items():
+            if not facets:
+                continue
+            lines.append(f"- {alias}: {'; '.join(facets)}")
+        return "\n".join(lines) + "\n"
 
     @staticmethod
     def _render_time_context() -> str:

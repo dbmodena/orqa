@@ -23,6 +23,8 @@ MetadataSource = Literal["ckan", "ods", "socrata"]
 REQUIRED_SCHEMA_KEYS = [
     "dataset_id",
     "resource_id",
+    "resource_name",
+    "resource_description",
     "source",
     "title",
     "description",
@@ -124,13 +126,17 @@ def _normalize_ckan_record(record: dict[str, Any]) -> list[dict[str, Any]]:
         _clean_text(record.get("datasource")) or _clean_text(record.get("author")),
         publisher,
     )
+    # data.gov.uk keeps the period as top-level "temporal_coverage-from"/"-to"
+    # keys; other CKAN portals put the same keys in extras.
     temporal_coverage = _format_temporal_coverage(
         record.get("hasBegining")
         or record.get("time_period_coverage_start")
+        or record.get("temporal_coverage-from")
         or extras.get("temporal_start")
         or extras.get("temporal_coverage-from"),
         record.get("hasEnd")
         or record.get("time_period_coverage_end")
+        or record.get("temporal_coverage-to")
         or extras.get("temporal_end")
         or extras.get("temporal_coverage-to"),
     )
@@ -147,6 +153,8 @@ def _normalize_ckan_record(record: dict[str, Any]) -> list[dict[str, Any]]:
             continue
 
         resource_id = _clean_text(resource.get("id")) or dataset_id
+        resource_name = _clean_text(resource.get("name"))
+        resource_description = _clean_html(resource.get("description"))
         download_url = _clean_text(resource.get("url"))
         state = (_clean_text(resource.get("state")) or "").lower()
 
@@ -162,6 +170,16 @@ def _normalize_ckan_record(record: dict[str, Any]) -> list[dict[str, Any]]:
                 {
                     "dataset_id": dataset_id,
                     "resource_id": resource_id,
+                    # The dataset title and description are shared by all its
+                    # resources; a resource's own name and description tell
+                    # them apart ("2021-12-31 Organogram (Junior)"), so they
+                    # are kept unless they only repeat the dataset's.
+                    "resource_name": resource_name if resource_name != title else None,
+                    "resource_description": (
+                        resource_description
+                        if resource_description != description
+                        else None
+                    ),
                     "source": "ckan",
                     "title": title,
                     "description": description,
@@ -306,6 +324,8 @@ def _post_process_record(record: dict[str, Any]) -> dict[str, Any]:
     cleaned = {
         "dataset_id": _clean_text(record.get("dataset_id")),
         "resource_id": _clean_text(record.get("resource_id")) or _clean_text(record.get("dataset_id")),
+        "resource_name": _clean_text(record.get("resource_name")),
+        "resource_description": _clean_html(record.get("resource_description")),
         "source": _clean_text(record.get("source")),
         "title": _clean_text(record.get("title")),
         "description": _clean_html(record.get("description")),
@@ -392,13 +412,20 @@ def _entity_acronyms(name: str) -> set[str]:
     return {" ".join(re.findall(r"\w+", m)) for m in _PARENTHETICAL_RE.findall(name.casefold())}
 
 
+# An end date in or after this year marks an ongoing series, not a period.
+_OPEN_ENDED_YEAR = 2099
+
+
 def _format_temporal_coverage(start: Any, end: Any, fallback: Any = None) -> str | None:
     """Render the period a dataset covers as ``<start> to <end>``.
 
     Either bound may be missing; with neither, the portal's free-text period
-    (``fallback``) is kept verbatim.
+    (``fallback``) is kept verbatim. A far-future end is how a portal marks an
+    ongoing series (data.gov.uk uses ``2099-12-31``), so it counts as missing.
     """
     start_date, end_date = _coverage_date(start), _coverage_date(end)
+    if end_date and end_date[:4].isdigit() and int(end_date[:4]) >= _OPEN_ENDED_YEAR:
+        end_date = None
     if start_date and end_date:
         return f"{start_date} to {end_date}"
     if start_date:
@@ -415,8 +442,11 @@ def _coverage_date(value: Any) -> str | None:
     """Date of a coverage bound, as ``YYYY-MM-DD`` when it parses.
 
     Timestamps are rounded to the nearest day first: ODS stores local midnight
-    in UTC, so Paris' ``2005-12-30T23:00:00+00:00`` means 2005-12-31.
+    in UTC, so Paris' ``2005-12-30T23:00:00+00:00`` means 2005-12-31. A list
+    bound (data.gov.uk stores ``["2016-05-01"]``) is read as its first value.
     """
+    if isinstance(value, (list, tuple)):
+        value = next((item for item in value if _clean_text(item)), None)
     text = _clean_text(value)
     if text is None:
         return None

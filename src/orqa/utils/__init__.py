@@ -265,6 +265,8 @@ def prepare_normalized_metadata_for_prompt(record: dict) -> dict:
     """Adapt a normalized metadata record to the shape consumed by prompts."""
     return {
         "title": record.get("title", "N/A"),
+        "resource_name": record.get("resource_name", "N/A"),
+        "resource_description": record.get("resource_description", "N/A"),
         "description": record.get("description", "N/A"),
         "publisher": record.get("publisher", "N/A"),
         "responsible_entity": record.get("responsible_entity", "N/A"),

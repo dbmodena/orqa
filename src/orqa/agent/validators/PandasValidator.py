@@ -653,6 +653,26 @@ class PandasValidator(QueryValidator):
                     f"{raw}\nChain returned None before .{attr_name} — likely inplace=True on a prior step.\n"
                     "Remove inplace=True and assign explicitly: df = df.sort_values(...)"
                 )
+            if "str accessor" in msg and "string values" in msg:
+                # pandas' own message when .str is called on a Series whose
+                # DTYPE isn't object/string — distinct from (and far more
+                # common than) "no attribute 'str'" below, which is calling
+                # .str on something that has no such accessor AT ALL (a
+                # DataFrame, a scalar). This one means the column LOOKS
+                # textual (e.g. "585,559.83" with a thousands separator) but
+                # pandas already parsed it as numeric when the table loaded,
+                # so .str never even runs.
+                return AttributeError(
+                    f"{raw}\n.str accessor used on a column pandas already parsed as "
+                    "NUMERIC, not text — .str only works on object/string-dtype "
+                    "columns, and a numeric column has no string form to clean.\n"
+                    "Fix: check the column's actual dtype first (`Table_0.dtypes`) "
+                    "instead of assuming it's still text. If it's already numeric, "
+                    "drop the .str step entirely — the thousands-separator/formatting "
+                    "was handled at load time. If it's genuinely object-dtype "
+                    "elsewhere but this column loaded differently, cast explicitly: "
+                    "df['col'].astype(str).str.replace(',', '', regex=False)."
+                )
             if "str" in msg and "has no attribute" in msg:
                 return AttributeError(
                     f"{raw}\n.str on non-string column — cast first: df['col'].astype(str).str.lower()"

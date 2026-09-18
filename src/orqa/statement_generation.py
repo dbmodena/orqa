@@ -1,16 +1,20 @@
 import asyncio
 import json
+import logging
 import math
 import random
 import sys
 from pathlib import Path
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Callable, Optional
 
 from .agent.agent import TableAnalysisAgent
 from .agent.agents.StatementAgent import StatementAgent
 from .agent.agents.SingleStatementAgent import SingleStatementAgent
+from .benchmark.families import FamilyIndex
+from .benchmark.hybrid_index import HybridDatasetIndex
 from .benchmark.index import load_index
 from .benchmark.questions import get_entry, store_entry
+from .benchmark.retrieval_panel import RetrieverPanel, make_llm_keyword_extractor
 from .utils import (
     dataset_id_to_resource_id,
     dataset_index_shape,
@@ -21,13 +25,83 @@ from .utils import (
 from conf import OrQAConfig, JUDGE_MODE_COUNTS
 from dataclasses import dataclass, field
 
-_TIMEOUT_SECONDS_PER_5K_TOKENS: int = 15
+logger = logging.getLogger(__name__)
+
+
+def _build_family_index(cfg: OrQAConfig) -> Optional[FamilyIndex]:
+    """The CKAN family index, shared by family-stratified sampling and the
+    retrieval contract. ``None`` (never raises) when the normalized
+    metadata can't be read — both features then simply degrade to their
+    pre-existing unstratified/ungated behavior.
+    """
+    try:
+        with open(cfg.normalized_metadata_filepath, encoding="utf-8") as file:
+            raw_records = json.load(file)
+        return FamilyIndex(raw_records, cfg.datasets_path)
+    except Exception:
+        logger.warning(
+            "Could not build the CKAN family index; family-stratified "
+            "sampling and the retrieval contract are both unavailable "
+            "for this run.",
+            exc_info=True,
+        )
+        return None
+
+
+def _build_retrieval_panel(
+    cfg: OrQAConfig, search_index: Any, family_index: Optional[FamilyIndex]
+) -> Optional[RetrieverPanel]:
+    """The retriever panel behind the retrievability gate (see
+    ``orqa.agent.utility.retrievability_gate``) — ``None`` when the gate
+    is disabled (``retrieval_gate_enabled`` / ``retrieval_contract.enabled``)
+    or no index/family index is available, so callers only need to check
+    for ``None`` rather than re-deriving these flags themselves.
+    """
+    if (
+        family_index is None
+        or search_index is None
+        or not cfg.mcp_search.retrieval_gate_enabled
+        or not cfg.mcp_search.retrieval_contract.enabled
+    ):
+        return None
+    keyword_extractor = None
+    try:
+        keyword_extractor = make_llm_keyword_extractor(cfg.llm_config_path / "litellm.yaml")
+    except Exception:
+        logger.warning(
+            "Could not build the llm_keywords retriever; the retrieval "
+            "panel proceeds with lexical/dense retrievers only.",
+            exc_info=True,
+        )
+    hybrid_index = search_index if isinstance(search_index, HybridDatasetIndex) else None
+    return RetrieverPanel(
+        search_index,
+        hybrid_index=hybrid_index,
+        keyword_extractor=keyword_extractor,
+        family_index=family_index,
+    )
+
+# Pacing between generated groups, per 5k tokens the group consumed. NOT a
+# rate limit the provider enforces: OCI's on-demand ceiling is applied by
+# dynamic throttling — undocumented, moving with overall demand — so no fixed
+# pause can be calibrated to stay under it, and the client backs off on a real
+# 429 instead (see LLMClient._completion_with_backoff).
+#
+# Measured on a 99-group UK run: 15s/5k spent 12.55h sleeping against 6.03h
+# generating (68% of wall clock) and still did not prevent throttling — the
+# one group that was throttled ran at 35.7k tokens/min, BELOW the 42.3k median,
+# while groups at 60k and 81k went through untouched. The sleep also sits
+# between groups, whereas the ~150k tokens of a single group are a burst of
+# many calls inside it, so it never paced the thing that actually trips the
+# limit. Kept small rather than zero purely to space consecutive bursts.
+_TIMEOUT_SECONDS_PER_5K_TOKENS: int = 3
 _TOKENS_PER_BUCKET: int = 5_000
 
 
 def _compute_timeout(max_tokens: int) -> float:
-    """Return the wall-clock timeout (seconds) for a call capped at *max_tokens*.
+    """Return the cooldown (seconds) to pace a call of *max_tokens* tokens.
 
+    Callers pass the tokens a generation ACTUALLY consumed, not a cap.
     Uses ceiling division so that even a 1-token call gets the full first bucket.
     """
     buckets = math.ceil(max_tokens / _TOKENS_PER_BUCKET)
@@ -176,6 +250,51 @@ def _is_single_table_candidate(match: dict) -> bool:
     return not has_relationships
 
 
+def _family_stratified_order(
+    files: list[Path],
+    family_of: Callable[[str], str],
+    seed: int,
+    max_groups_per_family: int,
+) -> list[Path]:
+    """Round-robin ``files`` across their CKAN families (``family_of``: a
+    file stem -> family id mapping), so no single family contributes more
+    than ``max_groups_per_family`` entries and every family gets an equal
+    turn before a second round draws from any of them again — a family with
+    hundreds of near-identical siblings ("Organogram of Staff Roles &
+    Salaries", 1,426 files on the UK portal) can't crowd out the rest of
+    the corpus. Both the family order and each family's own file order are
+    seeded, so the result is deterministic under ``seed``.
+    """
+    by_family: dict[str, list[Path]] = {}
+    for filepath in files:
+        by_family.setdefault(family_of(filepath.stem), []).append(filepath)
+
+    rng = random.Random(seed)
+    family_ids = sorted(by_family)
+    rng.shuffle(family_ids)
+    for family in family_ids:
+        rng.shuffle(by_family[family])
+
+    order: list[Path] = []
+    cursors = dict.fromkeys(family_ids, 0)
+    counts = dict.fromkeys(family_ids, 0)
+    progressed = True
+    while progressed:
+        progressed = False
+        for family in family_ids:
+            if counts[family] >= max_groups_per_family:
+                continue
+            idx = cursors[family]
+            members = by_family[family]
+            if idx >= len(members):
+                continue
+            order.append(members[idx])
+            cursors[family] = idx + 1
+            counts[family] += 1
+            progressed = True
+    return order
+
+
 def _sample_single_table_datasets(
     datasets_path: Path,
     count: int,
@@ -183,6 +302,8 @@ def _sample_single_table_datasets(
     seed: int = 0,
     limit_to_n_columns: int | None = None,
     scan_opts: dict | None = None,
+    family_of: Optional[Callable[[str], str]] = None,
+    max_groups_per_family: Optional[int] = None,
 ) -> list[Path]:
     """
     Return up to ``count`` randomly sampled dataset paths.
@@ -198,15 +319,26 @@ def _sample_single_table_datasets(
     this, single-table sampling reads straight off disk and a too-wide
     table would slip past every discovery-side gate into statement
     generation. An unreadable file is treated as unusable and skipped.
+
+    When ``family_of`` AND ``max_groups_per_family`` are both given, files
+    are drawn in family-stratified round-robin order (see
+    ``_family_stratified_order``) instead of a flat shuffle. Either left
+    ``None`` (the default) keeps the plain seeded-shuffle behavior.
     """
     all_files = sorted(datasets_path.glob(f"*.{extension}"))
+    stratify = family_of is not None and max_groups_per_family is not None
 
     if limit_to_n_columns is None:
+        if stratify:
+            return _family_stratified_order(all_files, family_of, seed, max_groups_per_family)[:count]
         return random.Random(seed).sample(all_files, min(count, len(all_files)))
 
     scan_opts = scan_opts or {}
-    shuffled = all_files[:]
-    random.Random(seed).shuffle(shuffled)
+    if stratify:
+        shuffled = _family_stratified_order(all_files, family_of, seed, max_groups_per_family)
+    else:
+        shuffled = all_files[:]
+        random.Random(seed).shuffle(shuffled)
 
     picked: list[Path] = []
     for filepath in shuffled:
@@ -222,7 +354,13 @@ def _sample_single_table_datasets(
     return picked
 
 
-def _cap_matches(all_matches: list, count: Optional[int], seed: int = 0) -> list:
+def _cap_matches(
+    all_matches: list,
+    count: Optional[int],
+    seed: int = 0,
+    family_of: Optional[Callable[[str], str]] = None,
+    max_groups_per_family: Optional[int] = None,
+) -> list:
     """Cap cross-table candidate matches to ``count``, seeded like
     ``_sample_single_table_datasets`` so runs (and sibling workflows sharing
     the yaml seed) pick the same subset. ``None`` (or a count at/above the
@@ -230,10 +368,47 @@ def _cap_matches(all_matches: list, count: Optional[int], seed: int = 0) -> list
     ``all_matches`` unchanged and in its original order — sampling would
     otherwise reshuffle it via ``random.sample``, needlessly scrambling the
     index-based resume/dedup keys the caller relies on.
+
+    When ``family_of``/``max_groups_per_family`` are both given, a match is
+    capped per family across ALL of its tables: a multi-table match counts
+    ONE slot against EVERY family any of its aliases belongs to, so a
+    family isn't undercounted just because it only appears as one alias of
+    a wider join. Either left ``None`` keeps the plain seeded-sample
+    behavior.
     """
     if count is None or count >= len(all_matches):
         return all_matches
-    return random.Random(seed).sample(all_matches, count)
+    if family_of is None or max_groups_per_family is None:
+        return random.Random(seed).sample(all_matches, count)
+
+    def families_of(match: dict) -> set[str]:
+        return {family_of(dataset) for dataset in (match.get("aliases") or {}).values()}
+
+    rng = random.Random(seed)
+    shuffled = all_matches[:]
+    rng.shuffle(shuffled)
+
+    picked: list = []
+    counts: dict[str, int] = {}
+    leftover: list = []
+    for match in shuffled:
+        match_families = families_of(match)
+        if any(counts.get(f, 0) >= max_groups_per_family for f in match_families):
+            leftover.append(match)
+            continue
+        picked.append(match)
+        for f in match_families:
+            counts[f] = counts.get(f, 0) + 1
+        if len(picked) >= count:
+            break
+
+    # A cap tight enough to leave fewer than `count` selectable matches
+    # (every remaining one blocked by an already-exhausted family) is
+    # filled out from whatever's left, uncapped, rather than silently
+    # returning short.
+    if len(picked) < count:
+        picked.extend(leftover[: count - len(picked)])
+    return picked
 
 
 def _get_formatted_match(match: dict, kind: str) -> str:
@@ -344,14 +519,28 @@ def create_statements(
     plan_judge_count: Optional[int] = None,
     code_judge_count: Optional[int] = None,
     scan_opts: dict | None = None,
+    max_groups_per_family: Optional[int] = None,
+    family_index: Optional[FamilyIndex] = None,
+    retrieval_panel: Optional[RetrieverPanel] = None,
+    retrieval_contract_min_agreement: int = 2,
+    retrieval_contract_top_k_per_table: int = 10,
+    retrieval_contract_max_top_k: int = 20,
+    retrieval_contract_max_residual_siblings: int = 30,
+    retrieval_contract_single_table_top_k: int = 1,
+    generate_reference_questions: bool = False,
 ) -> list[dict]:
     bad_tokens = bad_tokens or []
 
     if datasets_metadata is None:
         datasets_metadata = {}
 
+    family_of = family_index.family_id_of_stem if family_index is not None else None
+
     all_matches: list = load_json(candidates_file)
-    all_matches = _cap_matches(all_matches, multi_table_query_count, seed=seed)
+    all_matches = _cap_matches(
+        all_matches, multi_table_query_count, seed=seed,
+        family_of=family_of, max_groups_per_family=max_groups_per_family,
+    )
     results = load_json(output_file) if output_file.exists() else {}
 
     # Table analyses (description + keywords) are cached per table id and
@@ -381,6 +570,7 @@ def create_statements(
             _sample_single_table_datasets(
                 csv_folder, single_table_query_count, extension=extension,
                 seed=seed, limit_to_n_columns=max_cols, scan_opts=scan_opts,
+                family_of=family_of, max_groups_per_family=max_groups_per_family,
             )
         )
     TableAnalysisAgent(
@@ -403,6 +593,14 @@ def create_statements(
         retrieval_gate_enabled=retrieval_gate_enabled,
         plan_judge_count=plan_judge_count,
         code_judge_count=code_judge_count,
+        family_index=family_index,
+        retrieval_panel=retrieval_panel,
+        retrieval_contract_min_agreement=retrieval_contract_min_agreement,
+        retrieval_contract_top_k_per_table=retrieval_contract_top_k_per_table,
+        retrieval_contract_max_top_k=retrieval_contract_max_top_k,
+        retrieval_contract_max_residual_siblings=retrieval_contract_max_residual_siblings,
+        retrieval_contract_single_table_top_k=retrieval_contract_single_table_top_k,
+        generate_reference_questions=generate_reference_questions,
     )
 
 
@@ -412,6 +610,7 @@ def create_statements(
         sampled = _sample_single_table_datasets(
             csv_folder, single_table_query_count, extension=extension,
             seed=seed, limit_to_n_columns=max_cols, scan_opts=scan_opts,
+            family_of=family_of, max_groups_per_family=max_groups_per_family,
         )
         single_agent = SingleStatementAgent(
             config_path, kind, bad_tokens, languages=languages, seed=seed,
@@ -422,6 +621,13 @@ def create_statements(
             retrieval_gate_enabled=retrieval_gate_enabled,
             plan_judge_count=plan_judge_count,
             code_judge_count=code_judge_count,
+            family_index=family_index,
+            retrieval_panel=retrieval_panel,
+            retrieval_contract_min_agreement=retrieval_contract_min_agreement,
+            retrieval_contract_top_k_per_table=retrieval_contract_top_k_per_table,
+            retrieval_contract_max_top_k=retrieval_contract_max_top_k,
+            retrieval_contract_max_residual_siblings=retrieval_contract_max_residual_siblings,
+            retrieval_contract_single_table_top_k=retrieval_contract_single_table_top_k,
         )
 
         for st_idx, csv_path in enumerate(sampled):
@@ -530,8 +736,16 @@ async def stream_generate_statements(
         all_matches: list = await loop.run_in_executor(
             None, load_json, cfg.statement_generation.query_candidates_path
         )
+        # Family-stratified sampling (see _sample_single_table_datasets)
+        # applies here too — orthogonal to the retrieval gate itself, which
+        # this streaming path doesn't wire up (no search_index is passed to
+        # either agent below).
+        family_index = await loop.run_in_executor(None, _build_family_index, cfg)
+        family_of = family_index.family_id_of_stem if family_index is not None else None
+        max_groups_per_family = cfg.statement_generation.max_groups_per_family
         all_matches = _cap_matches(
-            all_matches, cfg.statement_generation.multi_table_query_count, seed=cfg.seed
+            all_matches, cfg.statement_generation.multi_table_query_count, seed=cfg.seed,
+            family_of=family_of, max_groups_per_family=max_groups_per_family,
         )
     except Exception as exc:
         yield {"type": "error", "message": str(exc)}
@@ -566,6 +780,7 @@ async def stream_generate_statements(
                     cfg.datasets_path, single_table_query_count, cfg.datasets_format,
                     cfg.seed, cfg.candidates_discovery.limit_to_n_columns,
                     cfg.polars_opts.scan,
+                    family_of=family_of, max_groups_per_family=max_groups_per_family,
                 )
             )
         TableAnalysisAgent(
@@ -588,9 +803,12 @@ async def stream_generate_statements(
     # ── Single-table generation FIRST (random CSV sampling) ───────────────────────────
     if enable_single_table and single_table_query_count:
         sampled = await loop.run_in_executor(
-            None, _sample_single_table_datasets,
-            cfg.datasets_path, single_table_query_count, cfg.datasets_format, cfg.seed,
-            cfg.candidates_discovery.limit_to_n_columns, cfg.polars_opts.scan,
+            None,
+            lambda: _sample_single_table_datasets(
+                cfg.datasets_path, single_table_query_count, cfg.datasets_format, cfg.seed,
+                cfg.candidates_discovery.limit_to_n_columns, cfg.polars_opts.scan,
+                family_of=family_of, max_groups_per_family=max_groups_per_family,
+            ),
         )
         st_total = len(sampled)
 
@@ -723,13 +941,19 @@ def generate_statements(cfg: OrQAConfig) -> None:
     metadata = load_normalized_datasets_metadata(cfg.normalized_metadata_filepath)
     # Built once, shared by every plan judge panel this run spins up: the
     # SAME reverse index tasks.mcp_search points at, so the plan judge's
-    # keyword-searchability check (see
-    # orqa.agent.utility.keyword_searchability) verifies against the exact
-    # index a downstream retrieval agent would actually search. `None` when
-    # it can't be built (metadata not indexed yet, Elasticsearch down, ...)
-    # — the check then no-ops rather than blocking generation.
+    # retrievability check (see orqa.agent.utility.retrievability_gate)
+    # verifies against the exact index a downstream retrieval agent would
+    # actually search. `None` when it can't be built (metadata not indexed
+    # yet, Elasticsearch down, ...) — the check then no-ops rather than
+    # blocking generation.
     search_index = load_index(cfg)
-    for lang in ["PANDAS","SQL"]:
+    # The CKAN family index (family-stratified sampling + the retrieval
+    # contract's Level A/B — see FamilyIndex) and the retriever panel behind
+    # it (None when the gate is off or unbuildable) — built ONCE and shared
+    # across every generation call below, same lifetime as search_index.
+    family_index = _build_family_index(cfg)
+    retrieval_panel = _build_retrieval_panel(cfg, search_index, family_index)
+    for lang in ["PANDAS"]:#,"SQL"]:
         create_statements(
             cfg.llm_config_path.joinpath("litellm.yaml"),
             cfg.datasets_path,
@@ -752,4 +976,13 @@ def generate_statements(cfg: OrQAConfig) -> None:
             plan_judge_count=JUDGE_MODE_COUNTS[cfg.judges.plan_mode],
             code_judge_count=JUDGE_MODE_COUNTS[cfg.judges.code_mode],
             scan_opts=cfg.polars_opts.scan,
+            max_groups_per_family=cfg.statement_generation.max_groups_per_family,
+            family_index=family_index,
+            retrieval_panel=retrieval_panel,
+            retrieval_contract_min_agreement=cfg.mcp_search.retrieval_contract.min_agreement,
+            retrieval_contract_top_k_per_table=cfg.mcp_search.retrieval_contract.top_k_per_table,
+            retrieval_contract_max_top_k=cfg.mcp_search.retrieval_contract.max_top_k,
+            retrieval_contract_max_residual_siblings=cfg.mcp_search.retrieval_contract.max_residual_siblings,
+            retrieval_contract_single_table_top_k=cfg.mcp_search.retrieval_contract.single_table_top_k,
+            generate_reference_questions=cfg.statement_generation.generate_reference_questions,
         )

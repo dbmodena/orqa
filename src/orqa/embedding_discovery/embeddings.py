@@ -2,8 +2,9 @@
 Metadata embeddings for candidates discovery.
 
 Builds one text document per dataset from the raw normalized metadata
-(title, publisher, responsible entity, temporal coverage, tags, per-column
-name/label/type, description), fitted to the embedding model's token limit;
+(title, resource name, publisher, responsible entity, temporal coverage, tags,
+per-column name/label/type, resource description, description), fitted to the
+embedding model's token limit;
 embeds them through :class:`EmbeddingClient` (the LiteLLM embedding API wrapper —
 see ``agent.llm_client.EmbeddingClient``) and caches the vectors on disk so
 reruns never re-pay the API cost for unchanged metadata.
@@ -90,15 +91,16 @@ def build_embedding_text(
     The embedding API cuts inputs past the model's token limit from the end,
     so the document is fitted to ``max_tokens`` here instead: the identifying
     fields and the column list come first and are kept whole, and the
-    description — usually the longest field — fills the remaining budget.
+    descriptions — usually the longest fields, the resource's own first —
+    fill the remaining budget.
 
     Falls back to the CSV header (via a zero-row polars scan) when the
     metadata carries no column information (CKAN portals).
     """
-    lines = [
-        f"Title: {record.get('title') or ''}",
-        f"Publisher: {record.get('publisher') or ''}",
-    ]
+    lines = [f"Title: {record.get('title') or ''}"]
+    if record.get("resource_name"):
+        lines.append(f"Resource: {record['resource_name']}")
+    lines.append(f"Publisher: {record.get('publisher') or ''}")
     if record.get("responsible_entity"):
         lines.append(f"Responsible entity: {record['responsible_entity']}")
     if record.get("temporal_coverage"):
@@ -107,12 +109,19 @@ def build_embedding_text(
     lines.extend(_column_lines(record, dataset_path, scan_opts))
 
     text = "\n".join(lines)
-    description = record.get("description")
-    if description:
-        remaining = max_tokens - _count_tokens(f"{text}\nDescription: ")
-        description = _truncate_to_tokens(description, remaining)
-        if description:
-            text = f"{text}\nDescription: {description}"
+    # The resource's own description goes first: it is specific to this file,
+    # while the dataset description is shared by all of the dataset's files.
+    for label, key in (
+        ("Resource description", "resource_description"),
+        ("Description", "description"),
+    ):
+        value = record.get(key)
+        if not value:
+            continue
+        remaining = max_tokens - _count_tokens(f"{text}\n{label}: ")
+        value = _truncate_to_tokens(value, remaining)
+        if value:
+            text = f"{text}\n{label}: {value}"
     return _truncate_to_tokens(text, max_tokens)
 
 
@@ -180,6 +189,32 @@ class EmbeddingCache:
         with open(tmp_manifest, "w") as f:
             json.dump(manifest, f)
         os.replace(tmp_manifest, self.manifest_path)
+
+    def seed_from(self, other: "EmbeddingCache") -> int:
+        """Copy every vector+manifest entry ``other`` has that this cache
+        lacks, so a second cache covering a wider record set (e.g. the
+        search-embeddings cache, which also embeds records with no local
+        file) never re-pays the API cost for vectors discovery already
+        computed. Entries this cache already has win — never overwritten —
+        so re-seeding after a partial run only fills genuine gaps.
+
+        Returns how many entries were copied. No-ops (returns 0) when
+        ``other`` has nothing cached yet.
+        """
+        vectors, manifest = self._load()
+        other_vectors, other_manifest = other._load()
+
+        missing = [dataset_id for dataset_id in other_vectors if dataset_id not in vectors]
+        if not missing:
+            return 0
+
+        for dataset_id in missing:
+            vectors[dataset_id] = other_vectors[dataset_id]
+            if dataset_id in other_manifest:
+                manifest[dataset_id] = other_manifest[dataset_id]
+
+        self._save(vectors, manifest)
+        return len(missing)
 
     def get_or_compute(
         self, texts_by_id: dict[str, str], client: EmbeddingClient

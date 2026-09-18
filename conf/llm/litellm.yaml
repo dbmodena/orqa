@@ -62,6 +62,19 @@ temperature: 0.1
 retry_delay: 10.0
 enable_json_mode: true
 
+# Provider throttling (HTTP 429) is retried on its OWN budget, separate from
+# max_retries above: a throttle is not a bad answer from the model, so it must
+# not consume the attempts reserved for correcting a malformed response.
+# OCI's on-demand limit is applied by dynamic throttling — undocumented, and
+# moving with overall demand plus the tenancy's own recent throughput — so
+# there is no request rate a caller can stay under by construction; Oracle's
+# guidance is to delay after a rejection, and warns that retrying rapidly
+# instead drives further rejections. Delay is exponential from
+# throttle_base_delay, capped at throttle_max_delay, with full jitter.
+throttle_max_retries: 6
+throttle_base_delay: 5.0
+throttle_max_delay: 120.0
+
 
 # Judge panels: each panel is a list of small models that judge the same
 # artifact independently; approval is decided by majority vote. Each entry is
@@ -131,6 +144,14 @@ benchmark_table_selection:
 benchmark_solver_code:
   module: "utility.structured_outputs"
   class: "SolverCode"
+
+# Per-table decomposed reference questions for an approved multi-table query
+# (orqa.agent.agents.ReferenceQuestionAgent) — deliberately its own minimal
+# schema, not query_planner's, so this call carries none of a full plan's
+# fields (steps/difficulty/topic/story/...).
+reference_questions:
+  module: "utility.structured_outputs"
+  class: "ReferenceQuestionSet"
 
 # Local Ollama setup
 # model: ollama_chat/llama3.3:latest

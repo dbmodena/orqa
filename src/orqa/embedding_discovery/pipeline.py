@@ -176,6 +176,75 @@ def build_embedding_texts(cfg: OrQAConfig, max_tokens: int) -> dict[str, str]:
     return texts
 
 
+def embed_search_metadata(cfg: OrQAConfig) -> tuple[list[str], "pl.DataFrame | None"]:
+    """Embed EVERY normalized metadata record — not just the ones discovery
+    indexes (see :func:`build_embedding_texts`) — into a SEPARATE cache
+    (``candidates_discovery/search_embeddings.npz``).
+
+    Only about half a typical CKAN portal's records have a local downloaded
+    file; ``HybridDatasetIndex`` previously gave every record WITHOUT one a
+    semantic score of 0 outright, making retrieval strictly easier for a
+    gold table (which always has a local file, hence always a vector) than
+    for its non-downloaded siblings — an asymmetry the retrievability gate's
+    ``dense_question`` retriever would otherwise inherit. Covering every
+    record removes it.
+
+    Records WITH a local file are embedded with the SAME text
+    ``build_embedding_texts`` would use (``dataset_path=file``, keyed by the
+    file stem, so the content hash matches) and this cache is seeded from
+    discovery's own cache first (see ``EmbeddingCache.seed_from``), so those
+    vectors are never paid for twice. Records with no local file are
+    embedded from metadata alone (``dataset_path=None``), keyed by
+    ``resource_id`` — the only key available for them.
+    """
+    client = EmbeddingClient(
+        cfg.llm_config_path / "litellm.yaml",
+        batch_size=cfg.candidates_discovery.embedding_batch_size,
+    )
+    max_tokens = embedding_max_input_tokens(client.model)
+    raw_metadata = load_raw_normalized_metadata(cfg.normalized_metadata_filepath)
+    scan_opts = cfg.polars_opts.scan
+
+    local_stems: dict[str, Path] = {}
+    if cfg.datasets_path.exists():
+        for filepath in sorted(cfg.datasets_path.iterdir()):
+            if filepath.is_file():
+                local_stems[remove_file_extension(filepath.name)] = filepath
+
+    texts: dict[str, str] = {}
+    covered_resource_ids: set[str] = set()
+    for stem, filepath in local_stems.items():
+        resource_id = dataset_id_to_resource_id(stem)
+        record = raw_metadata.get(resource_id)
+        if record is None:
+            continue
+        texts[stem] = build_embedding_text(
+            record, dataset_path=filepath, scan_opts=scan_opts, max_tokens=max_tokens
+        )
+        covered_resource_ids.add(resource_id)
+
+    for resource_id, record in raw_metadata.items():
+        if resource_id in covered_resource_ids:
+            continue
+        texts[resource_id] = build_embedding_text(
+            record, dataset_path=None, max_tokens=max_tokens
+        )
+
+    search_cache = EmbeddingCache(cfg.candidates_discovery.search_embeddings_path)
+    discovery_cache_path = cfg.candidates_discovery.embeddings_cache_path
+    if discovery_cache_path is not None and Path(discovery_cache_path).exists():
+        seeded = search_cache.seed_from(EmbeddingCache(discovery_cache_path))
+        if seeded:
+            print(f"Seeded {seeded} vector(s) from the discovery embeddings cache.")
+
+    ids, vectors = search_cache.get_or_compute(texts, client)
+    print(
+        f"Search embeddings: {len(ids)}/{len(texts)} normalized metadata "
+        f"record(s) now have a vector."
+    )
+    return ids, vectors
+
+
 def is_resumable(cfg: OrQAConfig) -> bool:
     """Check if there are intermediate result files to resume from."""
     p = cfg.candidates_discovery.tasks_results_path

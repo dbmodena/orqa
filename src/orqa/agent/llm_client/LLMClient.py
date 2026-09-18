@@ -1,7 +1,9 @@
+import random
 import time
 from pathlib import Path
 from typing import Any
 
+import litellm
 import yaml
 from litellm import Router
 
@@ -30,10 +32,73 @@ class LLMClient:
         self.temperature = self.config.get("temperature", 0.2)
         self.max_retries = self.config.get("max_retries", 3)
         self.retry_delay = self.config.get("retry_delay", 1.0)
+        # Provider THROTTLING is retried on its own budget, separate from
+        # max_retries: a 429 is not a bad answer from the model, and letting
+        # it burn the attempts reserved for correcting a malformed response
+        # means one throttled call can fail a request the model never got to
+        # answer. See _completion_with_backoff.
+        self.throttle_max_retries = self.config.get("throttle_max_retries", 6)
+        self.throttle_base_delay = self.config.get("throttle_base_delay", 5.0)
+        self.throttle_max_delay = self.config.get("throttle_max_delay", 120.0)
         self.enable_json_mode = self.config.get("enable_json_mode", True)
         self.provider_params = self.config.get("provider_params", {}) or {}
         # 3. Setup router LAST (depends on provider_params being set)
         self.router = self._setup_router()
+
+    @staticmethod
+    def is_throttled(exc: BaseException) -> bool:
+        """Whether ``exc`` is the provider refusing on rate, not on content.
+
+        Matched on the message rather than the exception type because
+        LiteLLM surfaces OCI throttling as a generic ``APIConnectionError``
+        wrapping the provider payload (``OciException - {"code": "429",
+        "message": "Service request limit is exceeded, request is throttled
+        for tenant:..."}``), so ``RateLimitError`` alone never fires.
+        """
+        if isinstance(exc, getattr(litellm, "RateLimitError", ())):
+            return True
+        text = str(exc).lower()
+        return (
+            "429" in text
+            or "rate limit" in text
+            or "ratelimit" in text
+            or "too many requests" in text
+            or "request limit is exceeded" in text
+            or "throttle" in text
+        )
+
+    def _completion_with_backoff(self, completion_args: dict) -> Any:
+        """Router call that absorbs provider throttling by backing off.
+
+        OCI's on-demand limit is applied by DYNAMIC throttling: the ceiling
+        is undocumented, moves with overall demand, and is steered partly by
+        a tenancy's own recent throughput, so there is no fixed request rate
+        a caller can stay under by construction. Oracle's guidance is to
+        delay after a rejection, and warns that retrying rapidly instead
+        drives further rejections and can get a client temporarily blocked.
+
+        Exponential with FULL JITTER (a uniform draw below the ceiling, not
+        the ceiling itself): every worker that gets throttled by the same
+        capacity dip would otherwise wake at the same instant and recreate
+        the burst that caused it.
+        """
+        for attempt in range(self.throttle_max_retries + 1):
+            try:
+                return self.router.completion(**completion_args)
+            except Exception as exc:
+                if not self.is_throttled(exc) or attempt == self.throttle_max_retries:
+                    raise
+                ceiling = min(
+                    self.throttle_base_delay * (2 ** attempt), self.throttle_max_delay
+                )
+                delay = random.uniform(0, ceiling)
+                logger.warning(
+                    "Provider throttled the request (attempt %d/%d); backing off %.1fs",
+                    attempt + 1,
+                    self.throttle_max_retries,
+                    delay,
+                )
+                time.sleep(delay)
 
     def _get_provider_from_model(self, model: str) -> str:
         """Extract provider name from model string."""
@@ -167,7 +232,7 @@ class LLMClient:
             try:
                 #print(f"Attempt {attempt + 1}/{self.max_retries}...")
                 completion_args["messages"] = sanitize_messages(messages)
-                response = self.router.completion(**completion_args)
+                response = self._completion_with_backoff(completion_args)
                 usage = response["usage"]
                 usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
                 usage_total["completion_tokens"] += usage.get("completion_tokens", 0)
@@ -179,9 +244,14 @@ class LLMClient:
             except Exception as e:
                 last_error = e
                 logger.error("Error on attempt %d: %s", attempt + 1, e)
-                # Wait before retry
                 if attempt < self.max_retries - 1:
-                    messages.append({"role": "user", "content": str(e)})
+                    # Only a CONTENT failure is worth showing the model; a
+                    # throttle that outlived its own backoff budget says
+                    # nothing about the answer, and appending it would
+                    # re-send a LARGER prompt into a provider already
+                    # refusing on load.
+                    if not self.is_throttled(e):
+                        messages.append({"role": "user", "content": str(e)})
                     logger.debug("Retrying in %s seconds...", self.retry_delay)
                     time.sleep(self.retry_delay)
         # All retries exhausted

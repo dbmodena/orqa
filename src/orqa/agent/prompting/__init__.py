@@ -28,6 +28,7 @@ from .prompts import (
     BenchmarkSearchKeywordsPrompt,
     BenchmarkTableSelectionPrompt,
     BenchmarkSolverCodePrompt,
+    ReferenceQuestionsPrompt,
     build_generation_prompt,
 )
 from .models import (
@@ -64,6 +65,7 @@ __all__ = [
     "BenchmarkSearchKeywordsPrompt",
     "BenchmarkTableSelectionPrompt",
     "BenchmarkSolverCodePrompt",
+    "ReferenceQuestionsPrompt",
     "build_generation_prompt",
     "SQLPlanStep",
     "PandasPlanStep",

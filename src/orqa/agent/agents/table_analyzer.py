@@ -2,9 +2,9 @@
 
 Analysing one table per LLM call would scale analysis cost with the number of
 tables. :class:`TableAnalyzer` instead replaces that per-table loop with a
-single batched call: one prompt carries the columns, sample rows, and
-metadata for *every* table and the model returns a ``TableAnalyses`` payload
-(one entry per alias).
+single batched call: one prompt carries the columns, scope and breakdowns (see
+:func:`render_table_facts`), a random sample of rows, and metadata for *every*
+table and the model returns a ``TableAnalyses`` payload (one entry per alias).
 
 The analyzer owns a dedicated :class:`TableAnalyzerLLMClient` rather than
 sharing the generation pipeline's ``LLMClientStatementGenerator`` instance.
@@ -29,29 +29,45 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
+from pandas.api import types as ptypes
+
 from ..llm_client.LLMClientStructured import LLMClientStructured
 from ..prompting.prompts import TableAnalyzerBatchPrompt
-from ...utils import shield_dataframe_for_prompt
+from ...utils import shield_dataframe_for_prompt, summarize_large_value
 
 logger = logging.getLogger(__name__)
 
 # Bump when the analysis prompt, or the metadata it is shown, changes in a way
 # that should regenerate cached descriptions/keywords: entries stored under
 # another version are cache misses.
-ANALYSIS_VERSION = 2
+ANALYSIS_VERSION = 3
 
 # The only metadata fields shown to the analyzer: what the table is, who is
-# responsible for it and which period it covers. Ids, URLs, format and
-# publication dates add noise, and a publication date is easily mistaken for
-# the period the data covers.
+# responsible for it and which period it covers. ``title`` and ``description``
+# are shared by every file of a dataset, while ``resource_name`` and
+# ``resource_description`` describe this file and are often the only place its
+# snapshot date appears ("2021-12-31 Organogram (Junior)"). Ids, URLs, format
+# and publication dates add noise, and a publication date is easily mistaken
+# for the period the data covers.
 DISTINGUISHING_METADATA_FIELDS = (
     "title",
+    "resource_name",
+    "resource_description",
     "description",
     "publisher",
     "responsible_entity",
     "temporal_coverage",
     "tags",
 )
+
+# Rows shown per table, drawn at random: the first rows of a sorted file share
+# one unit, region or year, which then reads as the scope of the whole table.
+SAMPLE_ROWS = 5
+# A varying column with at most this many distinct values is a breakdown.
+BREAKDOWN_MAX_VALUES = 100
+# A breakdown with at most this many values has them all listed. A numeric
+# column with more values is a measure rather than a breakdown.
+BREAKDOWN_LISTED_VALUES = 10
 
 
 def distinguishing_metadata(metadata: dict) -> dict:
@@ -61,6 +77,140 @@ def distinguishing_metadata(metadata: dict) -> dict:
         for key in DISTINGUISHING_METADATA_FIELDS
         if metadata.get(key) not in (None, "", [], "N/A")
     }
+
+
+# The metadata shown next to each table's analysis to the planner and the plan
+# judges: the portal's own name, publisher and period for the file, so a
+# question's vintage and program come from the source rather than from the
+# analysis summary. The dataset description is left out: it is long, shared by
+# every file of the dataset, and can state a scope the table does not have.
+PORTAL_METADATA_FIELDS = (
+    "title",
+    "resource_name",
+    "resource_description",
+    "publisher",
+    "responsible_entity",
+    "temporal_coverage",
+)
+
+
+def portal_metadata(metadata: dict) -> dict:
+    """Project normalized metadata onto the short fields naming a table's source."""
+    return {
+        key: summarize_large_value(metadata[key])
+        for key in PORTAL_METADATA_FIELDS
+        if metadata.get(key) not in (None, "", [], "N/A")
+    }
+
+
+# The metadata shown wherever a whole portal record would otherwise be dumped
+# into a prompt — statement generation and the discovery prompts, all of which
+# render it through ``DatasetDescription``. Same reasoning as
+# DISTINGUISHING_METADATA_FIELDS above, kept as its own list because that one
+# is tied to ANALYSIS_VERSION: changing what the analyzer sees invalidates
+# cached descriptions, which has nothing to do with what a generation prompt
+# should show.
+#
+# `columns` is deliberately absent: every template that renders this also
+# prints the table's real schema right below it (DatasetDescription's own
+# "Column Details", the light schema block), so the record's column list is
+# redundant where it exists at all — and on CKAN portals it is empty in every
+# single record. Ids, URLs, `format` and the publication timestamps are left
+# out as noise; `created_at`/`modified_at` are worse than noise, being easy to
+# read as the period the data covers.
+PROMPT_METADATA_FIELDS = (
+    "title",
+    "resource_name",
+    "resource_description",
+    "description",
+    "publisher",
+    "responsible_entity",
+    "temporal_coverage",
+    "tags",
+)
+
+
+def prompt_metadata(metadata: dict) -> dict:
+    """Project a portal record onto the fields worth showing a prompt.
+
+    Empty fields are dropped rather than rendered: a portal that publishes
+    none of them would otherwise spend the prompt's attention on
+    ``responsible_entity: None, tags: [], temporal_coverage: None`` — on the
+    UK CKAN corpus those are empty in 100%, 67% and 97% of records.
+    """
+    return {
+        key: summarize_large_value(metadata[key])
+        for key in PROMPT_METADATA_FIELDS
+        if metadata.get(key) not in (None, "", [], "N/A")
+    }
+
+
+def scope_values(df: Any) -> dict:
+    """``{column: value}`` for every column holding exactly ONE distinct
+    (non-null) value across the whole table — the same single-value test
+    ``render_table_facts`` reports as "Scope", factored out so a caller that
+    only needs the raw values (see ``orqa.agent.utility.retrievability_gate
+    .build_contract``'s data-scope facet fallback) doesn't have to re-derive
+    them by parsing that prose back out.
+    """
+    result: dict = {}
+    for column in df.columns:
+        values = df[column].dropna()
+        if int(values.nunique()) == 1:
+            result[column] = summarize_large_value(str(values.iloc[0]))
+    return result
+
+
+def render_table_facts(df: Any) -> str:
+    """Render what every row of a table shares and what the rows span.
+
+    Computed over all rows, so the analyzer can tell the table's scope from
+    values that merely appear in its sample rows: a column with a single value
+    is scope ("Organisation = Home Office in all 5,473 rows"), a column with
+    few values is a breakdown the table covers in full ("Unit: 56 values").
+    """
+    num_rows = len(df)
+    scope: List[str] = []
+    breakdowns: List[str] = []
+    scope_column_values = scope_values(df)
+    for column in df.columns:
+        values = df[column].dropna()
+        distinct = int(values.nunique())
+        if column in scope_column_values:
+            value = scope_column_values[column]
+            if len(values) == num_rows:
+                rows = f"all {num_rows:,} rows"
+            else:
+                rows = f"{len(values):,} of {num_rows:,} rows, the others empty"
+            scope.append(f"- {column} = {value} in {rows}")
+        elif distinct <= BREAKDOWN_LISTED_VALUES:
+            if distinct:
+                listed = ", ".join(_sorted_values(values))
+                breakdowns.append(f"- {column}: {distinct} values ({listed})")
+        elif distinct <= BREAKDOWN_MAX_VALUES and not (
+            ptypes.is_numeric_dtype(values) and not ptypes.is_bool_dtype(values)
+        ):
+            breakdowns.append(f"- {column}: {distinct} values")
+
+    return "\n".join(
+        [
+            f"Rows: {num_rows:,}",
+            "Scope (columns with a single value):",
+            *(scope or ["- none"]),
+            "Breakdowns (columns with few values; the table covers all of them):",
+            *(breakdowns or ["- none"]),
+        ]
+    )
+
+
+def _sorted_values(values: Any) -> List[str]:
+    """Distinct values of a series, in natural order when they compare."""
+    unique = list(values.unique())
+    try:
+        unique.sort()
+    except TypeError:
+        unique.sort(key=str)
+    return [summarize_large_value(str(value)) for value in unique]
 
 
 class TableAnalyzerLLMClient(LLMClientStructured):
@@ -98,6 +248,8 @@ class TableAnalyzer:
             served from this cache instead of a new LLM call; only the
             never-seen tables of a batch go to the model. ``None`` disables
             caching entirely.
+        seed: Seed for the random sample of rows shown per table, so reruns
+            show the same rows.
     """
 
     def __init__(
@@ -105,9 +257,11 @@ class TableAnalyzer:
         config_path: Path,
         client: Optional[Any] = None,
         cache_path: Optional[Path] = None,
+        seed: int = 0,
     ):
         self._client = client or TableAnalyzerLLMClient(config_path)
         self._cache_path = Path(cache_path) if cache_path is not None else None
+        self._seed = seed
         # Token usage from the most recent batched call, so callers can
         # accumulate it into the run's total token usage without changing
         # the return type.
@@ -250,18 +404,20 @@ class TableAnalyzer:
         self,
         alias_names: List[str],
         columns_per_table: List[List[str]],
+        facts_per_table: List[str],
         samples_per_table: List[List[dict]],
         metadata_list: List[dict],
         languages: List[str],
     ) -> str:
-        """Build a single prompt carrying every table's columns/samples/metadata."""
+        """Build a single prompt carrying every table's columns/facts/samples/metadata."""
         table_blocks = []
         for idx, alias in enumerate(alias_names):
             block = (
                 f"Alias: {alias}"
                 f"\nColumns:\n{json.dumps(columns_per_table[idx], indent=2, ensure_ascii=False)}"
                 f"\nMetadata:\n{json.dumps(distinguishing_metadata(metadata_list[idx]), indent=2, ensure_ascii=False, default=str)}"
-                f"\nSample rows:\n{json.dumps(samples_per_table[idx], indent=2, ensure_ascii=False, default=str)}"
+                f"\n{facts_per_table[idx]}"
+                f"\nRandom sample rows:\n{json.dumps(samples_per_table[idx], indent=2, ensure_ascii=False, default=str)}"
             )
             table_blocks.append(block)
 
@@ -365,8 +521,11 @@ class TableAnalyzer:
                 [f"{col} ({dfs[i][col].dtype})" for col in dfs[i].columns]
                 for i in miss_indices
             ]
+            facts_per_table = [render_table_facts(dfs[i]) for i in miss_indices]
             samples_per_table = [
-                shield_dataframe_for_prompt(dfs[i].head(3)).to_dict(orient="records")
+                shield_dataframe_for_prompt(
+                    dfs[i].sample(n=min(SAMPLE_ROWS, len(dfs[i])), random_state=self._seed)
+                ).to_dict(orient="records")
                 for i in miss_indices
             ]
             miss_metadata = [metadata_list[i] for i in miss_indices]
@@ -374,6 +533,7 @@ class TableAnalyzer:
             prompt = self._build_batch_prompt(
                 miss_aliases,
                 columns_per_table,
+                facts_per_table,
                 samples_per_table,
                 miss_metadata,
                 detected_languages,

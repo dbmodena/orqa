@@ -1,7 +1,7 @@
 seed: 42
 source: ckan
-flat_layout: false
-#write_path: "/home/bilel/gits/orqa/data/uk"
+flat_layout: true
+write_path: "/home/bilel/gits/orqa/data/uk"
 
 # Folder under this target's data directory that holds the tables every step
 # after `clean` reads (index, candidates-discovery, query generation,
@@ -12,7 +12,7 @@ flat_layout: false
 # prepared table folder, e.g. "cleaned_datasets" -> .../cleaned_datasets/parquet.
 # The crawler always downloads into the literal "datasets" folder regardless,
 # so `crawl`/`clean` keep working when this is overridden.
-#table_dir: "cleaned_datasets"
+table_dir: "clean_datasets"
 pandas:
   read:
     csv:
@@ -112,12 +112,83 @@ tasks:
     max_response_tokens: 300
     max_memory_usage: 512
     max_pool_time: 60
+    enable_single_table: "yes"
+    single_table_query_count: 150
+    multi_table_query_count: 100
     languages: ["English"]
+    # Family-stratified sampling: no single CKAN dataset family (83% of UK
+    # gold tables belong to one with other files, median 38, max 1,426)
+    # contributes more than this many single-table candidates until every
+    # family has had a turn.
+    max_groups_per_family: 2
+    # For each approved multi-table query, also generate one per-table
+    # question DECOMPOSED from that query's own plan (each table's judged
+    # "reason" — its business-level contribution to the question), e.g. a
+    # January+February parking-tickets question yields a January-only and a
+    # February-only reference question, each gated at mcp_search.
+    # retrieval_contract.single_table_top_k. Logged as `reference_questions`
+    # metadata on the approved query — never sampled as its own case.
+    # False by default: costs one extra small LLM call per approved query.
+    generate_reference_questions: false
 
   # Reverse-index backend — used by the plan judge's retrievability check and the solve-benchmark step (see orqa.benchmark.solve)
   mcp_search:
     backend: builtin  # local BM25 index under <data_path>/index/ — no external service needed
     elasticsearch_url: http://localhost:9200
+    # Use the existing semantic-discovery metadata vectors to rerank the
+    # complete lexical candidate set. Both components are normalized to
+    # [0, 1] before fusion, and every search consumer uses this same index.
+    hybrid_search_enabled: true
+    lexical_weight: 0.5
+    semantic_weight: 0.5
+    # How lexical/semantic get combined (see orqa.benchmark.hybrid_index):
+    # "weighted_score" (default, unchanged) averages the two normalized
+    # scores using the weights above; "rrf" instead fuses on each side's
+    # RANK (LakeGen's own Solr setup does this) — a candidate that ranks
+    # #1 on EITHER side alone already scores well, no need to also be
+    # strong on the other. lexical_weight/semantic_weight are ignored
+    # under "rrf".
+    fusion_method: weighted_score
+    rrf_k: 60
+    query_embedding_input_type: search_query
+    query_embedding_cache_size: 2048
+    # Adaptive top-K for the plan judge's keyword-searchability gate: each
+    # plan's own K = round(number_of_tables_in_plan * this coefficient), so
+    # a plan joining more tables is held to a wider net than a single-table
+    # one instead of every plan sharing one fixed K.
+    keyword_search_top_k_coefficient: 5.0
+    # Whether the PRE-planning retrievability check (run once per table
+    # group, before any LLM call) may abort a group as "unretrievable_group"
+    # when its bounded metadata-vocabulary search cannot surface every table
+    # within top-K.
+    # False: the check still runs and still hands the planner a verified
+    # keyword anchor when one is found — only the abort-on-failure half is
+    # disabled, so an unresolved group just proceeds to planning without
+    # an anchor instead of being skipped outright.
+    gate_unretrievable_groups: false
+    # Master on/off switch for the retrieval gate as a whole — the
+    # PRE-planning keyword suggestion above AND the plan judge's reactive
+    # keyword-searchability layer. Keep this enabled so hybrid retrieval is
+    # actually used to generate and verify the suggested keyword anchor.
+    retrieval_gate_enabled: true
+    # Two-level retrievability contract (see
+    # orqa.agent.utility.retrievability_gate): Level A checks a question's
+    # CKAN dataset FAMILY is reachable by a panel of retrievers; Level B
+    # checks the question states whatever distinguishes the gold FILE from
+    # its same-family siblings (83% of UK gold tables have siblings, median
+    # 38, max 1,426).
+    retrieval_contract:
+      enabled: true
+      retrievers: [lexical_question, dense_question, llm_keywords]
+      min_agreement: 2
+      top_k_per_table: 10
+      max_top_k: 20          # LakeGen's retrieval pool
+      # Single-table plans (exactly one table) target literal rank 1
+      # instead of the top_k_per_table/max_top_k window above — a keyword
+      # combination that surfaces the table at all reaches rank 1 for no
+      # extra search cost when there's only one target.
+      single_table_top_k: 1
+      max_residual_siblings: 30
 
   # Round-trip benchmark solver (step: solve-benchmark) — see
   # orqa.benchmark.solve / src/orqa/benchmark/readme.md.
@@ -128,3 +199,6 @@ tasks:
     # Valentine matcher for that pairwise pass — schema-only and fast:
     # up to C(top_k_tables, 2) pairs get matched per question.
     matcher: similarity_flooding
+  judges:
+    plan_mode: mono
+    code_mode: mono

@@ -9,7 +9,8 @@ exist, and recreated if the metadata file changed since it was built
 (a fingerprint of the metadata file is stored in the index _meta).
 
 Ranking is Elasticsearch's BM25 with per-field boosts mirroring the
-built-in backend (title > tags > columns > publisher > description) and
+built-in backend (title = resource name > tags > columns > publisher >
+description) and
 an accent-folding analyzer for the multilingual portals.
 """
 
@@ -26,11 +27,12 @@ from orqa.benchmark.index import SearchResult, _record_field_texts
 
 # Bumped whenever the mapping or the indexing scheme changes, to force
 # a rebuild of indexes created by older versions of this module.
-ES_INDEX_FORMAT_VERSION = 1
+ES_INDEX_FORMAT_VERSION = 2
 
 # Query-time field boosts, mirroring index.FIELD_WEIGHTS
 SEARCH_FIELDS = [
     "title^3",
+    "resource_name^3",
     "tags^2.5",
     "columns_text^2",
     "publisher^1.5",
@@ -61,6 +63,7 @@ _MAPPINGS_PROPERTIES = {
     "resource_id": {"type": "keyword"},
     "dataset_id": {"type": "keyword"},
     "title": _TEXT,
+    "resource_name": _TEXT,
     "tags": _TEXT,
     "columns_text": _TEXT,
     "publisher": _TEXT,
@@ -186,6 +189,7 @@ class ESDatasetIndex:
                 "resource_id": resource_id,
                 "dataset_id": record.get("dataset_id", resource_id),
                 "title": fields["title"],
+                "resource_name": fields["resource_name"],
                 "tags": fields["tags"],
                 "columns_text": fields["columns"],
                 "publisher": fields["publisher"],

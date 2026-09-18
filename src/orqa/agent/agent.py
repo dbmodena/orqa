@@ -12,16 +12,27 @@ import pandas as pd
 from ..queries.query_execution import QueryExecutor
 from .utility.difficulty_estimator import estimate_plan_tier
 from .utility.generation_coordinator import GenerationCoordinator
-from .utility.keyword_searchability import check_keyword_searchability
 from .utility.plan_code_alignment import alignment_warning
 from .utility.keyword_suggestion import suggest_retrievable_keywords
+from .utility.retrievability_gate import (
+    RetrievalContract,
+    build_contract,
+    check_question_retrievability,
+)
 from .agents.TaskProposer import PairTaskSelectorLLMClient, TaskProposerLLMClient
 from .agents.StatementJudge import LLMStatementJudge
 from .agents.JudgePanel import JudgePanel
 from .agents.QueryPlanner import QueryPlanner
+from .agents.ReferenceQuestionAgent import ReferenceQuestionAgent
 from .agents.StatementClient import LLMClientStatementGenerator
 from .agents.StatementValidator import LLMStatementValidator
-from .agents.table_analyzer import TableAnalyzer
+from .agents.table_analyzer import (
+    TableAnalyzer,
+    portal_metadata,
+    prompt_metadata,
+    render_table_facts,
+    scope_values,
+)
 from ..utils.pipeline_logger import PipelineLogger
 from .prompting import (
     CandidatesDiscoveryPrompt,
@@ -76,6 +87,12 @@ JUDGE_CONCURRENCY = 6
 # re-judged up to MAX_PLAN_CORRECTIONS times.
 MAX_QUERY_CORRECTIONS = 3
 MAX_PLAN_CORRECTIONS = 3
+# A per-table reference question (see _generate_reference_questions_for_query)
+# that misses its own top-1 gate gets a small follow-up call scoped to just
+# that table before it's recorded as unretrievable — bounded low since each
+# round is a real LLM call, and the gate itself already hands back the exact
+# missing anchor terms/facets, so a miss is rarely more than one word away.
+MAX_REFERENCE_QUESTION_CORRECTIONS = 2
 
 # Output-token cap for every judge call (code panel, plan panel, single-judge
 # fallback). Must leave headroom for REASONING models (gemini-2.5-flash,
@@ -149,7 +166,7 @@ class CandidatesDiscoveryAgent:
                 dataset_info["dataset_name"],
                 dataset_info["num_rows"],
                 dataset_info["num_columns"],
-                metadata,
+                prompt_metadata(metadata or {}),
                 dataset_info["columns_details"],
                 dataset_info["sample_data"],
             )
@@ -188,7 +205,7 @@ class PairTaskSelectionAgent:
             dataset_info["dataset_name"],
             dataset_info["num_rows"],
             dataset_info["num_columns"],
-            metadata,
+            prompt_metadata(metadata or {}),
             dataset_info["columns_details"],
             dataset_info["sample_data"],
         )
@@ -264,7 +281,9 @@ class TableAnalysisAgent:
         seed: int = 0,
         analyzer: TableAnalyzer | None = None,
     ):
-        self._analyzer = analyzer or TableAnalyzer(config_path, cache_path=cache_path)
+        self._analyzer = analyzer or TableAnalyzer(
+            config_path, cache_path=cache_path, seed=seed
+        )
         self.languages = languages if languages is not None else ["English"]
         self.bad_tokens = bad_tokens or []
         self.max_cols = max_cols
@@ -480,6 +499,11 @@ class JudgementResponseAgent:
         # Cache of the rendered judge instructions, so concurrent calls don't
         # re-read/re-format the same markdown on every call.
         self._judge_instructions_cache: dict = {}
+        # Scope/breakdown facts per table alias (see
+        # table_analyzer.render_table_facts), computed once per run and shown
+        # next to each table's `reason`, which can repeat a scope the table
+        # does not have.
+        self._table_facts: dict = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -632,6 +656,15 @@ class JudgementResponseAgent:
             self._dataframes = self.executor.load_tables(self.entry.get("tables", {}))
         return self._dataframes
 
+    def _table_facts_for(self, alias: Any, dataframes: dict) -> list:
+        """Scope/breakdown facts of one table, computed once per alias."""
+        if alias not in self._table_facts:
+            df = dataframes.get(alias)
+            self._table_facts[alias] = (
+                render_table_facts(df).splitlines() if df is not None else []
+            )
+        return self._table_facts[alias]
+
     def _execute_queries(self, queries: list) -> tuple[list, list]:
         # Build a set of dataset names so we can guard against them leaking
         # into columns_involved or code as column references.
@@ -682,9 +715,13 @@ class JudgementResponseAgent:
             # explicitly forbids re-judging table choice, so seeing the
             # justification must never be read as an invitation to
             # re-litigate it.
+            # Each table's `facts` (row count, scope, breakdowns) let the judge
+            # check that a scope the question names is filtered on, rather
+            # than taken from a `reason` that may overstate the table's scope.
             tables = copy.deepcopy(sanitized.get("tables", []))
             for table in tables:
                 table.pop("columns_involved", None)
+                table["facts"] = self._table_facts_for(table.get("name"), dataframes)
 
             try:
                 df_result = self.executor.execute_prepared(
@@ -1024,22 +1061,30 @@ class StatementOrchestrator:
         retrieval_gate_enabled: bool = True,
         plan_judge_count: Optional[int] = None,
         code_judge_count: Optional[int] = None,
+        family_index: Optional[Any] = None,
+        retrieval_panel: Optional[Any] = None,
+        retrieval_contract_min_agreement: int = 2,
+        retrieval_contract_top_k_per_table: int = 10,
+        retrieval_contract_max_top_k: int = 20,
+        retrieval_contract_max_residual_siblings: int = 30,
+        retrieval_contract_single_table_top_k: int = 1,
+        generate_reference_questions: bool = False,
     ):
         self.config_path = config_path
         self.kind = kind
         self.bad_tokens = bad_tokens
         # Reverse index (DatasetIndex/ESDatasetIndex, or None when
-        # unavailable) the plan judge's keyword-searchability check
-        # searches to verify a plan's tables are actually retrievable from
-        # its question's keywords — see
-        # orqa.agent.utility.keyword_searchability.check_keyword_searchability
+        # unavailable) the plan judge's retrievability check searches to
+        # verify a plan's QUESTION is actually retrievable — see
+        # orqa.agent.utility.retrievability_gate.check_question_retrievability
         # and its use in _judge_plans. `retrieval_gate_enabled=False`
         # (tasks.mcp_search.retrieval_gate_enabled in the workflow yaml) is
         # the master off switch for the retrieval gate as a whole — it's
-        # implemented by simply treating the index as unset here, since both
-        # the pre-planning keyword-suggestion check (below, in _run) and
-        # check_keyword_searchability already no-op to an automatic pass
-        # when the index is None, so nothing else needs to branch on this.
+        # implemented by simply treating the index (and, below,
+        # family_index/retrieval_panel) as unset here, since both the
+        # pre-planning keyword-suggestion check (below, in _run) and
+        # check_question_retrievability already no-op to an automatic pass
+        # when their inputs are None, so nothing else needs to branch on this.
         self._search_index = search_index if retrieval_gate_enabled else None
         # K for that check is adaptive, not fixed: each plan's own K is
         # round(len(plan_tables) * this coefficient) (see _judge_plans), so a
@@ -1052,6 +1097,25 @@ class StatementOrchestrator:
         # still runs and still hands the planner a verified anchor when one
         # is found — only the abort-on-failure half is gated.
         self._gate_unretrievable_groups = gate_unretrievable_groups
+        # The two-level retrievability CONTRACT (see
+        # orqa.agent.utility.retrievability_gate): family_index/
+        # retrieval_panel are None exactly when the contract is unavailable
+        # or disabled (tasks.mcp_search.retrieval_contract.enabled, or the
+        # master retrieval_gate_enabled switch) — same "None means off"
+        # convention as self._search_index above, so _run only needs to
+        # check for None rather than a separate enabled flag.
+        self._family_index = family_index if retrieval_gate_enabled else None
+        self._retrieval_panel = retrieval_panel if retrieval_gate_enabled else None
+        self._retrieval_contract_min_agreement = retrieval_contract_min_agreement
+        self._retrieval_contract_top_k_per_table = retrieval_contract_top_k_per_table
+        self._retrieval_contract_max_top_k = retrieval_contract_max_top_k
+        self._retrieval_contract_max_residual_siblings = retrieval_contract_max_residual_siblings
+        self._retrieval_contract_single_table_top_k = retrieval_contract_single_table_top_k
+        # Whether a MULTI-table run additionally generates one standalone,
+        # top-1-gated single-table question per table in the group — see
+        # _generate_reference_questions. Irrelevant in single mode (never
+        # read there).
+        self._generate_reference_questions = generate_reference_questions
         # code_judge_count is only STORED here — the code panel itself is
         # built later, per-run, by JudgementResponseAgent (see _run's Phase
         # 3), so it's threaded through there rather than constructed here.
@@ -1074,11 +1138,17 @@ class StatementOrchestrator:
         # descriptions/keywords (table id -> model -> analysis), so a table
         # already analysed by the configured model is served from disk.
         self._analyzer = analyzer or TableAnalyzer(
-            config_path, cache_path=analysis_cache_path
+            config_path, cache_path=analysis_cache_path, seed=seed
         )
         self._planner = planner or QueryPlanner(config_path, kind)
         self._generator = generator or GenerationCoordinator()
         self._validator = validator or LLMStatementValidator(config_path, kind)
+        # Per-table reference-question decomposition (see
+        # _generate_reference_questions_for_query) — only ever CALLED when
+        # generate_reference_questions is on, but constructed unconditionally
+        # here (mirrors _planner/_validator above): loading its config is
+        # cheap, no network call happens until .generate() is actually used.
+        self._reference_question_agent = ReferenceQuestionAgent(config_path)
         # Plan judge panel (judge_profiles.plan in the LLM yaml): N small
         # models vote each structured plan BEFORE code generation, in six
         # independent layers — question quality, step alignment, table
@@ -1353,19 +1423,35 @@ class StatementOrchestrator:
             #     the run starts correct instead of discovering
             #     retrievability by trial and error across correction
             #     rounds.
-            #   - Not found even after an exhaustive search: BM25 scoring is
-            #     a deterministic function of literal term overlap with a
-            #     table's own indexed text, so if no combination of the
-            #     tables' own real title/tags/columns/publisher vocabulary
-            #     can win, no natural-language question could either — this
-            #     group aborts HERE, before spending a single planning/
-            #     judging token on a run doomed the same way the reactive
-            #     gate would eventually catch it, just far more cheaply.
+            #   - Not found within the bounded metadata-vocabulary search:
+            #     proceed without an anchor, or abort when the workflow opts
+            #     into gate_unretrievable_groups. Under hybrid retrieval this
+            #     is not a proof about every possible natural-language synonym;
+            #     it only describes the candidate combinations actually tried.
             retrievable_keywords: Optional[list[str]] = None
             if self._search_index is not None:
                 plan_tables = [
-                    {"alias": alias, "resource_id": aliases.get(alias, alias)}
-                    for alias in aliases
+                    {
+                        "alias": alias,
+                        "resource_id": utils.dataset_id_to_resource_id(
+                            str(aliases.get(alias, alias))
+                        ),
+                        # The schema already loaded during preparation:
+                        # column names compete with title/tags/publisher as
+                        # keyword candidates (see _candidate_pools), and are
+                        # the only schema vocabulary available at all when
+                        # CKAN normalized metadata has `columns: []`.
+                        "columns": [str(column) for column in dfs[idx].columns],
+                        # The columns this group is joined/unioned on, from
+                        # the upstream match constraint — prioritized as
+                        # keyword candidates, since they are the only
+                        # vocabulary the whole group shares and what its
+                        # question will actually be phrased around.
+                        "link_columns": [
+                            str(column) for column in involved_cols.get(alias, [])
+                        ],
+                    }
+                    for idx, alias in enumerate(aliases)
                 ]
                 adaptive_top_k = self._adaptive_top_k(plan_tables)
                 suggestion = suggest_retrievable_keywords(
@@ -1379,27 +1465,29 @@ class StatementOrchestrator:
                         f"within top {adaptive_top_k} at ranks "
                         f"{suggestion['ranks']}"
                         + (
-                            " (needed column names too, not just title/tags/publisher)"
-                            if suggestion["used_fallback_fields"] else ""
+                            " (of which "
+                            f"{', '.join(suggestion['column_keywords'])} came "
+                            "from the tables' column schema rather than "
+                            "title/tags/publisher)"
+                            if suggestion["column_keywords"] else ""
                         ) + "."
                     )
                 else:
                     msg = (
-                        f"No keyword combination (searched {suggestion['iterations_used']} "
-                        f"candidates over title/tags/columns/publisher) surfaces "
-                        f"{', '.join(suggestion['missing_tables'])} within top "
-                        f"{adaptive_top_k} — this table group cannot be jointly "
-                        "retrieved by any natural-language question, regardless "
-                        "of phrasing."
+                        f"No tested keyword combination ({suggestion['iterations_used']} "
+                        f"search rounds, forward then backward, over title/resource "
+                        f"name/tags/publisher and the tables' own column names) "
+                        f"surfaces {', '.join(suggestion['missing_tables'])} within "
+                        f"top {adaptive_top_k} (best reached: "
+                        f"{suggestion['ranks']}); no verified keyword anchor was "
+                        "found within the bounded metadata-vocabulary search."
                     )
                     # Whether this actually ABORTS the group is a config
-                    # choice (tasks.mcp_search.gate_unretrievable_groups) —
-                    # the finding itself (no working keyword combination
-                    # exists) is unconditional and always logged; only the
+                    # choice (tasks.mcp_search.gate_unretrievable_groups).
+                    # The bounded-search miss is always logged; only the
                     # decision to skip planning over it is gated. When not
                     # gated, planning proceeds WITHOUT a verified anchor
-                    # (retrievable_keywords stays None) — the pre-existing
-                    # behavior from before this check existed.
+                    # (retrievable_keywords stays None).
                     if self._gate_unretrievable_groups:
                         self._log.error(msg + " Aborting (gate_unretrievable_groups: true).")
                         return self._assemble_result(
@@ -1428,11 +1516,134 @@ class StatementOrchestrator:
                         "individual plans later."
                     )
 
+            # ── Two-level retrieval contract ────────────────────────────────
+            # Level A (family reachable) + Level B (distinguishing details
+            # stated) — see orqa.agent.utility.retrievability_gate. Built
+            # once per table group, from the SAME plan_tables list above.
+            # Independent of the keyword-suggestion anchor computed just
+            # above: that anchor is advisory vocabulary only now (see
+            # QueryPlanner._render_retrievable_keywords) — THIS contract is
+            # what actually gates a plan's question, deterministically, in
+            # _judge_plans (check_question_retrievability).
+            retrieval_contract: Optional[RetrievalContract] = None
+            distinguishing_facets: Optional[dict] = None
+            if self._family_index is not None and self._search_index is not None:
+                group_datasets_path = Path(dataset_paths[0]).parent if dataset_paths else None
+                group_extension = (
+                    Path(dataset_paths[0]).suffix.lstrip(".") if dataset_paths else ""
+                )
+
+                def _scope_loader(resource_id: str, columns: Optional[list] = None):
+                    # Reads a SIBLING file from disk — only ever called for
+                    # residual siblings (capped at max_residual_siblings)
+                    # that metadata/word facets alone could not rule out.
+                    stem = self._family_index.stem(resource_id)
+                    if stem is None or group_datasets_path is None:
+                        return None
+                    filepath = group_datasets_path / f"{stem}.{group_extension}"
+                    if not filepath.exists():
+                        return None
+                    try:
+                        sib_df = utils.pd_read_dataset(
+                            filepath, opts={"csv": {"low_memory": False}}
+                        )
+                        sib_df = utils.clean_columns(sib_df)
+                    except Exception:
+                        return None
+                    if columns:
+                        available = [c for c in columns if c in sib_df.columns]
+                        if not available:
+                            return None
+                        sib_df = sib_df[available]
+                    return scope_values(sib_df)
+
+                retrieval_contract = build_contract(
+                    plan_tables,
+                    self._family_index,
+                    self._search_index.get,
+                    top_k_per_table=self._retrieval_contract_top_k_per_table,
+                    max_top_k=self._retrieval_contract_max_top_k,
+                    min_agreement=self._retrieval_contract_min_agreement,
+                    max_residual_siblings=self._retrieval_contract_max_residual_siblings,
+                    scope_loader=_scope_loader,
+                    single_table_top_k=self._retrieval_contract_single_table_top_k,
+                )
+                distinguishing_facets = {
+                    t.alias: [f.label for f in t.facets] for t in retrieval_contract.tables
+                }
+
+                over_budget = [
+                    t.alias for t in retrieval_contract.tables
+                    if len(t.residual_siblings) > self._retrieval_contract_max_residual_siblings
+                ]
+                if over_budget:
+                    msg = (
+                        f"{', '.join(over_budget)} still has more than "
+                        f"{self._retrieval_contract_max_residual_siblings} same-family "
+                        "sibling(s) that no metadata word/period or data-scope detail "
+                        "rules out — no question could realistically state enough "
+                        "detail to single the file out. Skipping this group "
+                        "(status: ambiguous_family)."
+                    )
+                    self._log.error(msg)
+                    return self._assemble_result(
+                        mode=mode,
+                        kind=kind,
+                        all_approved_executed=[],
+                        all_approved_query_dicts={},
+                        judge=None,
+                        original_ids=set(),
+                        columns_by_table=columns_by_table,
+                        all_tokens={
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0,
+                        },
+                        all_errors=[msg],
+                        last_model="",
+                        total_time=0.0,
+                        avg_cols=avg_cols,
+                        status_override="ambiguous_family",
+                    )
+                self._log.info(
+                    "Retrieval contract: top_k=%d, min_agreement=%d, facets=%s"
+                    % (
+                        retrieval_contract.top_k,
+                        retrieval_contract.min_agreement,
+                        distinguishing_facets,
+                    )
+                )
+
+            # ── Per-table single-table retrieval anchors (MULTI only) ──────
+            # A pre-verified keyword combination that surfaces EACH table
+            # ALONE at retrieval_contract_single_table_top_k, computed once
+            # per run (pure local search over indexed vocabulary — no LLM
+            # cost) from the SAME plan_tables list above, one single-element
+            # search per table. Handed to _generate_reference_questions_for_query
+            # as a hint, same role as retrievable_keywords plays for the main
+            # question — table vocabulary only, independent of any specific
+            # question's wording, so it's reused unchanged by every approved
+            # query this run produces.
+            single_table_anchors: dict[str, list[str]] = {}
+            if (
+                mode == MULTI
+                and self._generate_reference_questions
+                and self._search_index is not None
+                and retrieval_contract is not None
+            ):
+                for t in plan_tables:
+                    suggestion = suggest_retrievable_keywords(
+                        [t], self._search_index, self._retrieval_contract_single_table_top_k
+                    )
+                    if suggestion["achieved"]:
+                        single_table_anchors[t["alias"]] = suggestion["keywords"]
+
             # ── Build the generation prompt ONCE after the loop ────────────
             # (Fixes the prompt-statefulness issue: descriptions are gathered
             # into local lists and formatted in a single call rather than
             # accumulated across the loop via mutable prompt state / reset().)
             metadata_list = self._normalize_metadata_list(metadata, len(infos))
+            table_metadata = self._table_metadata_by_alias(metadata, aliases)
             base_prompt, table_schemas = self._build_generation_prompt(
                 mode, kind, infos, aliases, match, dfs, metadata_list
             )
@@ -1469,6 +1680,8 @@ class StatementOrchestrator:
                 num_plans=self.num_query_plans,
                 dfs=dfs,
                 retrievable_keywords=retrievable_keywords,
+                distinguishing_facets=distinguishing_facets,
+                table_metadata=table_metadata,
             )
             planning_ms = (time.perf_counter() - _t) * 1000.0
 
@@ -1506,6 +1719,9 @@ class StatementOrchestrator:
                         plans, analyses, aliases, stats,
                         match=match, involved_cols=involved_cols, dfs=dfs,
                         retrievable_keywords=retrievable_keywords,
+                        distinguishing_facets=distinguishing_facets,
+                        table_metadata=table_metadata,
+                        retrieval_contract=retrieval_contract,
                     )
                 )
                 plan_judging_ms = (time.perf_counter() - _t) * 1000.0
@@ -1693,12 +1909,18 @@ class StatementOrchestrator:
                     empty_result_pending,
                     plan_by_client_id, plan_feedback, plan_attempts_by_id,
                     analyses, aliases, stats, match, involved_cols, dfs,
-                    retrievable_keywords, base_prompt, kind,
+                    retrievable_keywords, distinguishing_facets, retrieval_contract,
+                    base_prompt, kind,
                     metadata, judge, all_tokens, all_errors,
                 )
             )
 
             # ── Phase 4: final assembly ────────────────────────────────────
+            # Per-table reference questions (MULTI only, see
+            # _generate_reference_questions_for_query) are generated INSIDE
+            # assembly, once per approved query — each is coupled to that
+            # query's OWN plan (Table.reason), which differs across the
+            # several plans one run can produce over the same table group.
             return self._assemble_result(
                 mode=mode,
                 kind=kind,
@@ -1718,6 +1940,10 @@ class StatementOrchestrator:
                 timings_ms=timings_ms,
                 failed_queries=failed_queries,
                 plan_feedback=plan_feedback,
+                retrieval_contract=retrieval_contract,
+                dataset_paths=dataset_paths,
+                aliases=aliases,
+                single_table_anchors=single_table_anchors,
             )
 
         except FileNotFoundError as exc:
@@ -1749,6 +1975,15 @@ class StatementOrchestrator:
         if len(out) < n:
             out = out + [{} for _ in range(n - len(out))]
         return out
+
+    def _table_metadata_by_alias(self, metadata: Any, aliases: dict) -> dict:
+        """Each alias's portal metadata (see ``table_analyzer.portal_metadata``),
+        shown next to the analyses to the planner and the plan judges."""
+        metadata_list = self._normalize_metadata_list(metadata, len(aliases))
+        return {
+            alias: portal_metadata(entry or {})
+            for alias, entry in zip(aliases, metadata_list)
+        }
 
     def _build_generation_prompt(
         self,
@@ -1788,7 +2023,13 @@ class StatementOrchestrator:
             columns_for_prompt = "".join(
                 f"\n- {col} ({df[col].dtype})" for col in df.columns
             )
-            metadata_i = metadata_list[idx] if idx < len(metadata_list) else {}
+            # Projected, not raw: the whole portal record would carry ids,
+            # URLs, timestamps, `format` and every empty field, plus a
+            # `columns` list duplicating the Column Details this same
+            # template prints right below it (see prompt_metadata).
+            metadata_i = prompt_metadata(
+                metadata_list[idx] if idx < len(metadata_list) else {}
+            )
 
             full_blocks.append(
                 DatasetDescription().update(
@@ -1844,6 +2085,9 @@ class StatementOrchestrator:
         involved_cols: Optional[dict] = None,
         dfs: Optional[list] = None,
         retrievable_keywords: Optional[list[str]] = None,
+        distinguishing_facets: Optional[dict] = None,
+        table_metadata: Optional[dict] = None,
+        retrieval_contract: Optional[RetrievalContract] = None,
     ) -> tuple[list, list, dict, Optional[str], dict]:
         """Plan judge loop: layered majority vote, then correct-and-re-judge.
 
@@ -1851,10 +2095,13 @@ class StatementOrchestrator:
         ``_run`` before any plan existed (see
         ``orqa.agent.utility.keyword_suggestion``) — re-passed into every
         ``revise_plan`` correction call so a revision never drifts away from
-        it, even though this loop's OWN deterministic keyword-searchability
-        layer below (a per-plan check, since each plan can propose its own
-        ``question_keywords``) is a separate, independent verification of
-        the plan's ACTUAL final keywords, not a re-check of this anchor.
+        it. ``distinguishing_facets`` is the SAME kind of anchor for
+        ``QueryPlanner``'s DISTINGUISHING DETAILS prompt section, re-passed
+        for the same reason. ``retrieval_contract`` is the deterministic
+        gate itself (see ``orqa.agent.utility.retrievability_gate.
+        check_question_retrievability``) — this loop's OWN per-plan check
+        below, a separate, independent verification of each plan's ACTUAL
+        final question against it, not a re-check of the anchors above.
 
         Each plan is sent (with the table analyses and per-table columns as
         context) to every judge in ``judge_profiles.plan``. Every judge casts
@@ -1913,6 +2160,12 @@ class StatementOrchestrator:
         """
         # Built once — identical for every plan/attempt in this run.
         plan_judge_instructions = PlanJudgementPrompt().update()
+        # Scope/breakdown facts per table, also computed once: the analyses'
+        # descriptions can claim a narrower scope than the table has.
+        table_facts = {
+            alias: render_table_facts(df).splitlines()
+            for alias, df in zip(aliases, dfs or [])
+        }
 
         usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         plan_feedback: list = []
@@ -1939,7 +2192,7 @@ class StatementOrchestrator:
                     getattr(current, "question", ""),
                 )
                 payload = self._build_plan_judge_payload(
-                    current, analyses, aliases, stats
+                    current, analyses, aliases, stats, table_facts, table_metadata
                 )
                 # max_tokens mirrors the code panel's cap: without it the plan
                 # judges run on the provider's default, and a reasoning model
@@ -1951,40 +2204,42 @@ class StatementOrchestrator:
                 self._accumulate_tokens(usage_total, usage)
 
                 # Deterministic 7th layer, computed once (not voted by the
-                # LLM panel — it has a ground-truth answer): would keyword-
-                # searching this question's `question_keywords` against the
-                # portal's real reverse index actually surface every table
-                # this plan uses? Folds straight into `judgment["approved"]`
-                # since it's not part of JudgePanel's own aggregation.
-                plan_tables = [
-                    {
-                        "alias": t.name,
-                        "resource_id": aliases.get(t.name, t.name),
-                        # The table's OWN analysis keywords — not used for
-                        # matching, only so a miss's feedback can name the
-                        # actual vocabulary to draw from instead of leaving
-                        # the planner to guess synonyms blind (see
-                        # check_keyword_searchability's docstring).
-                        "keywords": list(getattr(t, "keywords", None) or []),
-                    }
-                    for t in (getattr(current, "tables", None) or [])
-                ]
-                # Adaptive K: a plan joining more tables needs a wider net for
-                # ALL of them to plausibly surface together, so K scales with
-                # THIS plan's own table count rather than being one fixed
-                # constant regardless of how many tables it uses.
-                adaptive_top_k = self._adaptive_top_k(plan_tables)
-                kw_result = check_keyword_searchability(
-                    getattr(current, "question_keywords", None) or [],
-                    plan_tables,
-                    self._search_index,
-                    adaptive_top_k,
+                # LLM panel — it has a ground-truth answer): would this
+                # plan's QUESTION — searched across the retriever panel, and
+                # checked for the facets that distinguish the gold file(s)
+                # from their same-family siblings — actually be found? See
+                # orqa.agent.utility.retrievability_gate.
+                # check_question_retrievability. Folds straight into
+                # `judgment["approved"]` since it's not part of JudgePanel's
+                # own aggregation.
+                kw_result = check_question_retrievability(
+                    getattr(current, "question", "") or "",
+                    retrieval_contract,
+                    self._retrieval_panel,
+                    retrievable_keywords,
                 )
                 judgment["keyword_searchability_approval"] = kw_result["approved"]
-                self._log.info(
-                    f"Keyword-search retrieval: "
-                    f"{'OK' if kw_result['approved'] else 'MISS ' + ', '.join(kw_result['missing_tables'])}"
+                judgment["retrievability"] = kw_result
+                # Per-level checklist (Level A: family reachable via the
+                # retriever panel; Level B: distinguishing details stated in
+                # the question) so a miss is legible at a glance — WHICH
+                # level failed and for WHICH table(s) — instead of collapsing
+                # both into one flat "MISS <names>" line that can't tell a
+                # retrieval-rank miss apart from a missing-facet miss.
+                level_a_ok = not kw_result["missing_tables"]
+                level_b_ok = not kw_result["missing_facets"]
+                facet_tables = sorted({m["table"] for m in kw_result["missing_facets"]})
+                checklist = (
+                    f"{'✔' if level_a_ok else '✘'} Level A (family reachable)"
+                    + ("" if level_a_ok else f": {', '.join(kw_result['missing_tables'])}")
+                    + "  ·  "
+                    + f"{'✔' if level_b_ok else '✘'} Level B (distinguishing details)"
+                    + ("" if level_b_ok else f": {', '.join(facet_tables)}")
                 )
+                retrievability_msg = f"Retrievability: {checklist}"
+                if not kw_result["approved"] and kw_result["feedback"]:
+                    retrievability_msg += "\n" + kw_result["feedback"]
+                self._log.info(retrievability_msg)
                 # The EXACT text this gate sends the planner on rejection —
                 # built ONCE so both the stored attempt (the web UI's
                 # "Retrieval Gate" card in the judge panel) and the actual
@@ -1993,21 +2248,20 @@ class StatementOrchestrator:
                 kw_planner_feedback = (
                     kw_result["feedback"] + (
                         " Reword the QUESTION ITSELF — weave the missed "
-                        "table's REAL indexed title/tags terms (and/or the "
-                        "competing titles') naturally into the question's "
-                        "own prose, not just the `question_keywords` list "
-                        "— using the exact wording the reverse index "
-                        "actually matches on, not a paraphrase of it (a "
-                        "topic worded differently, e.g. as one merged word "
-                        "instead of the indexed multi-word tag, will not "
-                        "match even if it means the same thing). Editing "
-                        "`question_keywords` alone while leaving the "
-                        "question's own wording unchanged does not fix "
-                        "this: `question_keywords` must stay a faithful "
-                        "set of terms that literally appear in (or are "
-                        "directly implied by) the question text, not a "
-                        "wishlist bolted on separately from it. Do not "
-                        "drop or swap out the affected table(s)."
+                        "table's real vocabulary and any missing "
+                        "distinguishing details naturally into the "
+                        "question's own prose, not just the "
+                        "`question_keywords` list — using the exact wording "
+                        "named above, not a paraphrase of it (a topic worded "
+                        "differently, e.g. as one merged word instead of the "
+                        "indexed multi-word tag, will not match even if it "
+                        "means the same thing). Editing `question_keywords` "
+                        "alone while leaving the question's own wording "
+                        "unchanged does not fix this: `question_keywords` "
+                        "must stay a faithful set of terms that literally "
+                        "appear in (or are directly implied by) the question "
+                        "text, not a wishlist bolted on separately from it. "
+                        "Do not drop or swap out the affected table(s)."
                     )
                 ) if not kw_result["approved"] else ""
                 # The panel's OWN majority verdict, captured BEFORE the gate
@@ -2235,6 +2489,8 @@ class StatementOrchestrator:
                     self.languages,
                     dfs=dfs,
                     retrievable_keywords=retrievable_keywords,
+                    distinguishing_facets=distinguishing_facets,
+                    table_metadata=table_metadata,
                 )
                 self._accumulate_tokens(usage_total, rev_usage)
                 if revised is None:
@@ -2263,11 +2519,12 @@ class StatementOrchestrator:
                     not approved and self._rejection_is_table_driven(last_panel)
                 )
             table_driven_rejections.append(table_driven)
-            # Keyword-searchability is NOT a judge opinion — it's a real
-            # query against the reverse index (see check_keyword_searchability
+            # Retrievability is NOT a judge opinion — it's a real vote
+            # against the retriever panel (see check_question_retrievability
             # above), so a plan whose FINAL round still failed it is provably
-            # unretrievable by its own question's keywords, not merely
-            # suspected to be. Tracked separately from table_driven so the
+            # unretrievable (family unreachable and/or a distinguishing
+            # detail missing), not merely suspected to be. Tracked separately
+            # from table_driven so the
             # "keep the least-bad rejected plan" fallback below can never
             # resurrect one (that was the bug: a table missing from the
             # top-K still shipped because its plan happened to have the best
@@ -2381,13 +2638,21 @@ class StatementOrchestrator:
 
     @staticmethod
     def _build_plan_judge_payload(
-        plan: Any, analyses: list, aliases: dict, stats: list
+        plan: Any,
+        analyses: list,
+        aliases: dict,
+        stats: list,
+        table_facts: Optional[dict] = None,
+        table_metadata: Optional[dict] = None,
     ) -> str:
         """Serialize one plan plus its table context for the plan judges.
 
-        Context is intentionally compact (analyses + column names/dtypes, not
-        full samples/statistics): plan panels run on small models, and the
-        judged questions are feasibility and coherence, not value-level checks.
+        Context is intentionally compact (analyses + portal metadata + column
+        names/dtypes + scope/breakdown facts, not full samples/statistics):
+        plan panels run on
+        small models, and the judged questions are feasibility and coherence,
+        not value-level checks. The facts let them check that a scope the
+        question names is the table's own or is filtered on by a step.
         """
         columns_by_alias = {
             table.alias: [f"{c.column} ({c.dtype})" for c in table.columns]
@@ -2411,7 +2676,9 @@ class StatementOrchestrator:
             "tables": {
                 "aliases": aliases,
                 "analyses": list(analyses),
+                "metadata": table_metadata or {},
                 "columns": columns_by_alias,
+                "facts": table_facts or {},
             },
         }
         return (
@@ -2779,6 +3046,131 @@ class StatementOrchestrator:
             empty_result_pending,
         )
 
+    def _generate_reference_questions_for_query(
+        self,
+        mode: str,
+        main_question: str,
+        query_plan: Optional[QueryPlan],
+        tables_map: dict,
+        retrieval_contract: Optional[RetrievalContract],
+        single_table_anchors: Optional[dict],
+        all_tokens: dict,
+    ) -> dict:
+        """Per-table decomposed reference question for ONE approved MULTI
+        query — see ``ReferenceQuestionAgent``. Each is coupled to that
+        table's own plan ``reason`` (``prompting.models.Table.reason``) —
+        the table's judged, business-level justification for why it's
+        needed and what it contributes — NOT an independently invented
+        question, so it reads as the specific slice of ``main_question``
+        that table alone answers (e.g. main question over a January and a
+        February table -> "What is the total of January parking tickets?"
+        / "...February parking tickets?").
+
+        Gated the same deterministic way a real single-table question would
+        be: each returned question is voted against a single-table
+        ``RetrievalContract`` at ``retrieval_contract_single_table_top_k``
+        (see ``check_question_retrievability``) — reusing THIS run's
+        already-computed facets/anchor rather than recomputing them, so this
+        adds no extra LLM cost beyond the question-writing call(s)
+        themselves. A table that misses its gate gets up to
+        ``MAX_REFERENCE_QUESTION_CORRECTIONS`` small follow-up calls scoped
+        to just the tables still failing, not a full regeneration of the
+        group.
+
+        No-ops to ``{}`` outside MULTI mode, when the feature is off, or
+        when no plan/contract is available for this query — same "None
+        means off" convention the rest of the retrieval gate uses. Never
+        raises: a generation error is recorded under that table's own
+        ``status`` rather than aborting the rest of the group.
+
+        Returns ``{alias: {"resource_id", "status", "question",
+        "question_keywords"}}``, one entry per alias in ``tables_map``.
+        """
+        if (
+            mode != MULTI
+            or not self._generate_reference_questions
+            or retrieval_contract is None
+            or not retrieval_contract.tables
+            or not tables_map
+            or query_plan is None
+        ):
+            return {}
+
+        reason_by_alias = {
+            t.name: t.reason for t in (getattr(query_plan, "tables", None) or [])
+        }
+        tables_by_alias = {
+            t.alias: t for t in retrieval_contract.tables if t.alias in tables_map
+        }
+        if not tables_by_alias:
+            return {}
+
+        def _payload(alias: str, feedback: Optional[str] = None) -> dict:
+            table = tables_by_alias[alias]
+            payload = {
+                "alias": alias,
+                "reason": (
+                    reason_by_alias.get(alias)
+                    or f"Contributes the {alias} portion of the main question's answer."
+                ),
+                "facets": [f.label for f in table.facets],
+                "anchor": (single_table_anchors or {}).get(alias) or [],
+            }
+            if feedback:
+                payload["feedback"] = feedback
+            return payload
+
+        out: dict = {
+            alias: {"resource_id": tables_by_alias[alias].resource_id, "status": "unretrievable"}
+            for alias in tables_by_alias
+        }
+        pending = set(tables_by_alias)
+        feedback_by_alias: dict[str, str] = {}
+
+        for _attempt in range(1 + MAX_REFERENCE_QUESTION_CORRECTIONS):
+            if not pending:
+                break
+            try:
+                generated, usage = self._reference_question_agent.generate(
+                    main_question,
+                    [_payload(alias, feedback_by_alias.get(alias)) for alias in sorted(pending)],
+                )
+                self._accumulate_tokens(all_tokens, usage)
+            except Exception as exc:
+                self._log.warning(f"Reference question generation raised: {exc}")
+                break
+
+            still_pending: set = set()
+            for alias in pending:
+                item = generated.get(alias)
+                table = tables_by_alias[alias]
+                if not item or not item.get("question"):
+                    still_pending.add(alias)
+                    feedback_by_alias[alias] = "the model returned no question for this table."
+                    continue
+
+                mini_contract = RetrievalContract(
+                    top_k=self._retrieval_contract_single_table_top_k,
+                    min_agreement=retrieval_contract.min_agreement,
+                    tables=[table],
+                )
+                vote = check_question_retrievability(
+                    item["question"], mini_contract, self._retrieval_panel,
+                    (single_table_anchors or {}).get(alias),
+                )
+                out[alias] = {
+                    "resource_id": table.resource_id,
+                    "status": "success" if vote["approved"] else "unretrievable",
+                    "question": item["question"],
+                    "question_keywords": item["question_keywords"],
+                }
+                if not vote["approved"]:
+                    still_pending.add(alias)
+                    feedback_by_alias[alias] = vote["feedback"] or "failed the retrieval gate."
+            pending = still_pending
+
+        return out
+
     def _assemble_result(
         self,
         mode: str,
@@ -2800,6 +3192,10 @@ class StatementOrchestrator:
         failed_queries: Optional[list] = None,
         plan_feedback: Optional[list] = None,
         status_override: Optional[str] = None,
+        retrieval_contract: Optional[RetrievalContract] = None,
+        dataset_paths: Optional[list] = None,
+        aliases: Optional[dict] = None,
+        single_table_anchors: Optional[dict] = None,
     ) -> dict:
         """Assemble the final result dict.
 
@@ -2884,12 +3280,150 @@ class StatementOrchestrator:
             key=_sort_key,
         )
 
+        # ── Residual-sibling verification (accepted_table_ids) ──────────────
+        # For an approved query whose gold table(s) still have residual
+        # siblings (no metadata/word/data-scope facet ruled them out — see
+        # orqa.agent.utility.retrievability_gate), run the SAME gold code
+        # against each one, swapping only that alias's dataset id. A sibling
+        # giving an EQUAL result is a legitimate alternative answer (folded
+        # into accepted_table_ids); one giving a genuinely DIFFERENT result
+        # makes the question ambiguous between them, so the query is
+        # dropped (recorded under failed_queries as "ambiguous_gold")
+        # instead of shipping a silently arbitrary "gold" pick.
+        retrieval_by_qid: dict[str, dict] = {}
+        # Same data as retrieval_by_qid[qid]["tables"][*]["accepted_table_ids"],
+        # reshaped into the flat, consumer-facing form (gold table paired
+        # with its own list of interchangeable alternatives) rather than the
+        # full debug contract — restricted to THIS query's own tables
+        # (tables_map), not every table in the (possibly wider) contract.
+        alternatives_by_qid: dict[str, list] = {}
+        # This query's own alias -> dataset-id map, captured here (computed
+        # once, below) and reused by the reference-question step in the main
+        # assembly loop further down instead of recomputing it — same value,
+        # just needed at a point outside this loop's own scope.
+        tables_map_by_qid: dict[str, dict] = {}
+        ambiguous_qids: set[str] = set()
+        if retrieval_contract is not None and retrieval_contract.tables and dataset_paths:
+            group_datasets_path = Path(dataset_paths[0]).parent
+            group_extension = Path(dataset_paths[0]).suffix.lstrip(".")
+            executor = QueryExecutor(group_datasets_path, extension=group_extension)
+            from ..benchmark.solve import compare_results  # heavy (valentine/nltk); lazy
+
+            for qid in ordered_ids:
+                q = all_approved_query_dicts.get(qid)
+                if not q:
+                    continue
+                # ``q["tables"]`` is the per-query list of planned Table
+                # objects (name/reason/columns_involved/description/keywords/
+                # translated_keywords) copied straight from the plan — it is
+                # NOT an alias->dataset mapping, so it can't be fed to
+                # ``dict()`` directly. Resolve each alias the query actually
+                # references to its dataset id via the run-level ``aliases``
+                # map instead, restricted to just this query's own tables
+                # (a query never references more).
+                query_table_aliases = {
+                    t.get("name")
+                    for t in (q.get("tables") or [])
+                    if isinstance(t, dict) and t.get("name")
+                }
+                tables_map = {
+                    alias: dataset_id
+                    for alias, dataset_id in (aliases or {}).items()
+                    if alias in query_table_aliases
+                }
+                tables_map_by_qid[qid] = tables_map
+                code = q.get("code") or ""
+                accepted_by_alias: dict[str, list[str]] = {}
+                ambiguous = False
+
+                for table in retrieval_contract.tables:
+                    if not table.residual_siblings or table.alias not in tables_map:
+                        continue
+                    try:
+                        base_dataframes = executor.load_tables(tables_map)
+                        original_df = executor.execute_prepared(
+                            {"code": code}, kind, base_dataframes
+                        )
+                    except Exception:
+                        original_df = None
+                    accepted: list[str] = []
+                    for sibling_id in table.residual_siblings:
+                        sibling_stem = (
+                            self._family_index.stem(sibling_id) if self._family_index else None
+                        )
+                        if sibling_stem is None:
+                            continue
+                        swapped = {**tables_map, table.alias: sibling_stem}
+                        try:
+                            sibling_dataframes = executor.load_tables(swapped)
+                            sibling_df = executor.execute_prepared(
+                                {"code": code}, kind, sibling_dataframes
+                            )
+                        except Exception:
+                            continue
+                        comparison = compare_results(original_df, sibling_df)
+                        if not comparison.get("comparable"):
+                            continue
+                        if comparison.get("exact_match"):
+                            accepted.append(sibling_id)
+                        else:
+                            ambiguous = True
+                    if accepted:
+                        accepted_by_alias[table.alias] = accepted
+
+                if ambiguous:
+                    ambiguous_qids.add(qid)
+                    continue
+                alternatives_by_qid[qid] = [
+                    {
+                        "gold_table": table.resource_id,
+                        "alternative_tables": accepted_by_alias.get(table.alias, []),
+                    }
+                    for table in retrieval_contract.tables
+                    if table.alias in tables_map
+                ]
+                retrieval_by_qid[qid] = {
+                    "contract_version": retrieval_contract.version,
+                    "top_k": retrieval_contract.top_k,
+                    "min_agreement": retrieval_contract.min_agreement,
+                    "tables": {
+                        table.resource_id: {
+                            "family_id": table.family_id,
+                            "family_size": table.family_size,
+                            "facets": [f.label for f in table.facets],
+                            "residual_siblings": table.residual_siblings,
+                            "accepted_table_ids": accepted_by_alias.get(table.alias, []),
+                        }
+                        for table in retrieval_contract.tables
+                    },
+                }
+            if ambiguous_qids:
+                self._log.warning(
+                    f"{len(ambiguous_qids)} approved quer{'y is' if len(ambiguous_qids) == 1 else 'ies are'} "
+                    "ambiguous_gold: a residual sibling's gold-code result "
+                    "differs from the originally sampled table's."
+                )
+
         used_ids: set = set()
         approved_queries: list = []
         traceable_queries: list = []
+        ambiguous_gold_out: list = []
         for qid in ordered_ids:
             q = all_approved_query_dicts.get(qid)
             if not q:
+                continue
+            if qid in ambiguous_qids:
+                ambiguous_gold_out.append(
+                    {
+                        **q,
+                        "status": "ambiguous_gold",
+                        "error": (
+                            "A residual same-family sibling's gold-code result "
+                            "differs from the sampled table's — the question is "
+                            "ambiguous between them."
+                        ),
+                    }
+                )
                 continue
             q_copy = dict(q)
 
@@ -2939,6 +3473,21 @@ class StatementOrchestrator:
                 else query_plan
             )
 
+            # Per-table reference questions, coupled to THIS query's own
+            # plan (Table.reason) — see
+            # _generate_reference_questions_for_query. No-ops to {} outside
+            # MULTI mode / when the feature is off / when this query's own
+            # table map is empty (e.g. no retrieval contract this run).
+            reference_questions = self._generate_reference_questions_for_query(
+                mode,
+                q_copy.get("question") or "",
+                query_plan,
+                tables_map_by_qid.get(qid, {}),
+                retrieval_contract,
+                single_table_anchors,
+                all_tokens,
+            )
+
             approved_queries.append(
                 {
                     **q_copy,
@@ -2957,6 +3506,30 @@ class StatementOrchestrator:
                     "keyword_count": keyword_count,
                     "skills_used": skills_used,
                     "query_result": self._serialize_query_output(er),
+                    # See the residual-sibling verification pass above —
+                    # absent when no retrieval contract was built for this
+                    # run (e.g. no reverse index/family index configured).
+                    **({"retrieval": retrieval_by_qid[qid]} if qid in retrieval_by_qid else {}),
+                    # Flat, consumer-facing view of the same verification:
+                    # one entry per table this query actually uses, pairing
+                    # the sampled gold table with every same-family sibling
+                    # PROVEN (by rerunning this query's own code against it)
+                    # to give an identical result — i.e. an equally valid
+                    # answer, not just a metadata-level guess. Empty
+                    # ``alternative_tables`` means none was found, not that
+                    # none was checked (see residual_siblings in "retrieval"
+                    # above for that distinction).
+                    **({"alternatives": alternatives_by_qid[qid]} if qid in alternatives_by_qid else {}),
+                    # Per-table questions decomposed from THIS query's own
+                    # plan (Table.reason) — each the specific slice of this
+                    # question that table alone answers, gated at rank
+                    # retrieval_contract_single_table_top_k the same way a
+                    # real single-table question would be. See
+                    # _generate_reference_questions_for_query. Internal-only
+                    # diagnostic metadata (tasks.query_generation.
+                    # generate_reference_questions) — never sampled as its
+                    # own benchmark case.
+                    **({"reference_questions": reference_questions} if reference_questions else {}),
                 }
             )
 
@@ -2982,6 +3555,21 @@ class StatementOrchestrator:
         # plan-judging-adjacent failure is recognisable as such.
         failed_out: list = []
         for f in failed_queries or []:
+            f_plan = (plan_by_client_id or {}).get(f.get("client_id"), None)
+            failed_out.append(
+                {
+                    **f,
+                    "skills_used": list(self._plan_task_types(f_plan)),
+                    "plan_attempt_history": (plan_attempts_by_id or {}).get(id(f_plan), []),
+                    "structured_plan": (
+                        f_plan.model_dump() if hasattr(f_plan, "model_dump") else f_plan
+                    ),
+                }
+            )
+        # ambiguous_gold entries (see the residual-sibling verification pass
+        # above) are query-level failures too, same as any other rejection —
+        # just discovered after code-panel approval rather than during it.
+        for f in ambiguous_gold_out:
             f_plan = (plan_by_client_id or {}).get(f.get("client_id"), None)
             failed_out.append(
                 {
@@ -3330,6 +3918,8 @@ class StatementOrchestrator:
         involved_cols: Optional[dict],
         dfs: list,
         retrievable_keywords: Optional[list],
+        distinguishing_facets: Optional[dict],
+        retrieval_contract: Optional[RetrievalContract],
         base_prompt: str,
         kind: str,
         metadata: Any,
@@ -3448,10 +4038,13 @@ class StatementOrchestrator:
                 "the steps — while keeping the plan genuinely at its "
                 "assigned difficulty tier."
             )
+            table_metadata = self._table_metadata_by_alias(metadata, aliases)
             revised, usage = self._planner.revise_plan(
                 plan, feedback, analyses, aliases, match, involved_cols, stats,
                 self.languages, dfs=dfs,
                 retrievable_keywords=retrievable_keywords,
+                distinguishing_facets=distinguishing_facets,
+                table_metadata=table_metadata,
             )
             self._accumulate_tokens(all_tokens, usage)
             if revised is None:
@@ -3471,6 +4064,9 @@ class StatementOrchestrator:
                 [revised], analyses, aliases, stats, match=match,
                 involved_cols=involved_cols, dfs=dfs,
                 retrievable_keywords=retrievable_keywords,
+                distinguishing_facets=distinguishing_facets,
+                table_metadata=table_metadata,
+                retrieval_contract=retrieval_contract,
             )
             self._accumulate_tokens(all_tokens, panel_usage)
             # Tagged so the saved run distinguishes an ordinary planning-phase

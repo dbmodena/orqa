@@ -693,6 +693,56 @@ class SolverCode(BaseModel):
     )
 
 
+class ReferenceQuestionItem(BaseModel):
+    """One table's decomposed contribution to an approved multi-table
+    question — see ``orqa.agent.agents.ReferenceQuestionAgent``. Deliberately
+    narrow (3 fields) compared to ``SQLQueryPlan``/``PandasQueryPlan``: this
+    call only ever decomposes an ALREADY-approved question/table role, never
+    invents a fresh plan, so it needs none of a full plan's fields (steps,
+    difficulty, topic, story, table_links, ...)."""
+
+    table: str = Field(
+        ...,
+        description=(
+            "The table alias this question targets — must exactly match one "
+            "of the aliases given under \"Tables\" in the prompt."
+        )
+    )
+    question: str = Field(
+        ...,
+        description=(
+            "A standalone question answerable from THIS TABLE ALONE — the "
+            "specific slice of the main question this table's own ROLE says "
+            "it contributes, not a generic question about the table's "
+            "general subject and not the main question restated whole."
+        )
+    )
+    question_keywords: List[str] = Field(
+        default_factory=list,
+        description=(
+            "3-6 distinctive retrieval keywords drawn from the question, in "
+            "this table's own vocabulary."
+        )
+    )
+
+    @field_validator("question_keywords")
+    @classmethod
+    def limit_keywords(cls, v: List[str]) -> List[str]:
+        seen = set()
+        unique_keywords = []
+        for kw in v:
+            if kw not in seen:
+                seen.add(kw)
+                unique_keywords.append(kw)
+        return unique_keywords[:6]
+
+
+class ReferenceQuestionSet(BaseModel):
+    """One :class:`ReferenceQuestionItem` per table listed in the prompt."""
+
+    questions: List[ReferenceQuestionItem] = Field(default_factory=list)
+
+
 class ViolatedCriterion(str, Enum):
     # Code/result-focused criteria only: question quality AND table
     # justification are owned by the PLAN judge panel (PlanJudgment) and are

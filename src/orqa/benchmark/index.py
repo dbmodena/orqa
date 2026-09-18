@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 # the description.
 FIELD_WEIGHTS: dict[str, float] = {
     "title": 3.0,
+    # Names one file of a dataset ("2021-12-31 Organogram (Junior)"): as
+    # identifying as the title it refines.
+    "resource_name": 3.0,
     "tags": 2.5,
     "columns": 2.0,
     "publisher": 1.5,
@@ -47,7 +50,7 @@ BM25_B = 0.75
 
 # Bumped whenever the on-disk index layout or the tokenization/weighting
 # scheme changes, to force a rebuild of stale index files.
-INDEX_FORMAT_VERSION = 1
+INDEX_FORMAT_VERSION = 2
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -79,10 +82,15 @@ def _record_field_texts(record: dict) -> dict[str, str]:
 
     return {
         "title": record.get("title") or "",
+        "resource_name": record.get("resource_name") or "",
         "tags": " ".join(record.get("tags") or []),
         "columns": " ".join(columns_parts),
         "publisher": record.get("publisher") or "",
-        "description": record.get("description") or "",
+        "description": " ".join(
+            part
+            for part in (record.get("resource_description"), record.get("description"))
+            if part
+        ),
     }
 
 
@@ -99,9 +107,14 @@ class SearchResult:
     csv_exists: bool
     dataset_url: Optional[str]
     source: Optional[str] = None
+    # Populated by HybridDatasetIndex. Kept optional so lexical-only indexes
+    # retain the same result contract and callers can inspect score fusion
+    # without needing a second diagnostics API.
+    lexical_score: Optional[float] = None
+    semantic_score: Optional[float] = None
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "resource_id": self.resource_id,
             "dataset_id": self.dataset_id,
             "title": self.title,
@@ -114,6 +127,11 @@ class SearchResult:
             "dataset_url": self.dataset_url,
             "source": self.source,
         }
+        if self.lexical_score is not None:
+            result["lexical_score"] = round(self.lexical_score, 4)
+        if self.semantic_score is not None:
+            result["semantic_score"] = round(self.semantic_score, 4)
+        return result
 
 
 class DatasetIndex:
@@ -315,7 +333,7 @@ class DatasetIndex:
         scores: dict[str, float] = defaultdict(float)
         matched: dict[str, set[str]] = defaultdict(set)
 
-        for term in set(terms):
+        for term in sorted(set(terms)):
             idf = self._idf(term)
             if idf == 0.0:
                 continue
@@ -325,7 +343,7 @@ class DatasetIndex:
                 scores[resource_id] += idf * (tf * (BM25_K1 + 1)) / (tf + norm)
                 matched[resource_id].add(term)
 
-        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
 
         results = []
         for resource_id, score in ranked:
@@ -398,6 +416,71 @@ def load_index(cfg) -> Optional[Any]:
 
     action = "Created" if rebuilt else "Reusing"
     logger.info("%s %s (%d datasets)", action, location, len(index))
+
+    if cfg.mcp_search.hybrid_search_enabled:
+        try:
+            from orqa.agent.llm_client.EmbeddingClient import EmbeddingClient
+            from orqa.benchmark.hybrid_index import HybridDatasetIndex
+
+            embedding_client = EmbeddingClient(
+                cfg.llm_config_path / "litellm.yaml",
+                batch_size=cfg.candidates_discovery.embedding_batch_size,
+            )
+            # The search-metadata cache (orqa.embedding_discovery.pipeline.
+            # embed_search_metadata) covers EVERY normalized record, not just
+            # the ones discovery indexes — prefer it, falling back to
+            # discovery's own cache for a portal that hasn't run the
+            # embed-search-metadata step yet.
+            search_cache_path = getattr(
+                cfg.candidates_discovery, "search_embeddings_path", None
+            )
+            cache_path = (
+                search_cache_path
+                if search_cache_path is not None and Path(search_cache_path).exists()
+                else cfg.candidates_discovery.embeddings_cache_path
+            )
+            index = HybridDatasetIndex.from_cache(
+                index,
+                cache_path,
+                embedding_client,
+                lexical_weight=cfg.mcp_search.lexical_weight,
+                semantic_weight=cfg.mcp_search.semantic_weight,
+                query_input_type=cfg.mcp_search.query_embedding_input_type,
+                query_cache_size=cfg.mcp_search.query_embedding_cache_size,
+                fusion_method=cfg.mcp_search.fusion_method,
+                rrf_k=cfg.mcp_search.rrf_k,
+            )
+            coverage = len(index._embedding_ids) / len(index) if len(index) else 0.0
+            logger.info(
+                "Hybrid retrieval enabled (fusion=%s, lexical=%.3f, semantic=%.3f%s) "
+                "using %s — vector coverage %d/%d (%.1f%%).",
+                index.fusion_method,
+                index.lexical_weight,
+                index.semantic_weight,
+                f", rrf_k={index.rrf_k}" if index.fusion_method == "rrf" else "",
+                cache_path,
+                len(index._embedding_ids),
+                len(index),
+                100.0 * coverage,
+            )
+            if coverage < 1.0:
+                logger.warning(
+                    "Metadata vector coverage is below 100%% (%d/%d) — records "
+                    "without a vector score 0 on the dense/semantic half of "
+                    "every hybrid search. Run the embed-search-metadata step "
+                    "to cover every record.",
+                    len(index._embedding_ids),
+                    len(index),
+                )
+        except Exception:
+            # Keep the reverse index usable when semantic artifacts or the
+            # provider are unavailable. Every consumer still receives this
+            # same lexical fallback from the shared factory.
+            logger.warning(
+                "Could not enable hybrid retrieval for %r; using lexical search.",
+                cfg.source,
+                exc_info=True,
+            )
     return index
 
 

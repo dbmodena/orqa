@@ -1,6 +1,6 @@
 """Deterministic DIFFICULTY-tier estimator for structured query plans.
 
-Companion to ``keyword_searchability.py``: a code-computed fact fed into the
+Companion to ``retrievability_gate.py``: a code-computed fact fed into the
 plan judge / planner loop rather than an LLM vote, for exactly the parts of
 the DIFFICULTY rubric (see ``conf/prompts/query_planner.md``) that are pure
 functions of a plan's own ``steps`` — step counts, op-type diversity,

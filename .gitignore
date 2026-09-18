@@ -27,18 +27,25 @@ _orqa
 !tests/
 tests/*
 !tests/test_main_cli.py
+!tests/test_families.py
+!tests/test_retrieval_panel.py
+!tests/test_retrievability_gate.py
+!tests/test_sampling.py
+!tests/test_reference_question_agent.py
+!tests/test_keyword_suggestion.py
+!tests/test_hybrid_index.py
+!tests/test_pandas_validator_errors.py
 .claude
 .vscode
 # Archived TabPFN skill implementation — relocated out of the tracked
 # codebase (see archive/tabpfn/README.md for what it was and where it
 # lived before the move); kept locally for potential future reuse.
 archive/
-tests
 notebooks
-/tests
 .mcp.json
 .pytest_cache
 .python-version
 AGENTS.md
 metadata.json
 docs
+open_data

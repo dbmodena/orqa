@@ -577,16 +577,17 @@ def keyword_search(
 ) -> dict:
     """Reverse-index search for the "Search Index" play button on a query's
     detail view: same ``DatasetIndex``/``ESDatasetIndex`` the plan judge's
-    keyword-searchability check runs (see
-    ``orqa.agent.utility.keyword_searchability``), exposed here so a human
-    can re-run the exact same retrieval by hand for one query's
+    retrievability check runs against (see
+    ``orqa.agent.utility.retrievability_gate``), exposed here so a human
+    can re-run a manual keyword search by hand for one query's
     ``question_keywords`` and see which tables actually come back.
 
-    ``num_tables`` (the query's own table count, from the caller) drives the
-    SAME adaptive top-K the gate itself used —
-    ``round(num_tables * keyword_search_top_k_coefficient)`` — rather than a
-    fixed K, so this manual re-run matches exactly what the plan judge saw
-    for this query rather than a different, unrelated constant.
+    ``num_tables`` (the query's own table count, from the caller) drives an
+    adaptive top-K — ``round(num_tables * keyword_search_top_k_coefficient)``
+    — rather than a fixed K, mirroring the legacy keyword-searchability
+    check's own K formula (the current retrieval contract computes K
+    differently — ``min(max_top_k, top_k_per_table * n)`` — so this manual
+    re-run is indicative, not an exact replay of what the plan judge saw).
 
     Sync ``def`` (threadpool): the elasticsearch backend does network I/O.
     """

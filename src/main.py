@@ -20,6 +20,7 @@ STEP_CHOICES = (
     "normalize-metadata",
     "index",
     "candidates-discovery",
+    "embed-search-metadata",
     "generate-query-candidates",
     "generate-statements",
     "solve-benchmark",
@@ -261,6 +262,7 @@ def _step_callable_path(step: str, spec: TargetSpec, cfg) -> str:
     step_paths = {
         "normalize-metadata": "orqa.normalize_metadata:normalize_metadata",
         "index": "orqa.indexing:create_blend_index",
+        "embed-search-metadata": "orqa.embedding_discovery.pipeline:embed_search_metadata",
         "generate-query-candidates": "orqa.query_candidates:generate_query_candidates",
         "generate-statements": "orqa.statement_generation:generate_statements",
         "solve-benchmark": "orqa.benchmark.solve:solve_benchmark",

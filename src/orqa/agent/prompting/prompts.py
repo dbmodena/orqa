@@ -413,6 +413,8 @@ class QueryPlannerPrompt(Prompt):
         column_statistics: str,
         detected_languages: str,
         retrievable_keywords: str = "",
+        distinguishing_details: str = "",
+        table_metadata: str = "",
     ) -> str:
         return self._update(
             task_statement=task_statement,
@@ -426,6 +428,8 @@ class QueryPlannerPrompt(Prompt):
             column_statistics=column_statistics,
             detected_languages=detected_languages,
             retrievable_keywords=retrievable_keywords,
+            distinguishing_details=distinguishing_details,
+            table_metadata=table_metadata,
         )
 
 
@@ -474,6 +478,20 @@ class BenchmarkSolverCodePrompt(Prompt):
             expected_result_type=expected_result_type,
             selected_tables=selected_tables,
         )
+
+
+# ── Reference questions (orqa.agent.agents.ReferenceQuestionAgent) ─────────
+
+class ReferenceQuestionsPrompt(Prompt):
+    """Main question + per-table role -> one decomposed question per table.
+
+    Deliberately minimal (2 placeholders) — see the response model's own
+    docstring (``structured_outputs.ReferenceQuestionSet``) for why this
+    call carries none of the full planning prompt's context."""
+    _prompt_path = PROMPT_PATH.joinpath("reference_questions.md")
+
+    def update(self, main_question: str, tables_block: str) -> str:
+        return self._update(main_question=main_question, tables_block=tables_block)
 
 
 def _render_plan_steps(plan: QueryPlan) -> str:

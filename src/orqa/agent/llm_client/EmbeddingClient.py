@@ -36,17 +36,33 @@ class EmbeddingClient:
             for k, v in provider_params.items()
         }
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(
+        self, texts: list[str], input_type: str | None = None
+    ) -> list[list[float]]:
+        """Embed texts, optionally selecting the provider's retrieval role.
+
+        Existing document-embedding callers omit ``input_type`` and retain
+        their current cache semantics. Hybrid search uses ``search_query``
+        for query vectors when configured.
+        """
         vectors: list[list[float]] = []
         for start in range(0, len(texts), self.batch_size):
             batch = texts[start : start + self.batch_size]
             last_error = None
             for attempt in range(self.max_retries):
                 try:
+                    request_params = dict(self.provider_params)
+                    if input_type:
+                        request_params["input_type"] = input_type
                     response = litellm_embedding(
-                        model=self.model, input=batch, **self.provider_params
+                        model=self.model, input=batch, **request_params
                     )
                     data = sorted(response["data"], key=lambda d: d["index"])
+                    if len(data) != len(batch):
+                        raise ValueError(
+                            f"Embedding provider returned {len(data)} vectors "
+                            f"for a batch of {len(batch)} texts"
+                        )
                     vectors.extend(d["embedding"] for d in data)
                     break
                 except Exception as exc:
@@ -58,7 +74,8 @@ class EmbeddingClient:
                         self.max_retries,
                         exc,
                     )
-                    time.sleep(self.retry_delay)
+                    if attempt + 1 < self.max_retries:
+                        time.sleep(self.retry_delay)
             else:
                 raise RuntimeError(
                     f"Embedding batch starting at {start} failed after "

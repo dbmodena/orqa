@@ -383,7 +383,10 @@ class LLMClientStructured(LLMClient):
             try:
                 logger.debug("Attempt %d/%d...", attempt + 1, self.max_retries)
                 completion_args["messages"] = sanitize_messages(messages)
-                response = self.router.completion(**completion_args)
+                # Inherited from LLMClient: absorbs provider throttling on
+                # its own budget, so a 429 never spends one of the
+                # max_retries reserved for correcting a malformed response.
+                response = self._completion_with_backoff(completion_args)
 
                 usage = response["usage"]
                 usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
@@ -432,8 +435,17 @@ class LLMClientStructured(LLMClient):
                 last_error = e
                 logger.error("Error on attempt %d: %s", attempt + 1, e)
                 if attempt < self.max_retries - 1:
-                    logger.debug("Retrying in %ss…", self.retry_delay)
-                    time.sleep(self.retry_delay)
+                    # A throttle that outlived its backoff budget means the
+                    # provider is still shedding load, so wait longer than
+                    # the ordinary content-retry delay before spending
+                    # another attempt on it.
+                    delay = (
+                        max(self.retry_delay, self.throttle_max_delay)
+                        if self.is_throttled(e)
+                        else self.retry_delay
+                    )
+                    logger.debug("Retrying in %ss…", delay)
+                    time.sleep(delay)
 
         logger.error("Failed after %d attempts. Last error: %s", self.max_retries, last_error)
         if last_content:

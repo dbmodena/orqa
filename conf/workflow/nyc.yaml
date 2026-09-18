@@ -128,6 +128,21 @@ tasks:
     single_table_query_count: 3
     multi_table_query_count: 4
     languages: ["English"]
+    # Family-stratified sampling (see
+    # orqa.statement_generation._sample_single_table_datasets): NYC/Socrata
+    # records carry no CKAN dataset grouping, so every table is its own
+    # singleton family and this has no practical effect here — kept for
+    # consistency with the other portals.
+    max_groups_per_family: 2
+    # For each approved multi-table query, also generate one per-table
+    # question DECOMPOSED from that query's own plan (each table's judged
+    # "reason" — its business-level contribution to the question), e.g. a
+    # January+February parking-tickets question yields a January-only and a
+    # February-only reference question, each gated at mcp_search.
+    # retrieval_contract.single_table_top_k. Logged as `reference_questions`
+    # metadata on the approved query — never sampled as its own case.
+    # False by default: costs one extra small LLM call per approved query.
+    generate_reference_questions: false
 
   # Reverse-index backend — used by the plan judge's retrievability check and the solve-benchmark step (see orqa.benchmark.solve)
   mcp_search:
@@ -155,6 +170,21 @@ tasks:
     # `backend: builtin` needs no external service, there's nothing left to
     # gate on.
     retrieval_gate_enabled: false
+    # Two-level retrievability contract (see
+    # orqa.agent.utility.retrievability_gate) — configured for when
+    # retrieval_gate_enabled is turned back on; inert while it's false.
+    retrieval_contract:
+      enabled: true
+      retrievers: [lexical_question, dense_question, llm_keywords]
+      min_agreement: 2
+      top_k_per_table: 10
+      max_top_k: 20
+      # Single-table plans (exactly one table) target literal rank 1
+      # instead of the top_k_per_table/max_top_k window above — a keyword
+      # combination that surfaces the table at all reaches rank 1 for no
+      # extra search cost when there's only one target.
+      single_table_top_k: 1
+      max_residual_siblings: 30
 
   # How many judges vote on each panel (see orqa.agent.agents.JudgePanel).
   # judge_profiles.plan/code in conf/llm/litellm.yaml stay the pool of

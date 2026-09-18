@@ -191,6 +191,14 @@ class CandidatesDiscovery:
     # Derived paths (set by load_config)
     embeddings_cache_path: Optional[Path] = None
 
+    # A SEPARATE cache covering every normalized metadata record (not just
+    # the discovery-eligible subset embeddings_cache_path holds) — see
+    # orqa.embedding_discovery.pipeline.embed_search_metadata. Read by
+    # orqa.benchmark.index.load_index (preferred over embeddings_cache_path
+    # when present) so the retrievability gate's dense retriever scores
+    # every record, not just the ones discovery happened to embed.
+    search_embeddings_path: Optional[Path] = None
+
     # Where the cluster assignments + 2D projection are persisted (see
     # embedding_discovery.clustering.compute_cluster_projection) — the
     # dataset-id -> cluster-id mapping and scatter-plot coordinates the
@@ -286,6 +294,28 @@ class StatementGeneration:
     # runs (and sibling workflows sharing the yaml seed) are reproducible.
     multi_table_query_count: Optional[int] = None
 
+    # Family-stratified sampling cap for single-table generation (see
+    # orqa.statement_generation._sample_single_table_datasets): no CKAN
+    # dataset family gets more than this many sampled files until every
+    # family has had a turn. None (the default) disables stratification —
+    # sampling stays plain seeded shuffling, the pre-existing behavior.
+    max_groups_per_family: Optional[int] = None
+
+    # For each approved MULTI-table query, additionally generate one
+    # per-table question DECOMPOSED from that query's own plan (each
+    # table's judged `reason` — its business-level contribution to the
+    # question) — e.g. a main question over a January and a February table
+    # yields "What is the total of January parking tickets?" /
+    # "...February parking tickets?", not independently invented questions.
+    # Each is gated at retrieval_contract.single_table_top_k, the same
+    # deterministic rank a real single-table question would be held to.
+    # Never written out as its own benchmark case — folded into that
+    # query's own record as `reference_questions` metadata only (see
+    # StatementOrchestrator._generate_reference_questions_for_query). False
+    # by default: costs one extra small LLM call per approved query (plus a
+    # bounded few retries for any table that misses its gate).
+    generate_reference_questions: bool = False
+
     @property
     def target_language(self) -> str:
         """
@@ -298,6 +328,9 @@ class StatementGeneration:
     def __post_init__(self):
         self.enable_single_table = _coerce_bool(
             self.enable_single_table, "enable_single_table"
+        )
+        self.generate_reference_questions = _coerce_bool(
+            self.generate_reference_questions, "generate_reference_questions"
         )
 
         # Validate single_table_query_count is a positive int or None
@@ -324,13 +357,83 @@ class StatementGeneration:
                     f"multi_table_query_count must be a positive int, got {self.multi_table_query_count}"
                 )
 
+        # Validate max_groups_per_family is a positive int or None
+        if self.max_groups_per_family is not None:
+            if not isinstance(self.max_groups_per_family, int) or isinstance(self.max_groups_per_family, bool):
+                raise TypeError(
+                    f"max_groups_per_family must be a positive int or None, "
+                    f"got {type(self.max_groups_per_family).__name__}"
+                )
+            if self.max_groups_per_family <= 0:
+                raise ValueError(
+                    f"max_groups_per_family must be a positive int, got {self.max_groups_per_family}"
+                )
+
+
+@dataclass
+class RetrievalContractConfig:
+    """The two-level retrievability contract (see
+    ``orqa.agent.utility.retrievability_gate``): Level A checks that a
+    question's FAMILY (CKAN dataset) is reachable by a panel of retrievers;
+    Level B checks that the question states whatever distinguishes the gold
+    FILE from its same-family siblings.
+    """
+
+    enabled: bool = True
+    # Which retrievers vote Level A. "dense_question" is silently skipped
+    # when hybrid retrieval isn't enabled; "llm_keywords" is silently
+    # skipped when no LLM config is available to the caller building the
+    # panel — either way min_agreement degrades to "all available".
+    retrievers: tuple[str, ...] = ("lexical_question", "dense_question", "llm_keywords")
+    min_agreement: int = 2
+    top_k_per_table: int = 10
+    # The retrieval pool a downstream retrieval agent (e.g. LakeGen) is
+    # actually scored against — K never grows past this even for a
+    # many-table plan.
+    max_top_k: int = 20
+    # Level A's target for a SINGLE-table plan (exactly one plan table) —
+    # literal rank 1 by default, deterministic rather than a window: with
+    # only one target there's no reason to settle for less (see
+    # ``orqa.agent.utility.retrievability_gate.build_contract``). Multi-table
+    # plans are unaffected — they always use the top_k_per_table/max_top_k
+    # window above.
+    single_table_top_k: int = 1
+    # A table with more than this many still-unresolved (metadata- and
+    # scope-facet-indistinguishable) siblings has its group skipped
+    # (status "ambiguous_family") rather than generated over — beyond this
+    # many, "state enough detail to rule every sibling out" stops being a
+    # question a real user would ever phrase.
+    max_residual_siblings: int = 30
+
+    def __post_init__(self):
+        self.enabled = _coerce_bool(self.enabled, "retrieval_contract.enabled")
+        if isinstance(self.retrievers, str):
+            self.retrievers = (self.retrievers,)
+        else:
+            self.retrievers = tuple(self.retrievers)
+        self.min_agreement = int(self.min_agreement)
+        self.top_k_per_table = int(self.top_k_per_table)
+        self.max_top_k = int(self.max_top_k)
+        self.single_table_top_k = int(self.single_table_top_k)
+        self.max_residual_siblings = int(self.max_residual_siblings)
+        if self.min_agreement < 1:
+            raise ValueError("retrieval_contract.min_agreement must be >= 1")
+        if self.top_k_per_table < 1:
+            raise ValueError("retrieval_contract.top_k_per_table must be >= 1")
+        if self.max_top_k < 1:
+            raise ValueError("retrieval_contract.max_top_k must be >= 1")
+        if self.single_table_top_k < 1:
+            raise ValueError("retrieval_contract.single_table_top_k must be >= 1")
+        if self.max_residual_siblings < 0:
+            raise ValueError("retrieval_contract.max_residual_siblings must be >= 0")
+
 
 @dataclass
 class MCPSearch:
     """
     Configuration for the reverse-index backend shared by the plan judge's
     retrievability check (orqa.agent.utility.keyword_suggestion/
-    keyword_searchability) and the benchmark solver (orqa.benchmark.solve).
+    retrievability_gate) and the benchmark solver (orqa.benchmark.solve).
 
     With the "elasticsearch" backend the reverse index lives in an
     Elasticsearch index (created when missing); with the "builtin" backend
@@ -345,19 +448,41 @@ class MCPSearch:
     # ELASTICSEARCH_URL env variable, when set, takes precedence.
     elasticsearch_url: str
 
-    # Adaptive K for the plan judge's keyword-searchability check (see
-    # orqa.agent.utility.keyword_searchability.check_keyword_searchability):
-    # each plan's own K = round(len(plan_tables) * this coefficient), so a
-    # plan joining more tables is held to a wider top-K net than a
-    # single-table one, rather than every plan sharing one fixed K.
+    # Optional backend-neutral fusion over the configured lexical index.
+    # BM25 is normalized by the best positive score in the eligible corpus;
+    # metadata cosine is mapped from [-1, 1] to [0, 1] before weighting —
+    # ONLY when fusion_method is "weighted_score" (see below); "rrf" fuses
+    # on rank instead and ignores lexical_weight/semantic_weight entirely.
+    hybrid_search_enabled: bool = False
+    lexical_weight: float = 0.5
+    semantic_weight: float = 0.5
+    # How orqa.benchmark.hybrid_index.HybridDatasetIndex combines the
+    # lexical and semantic rankings — see that module's docstring for the
+    # full comparison. "weighted_score" (the default) is the original
+    # behavior, unchanged; "rrf" matches LakeGen's own Solr fusion
+    # (Reciprocal Rank Fusion) instead of a weighted average of the two
+    # sides' scores.
+    fusion_method: Literal["weighted_score", "rrf"] = "weighted_score"
+    # RRF's own constant (LakeGen uses 60) — irrelevant when fusion_method
+    # is "weighted_score".
+    rrf_k: int = 60
+    query_embedding_input_type: Optional[str] = "search_query"
+    query_embedding_cache_size: int = 2048
+
+    # Adaptive K for the legacy keyword-searchability check that used to
+    # gate the plan judge — superseded by retrieval_contract's own
+    # top_k_per_table/max_top_k below. Kept only for
+    # suggest_retrievable_keywords' pre-planning vocabulary HINT (see
+    # orqa.agent.utility.keyword_suggestion): each hint search's own K =
+    # round(len(plan_tables) * this coefficient).
     keyword_search_top_k_coefficient: float = 5.0
 
     # Whether the PRE-planning retrievability check (see
     # orqa.agent.utility.keyword_suggestion.suggest_retrievable_keywords,
     # run once per table group before any LLM call) is allowed to ABORT a
-    # group as "unretrievable_group" when no keyword combination can
-    # surface every table within top-K. False (the default) still runs the
-    # check and still hands the planner a verified keyword anchor when one
+    # group as "unretrievable_group" when its bounded metadata-vocabulary
+    # search finds no combination that surfaces every table within top-K.
+    # False (the default) still runs the check and still hands the planner a verified keyword anchor when one
     # is found — only the abort-on-failure half is disabled, so a group
     # that can't be resolved just proceeds to planning without an anchor
     # (the old behavior) instead of being skipped outright.
@@ -366,7 +491,7 @@ class MCPSearch:
     # Master on/off switch for the retrieval gate as a whole — BOTH the
     # PRE-planning keyword combination/suggestion check
     # (suggest_retrievable_keywords, above) AND the plan judge's reactive
-    # keyword-searchability layer (check_keyword_searchability, applied per
+    # retrievability layer (check_question_retrievability, applied per
     # plan in StatementOrchestrator._judge_plans). True (the default)
     # preserves today's behavior: whenever a reverse index is configured,
     # both mechanisms run. False disables both outright, regardless of
@@ -379,6 +504,16 @@ class MCPSearch:
     # this one is False, since the check it gates never runs at all.
     retrieval_gate_enabled: bool = True
 
+    # The two-level retrievability contract (family reachable + distinguishing
+    # details stated) — see RetrievalContractConfig and
+    # orqa.agent.utility.retrievability_gate. Independent of
+    # retrieval_gate_enabled above: that flag is the master kill switch for
+    # BOTH mechanisms; this one only configures the contract's own knobs
+    # once the gate is on.
+    retrieval_contract: RetrievalContractConfig = field(
+        default_factory=RetrievalContractConfig
+    )
+
     # Name of the per-city Elasticsearch index, derived from the data path
     es_index_name: str = field(init=False)
 
@@ -387,12 +522,33 @@ class MCPSearch:
     index_filepath: Path = field(init=False)
 
     def __post_init__(self):
+        self.hybrid_search_enabled = _coerce_bool(
+            self.hybrid_search_enabled, "hybrid_search_enabled"
+        )
         self.gate_unretrievable_groups = _coerce_bool(
             self.gate_unretrievable_groups, "gate_unretrievable_groups"
         )
         self.retrieval_gate_enabled = _coerce_bool(
             self.retrieval_gate_enabled, "retrieval_gate_enabled"
         )
+        self.lexical_weight = float(self.lexical_weight)
+        self.semantic_weight = float(self.semantic_weight)
+        if self.lexical_weight < 0 or self.semantic_weight < 0:
+            raise ValueError("Hybrid retrieval weights must be non-negative")
+        if self.lexical_weight + self.semantic_weight <= 0:
+            raise ValueError("At least one hybrid retrieval weight must be positive")
+        if self.fusion_method not in ("weighted_score", "rrf"):
+            raise ValueError(
+                f"fusion_method must be 'weighted_score' or 'rrf', got {self.fusion_method!r}"
+            )
+        self.rrf_k = int(self.rrf_k)
+        if self.rrf_k < 1:
+            raise ValueError("rrf_k must be >= 1")
+        self.query_embedding_cache_size = int(self.query_embedding_cache_size)
+        if self.query_embedding_cache_size < 1:
+            raise ValueError("query_embedding_cache_size must be >= 1")
+        if self.query_embedding_input_type is not None:
+            self.query_embedding_input_type = str(self.query_embedding_input_type).strip() or None
 
 
 @dataclass
@@ -750,6 +906,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         final_candidates_path,
         matches_graph_path=matches_graph_path,
         embeddings_cache_path=cand_disc_directory / "embeddings.npz",
+        search_embeddings_path=cand_disc_directory / "search_embeddings.npz",
         clusters_path=cand_disc_directory / "clusters.json",
         **candidates_discovery_task,
     )
@@ -764,8 +921,14 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     multi_table_query_count = parsed["tasks"]["query_generation"].get(
         "multi_table_query_count", None
     )
+    max_groups_per_family = parsed["tasks"]["query_generation"].get(
+        "max_groups_per_family", None
+    )
     detected_languages  = parsed["tasks"]["query_generation"].get(
         "languages", ["English"]
+    )
+    generate_reference_questions = parsed["tasks"]["query_generation"].get(
+        "generate_reference_questions", False
     )
     statement_generation = StatementGeneration(
         kind=kind,
@@ -777,6 +940,8 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         enable_single_table=enable_single_table,
         single_table_query_count=single_table_query_count,
         multi_table_query_count=multi_table_query_count,
+        max_groups_per_family=max_groups_per_family,
+        generate_reference_questions=generate_reference_questions,
     )
 
     # reverse-index backend config (defaults keep older yamls working)
@@ -792,6 +957,17 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         elasticsearch_url=str(
             mcp_search_task.get("elasticsearch_url", "http://localhost:9200")
         ),
+        hybrid_search_enabled=mcp_search_task.get("hybrid_search_enabled", False),
+        lexical_weight=float(mcp_search_task.get("lexical_weight", 0.5)),
+        semantic_weight=float(mcp_search_task.get("semantic_weight", 0.5)),
+        fusion_method=mcp_search_task.get("fusion_method", "weighted_score"),
+        rrf_k=int(mcp_search_task.get("rrf_k", 60)),
+        query_embedding_input_type=mcp_search_task.get(
+            "query_embedding_input_type", "search_query"
+        ),
+        query_embedding_cache_size=int(
+            mcp_search_task.get("query_embedding_cache_size", 2048)
+        ),
         keyword_search_top_k_coefficient=float(
             mcp_search_task.get("keyword_search_top_k_coefficient", 5.0)
         ),
@@ -800,6 +976,9 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         ),
         retrieval_gate_enabled=mcp_search_task.get(
             "retrieval_gate_enabled", True
+        ),
+        retrieval_contract=RetrievalContractConfig(
+            **(mcp_search_task.get("retrieval_contract") or {})
         ),
     )
 

@@ -356,13 +356,16 @@ function robotCard(vote, layers) {
 
 /* Retrieval Gate card: same shape as robotCard (avatar/name/verdict/
    feedback) so it sits INSIDE the judge panel grid as one more member of
-   the panel, but for the deterministic keyword-searchability check (see
-   orqa.agent.utility.keyword_searchability) rather than an LLM vote — an
-   index/magnifying-glass icon stands in for the robot avatar, and the
-   feedback shown is the EXACT constructed text this gate sent (or would
-   send) to the query planner (agent.py's kw_planner_feedback), not a
-   UI-only paraphrase. Absent entirely on older runs that predate this
-   check (the field simply isn't on the attempt). */
+   the panel, but for the deterministic retrievability check (see
+   orqa.agent.utility.retrievability_gate — family reachable + distinguishing
+   details stated) rather than an LLM vote — an index/magnifying-glass icon
+   stands in for the robot avatar, and the feedback shown is the EXACT
+   constructed text this gate sent (or would send) to the query planner
+   (agent.py's kw_planner_feedback), not a UI-only paraphrase. Field names
+   (keyword_searchability_*) predate the retrievability gate and are kept
+   as-is for backward compatibility with older stored runs. Absent entirely
+   on older runs that predate this check (the field simply isn't on the
+   attempt). */
 function retrievalGateCard(att) {
   if (att.keyword_searchability_approval === null || att.keyword_searchability_approval === undefined) return '';
   const ok = !!att.keyword_searchability_approval;
