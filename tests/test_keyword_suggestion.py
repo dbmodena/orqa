@@ -11,6 +11,7 @@ from orqa.agent.utility.keyword_suggestion import suggest_retrievable_keywords
 @dataclass
 class FakeResult:
     resource_id: str
+    score: float | None = None
 
 
 class FakeCombinatorialIndex:
@@ -99,6 +100,50 @@ class TestExhaustiveRescue(unittest.TestCase):
         index = FakeCombinatorialIndex(rankings, self.records, default_ranking=["c1", "c2", "c3"])
         result = suggest_retrievable_keywords(self.tables, index, top_k=1)
         self.assertFalse(result["achieved"])
+
+
+class FakeScoredIndex(FakeCombinatorialIndex):
+    """``FakeCombinatorialIndex`` whose rankings carry scores:
+    ``{keyword set: [(resource_id, score), ...]}`` in rank order."""
+
+    def search(self, keywords, top_k: int = 10, only_available: bool = False):
+        key = frozenset(keywords) if not isinstance(keywords, str) else frozenset(keywords.split())
+        return [FakeResult(rid, score) for rid, score in self._ranking_by_keys.get(key, self._default)[:top_k]]
+
+
+class TestScoreTies(unittest.TestCase):
+    """A rank inside a group of records the index scores identically is a
+    position, not a relevance claim — the result says how big that group is."""
+
+    def setUp(self):
+        self.records = {"T": {"title": "belfast lough"}}
+        self.tables = [{"alias": "Table_0", "resource_id": "T", "columns": []}]
+
+    def _suggest(self, ranking):
+        index = FakeScoredIndex({_fs("belfast"): ranking, _fs("lough"): ranking, _fs("belfast", "lough"): ranking}, self.records)
+        return suggest_retrievable_keywords(self.tables, index, top_k=10)
+
+    def test_a_table_inside_a_tie_reports_the_size_of_the_tie(self):
+        # three records at exactly 47.15 (T among them), a weaker one behind
+        result = self._suggest([("c1", 47.15), ("c2", 47.15), ("T", 47.15), ("c3", 29.0)])
+        self.assertTrue(result["achieved"])
+        self.assertEqual(result["ranks"], {"Table_0": 3})
+        self.assertEqual(result["ties"], {"Table_0": 3})
+
+    def test_a_table_alone_at_its_score_is_a_tie_of_one(self):
+        result = self._suggest([("T", 47.15), ("c1", 29.0), ("c2", 29.0)])
+        self.assertEqual(result["ties"], {"Table_0": 1})
+
+    def test_scores_equal_up_to_float_noise_still_tie(self):
+        result = self._suggest([("c1", 47.15), ("T", 47.15 * (1 + 1e-12)), ("c2", 29.0)])
+        self.assertEqual(result["ties"], {"Table_0": 2})
+
+    def test_no_scores_means_no_tie_information(self):
+        # an index that returns no score cannot say anything about ties
+        index = FakeCombinatorialIndex({_fs("belfast"): ["c1", "T"], _fs("lough"): ["c1", "T"]}, self.records)
+        result = suggest_retrievable_keywords(self.tables, index, top_k=10)
+        self.assertTrue(result["achieved"])
+        self.assertNotIn("ties", result)
 
 
 if __name__ == "__main__":

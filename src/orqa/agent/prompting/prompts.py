@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Generic, List, Optional, Sequence, TypeVar, Union, get_args
@@ -134,6 +135,27 @@ class Prompt(Generic[T]):
         return self._current_prompt
 
 
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def readable_dataset_name(name: str) -> str:
+    """A dataset's name as a prompt may show it: with the portal's ids taken out.
+
+    A downloaded table is named after its files — ``<dataset_id>___<resource_id>``,
+    two UUIDs on a CKAN portal, optionally behind a human-readable prefix
+    (``parking-tickets__<resource_id>``). The ids identify the record in the
+    portal and tell a model nothing about the data, so every UUID is removed
+    along with the separators left around it; a name that is nothing but ids
+    becomes ``"N/A"`` (the placeholder the metadata blocks already use for a
+    missing value). A name with no UUID — an Opendatasoft dataset such as
+    ``troncon_voie`` — is already informative and is returned unchanged."""
+    cleaned = _UUID_RE.sub(" ", str(name or ""))
+    cleaned = re.sub(r"[\s_]{2,}|(?:^|\s)[_-]+|[_-]+(?:$|\s)", " ", cleaned).strip(" _-")
+    return cleaned or "N/A"
+
+
 class DatasetDescription(Prompt):
     _prompt_path = PROMPT_PATH.joinpath("dataset_description.md")
 
@@ -148,7 +170,7 @@ class DatasetDescription(Prompt):
     ) -> str:
         return self._update(
             **{
-                "dataset_name": dataset_name,
+                "dataset_name": readable_dataset_name(dataset_name),
                 "num_rows": num_rows,
                 "num_columns": num_columns,
                 "dataset_metadata": dataset_metadata,
@@ -286,9 +308,12 @@ class SingleTableJudgementResponseGenerationPrompt(Prompt):
 
 
 class PlanJudgementPrompt(Prompt):
-    """Plan-judge instructions for the plan judge panel — the plan payload
-    still travels in the USER message (see ``JudgePanel``), never in this
-    template."""
+    """Plan-judge instructions for the plan judge panel: four plan layers, no
+    question checks (the question was approved by the question stage before
+    planning and is frozen), and every fix belongs in the plan. The plan
+    payload still travels in the USER message (see ``JudgePanel``), never in
+    this template. The checks keep the numbers 2-5 they had when the question
+    layers were 1 and 6."""
     _prompt_path = PROMPT_PATH.joinpath("plan_judge.md")
 
     def __init__(self):
@@ -412,11 +437,11 @@ class QueryPlannerPrompt(Prompt):
         table_sample: str,
         column_statistics: str,
         detected_languages: str,
-        retrievable_keywords: str = "",
-        distinguishing_details: str = "",
         table_metadata: str = "",
+        fixed_questions: str = "",
     ) -> str:
         return self._update(
+            fixed_questions=fixed_questions,
             task_statement=task_statement,
             ops_statement=ops_statement,
             batch_note=batch_note,
@@ -427,8 +452,6 @@ class QueryPlannerPrompt(Prompt):
             table_sample=table_sample,
             column_statistics=column_statistics,
             detected_languages=detected_languages,
-            retrievable_keywords=retrievable_keywords,
-            distinguishing_details=distinguishing_details,
             table_metadata=table_metadata,
         )
 
@@ -480,18 +503,39 @@ class BenchmarkSolverCodePrompt(Prompt):
         )
 
 
-# ── Reference questions (orqa.agent.agents.ReferenceQuestionAgent) ─────────
+# ── Question stage (orqa.agent.agents.QuestionGenerator / QuestionStage) ────
 
-class ReferenceQuestionsPrompt(Prompt):
-    """Main question + per-table role -> one decomposed question per table.
+class QuestionGeneratorPrompt(Prompt):
+    """Verified retrieval anchor + table context -> one question per slot,
+    written BEFORE any plan exists."""
+    _prompt_path = PROMPT_PATH.joinpath("question_generator.md")
 
-    Deliberately minimal (2 placeholders) — see the response model's own
-    docstring (``structured_outputs.ReferenceQuestionSet``) for why this
-    call carries none of the full planning prompt's context."""
-    _prompt_path = PROMPT_PATH.joinpath("reference_questions.md")
+    def update(
+        self,
+        n_slots: int,
+        languages: str,
+        time_context: str,
+        links_block: str,
+        tables_block: str,
+        slots_block: str,
+    ) -> str:
+        return self._update(
+            n_slots=n_slots,
+            languages=languages,
+            time_context=time_context,
+            links_block=links_block,
+            tables_block=tables_block,
+            slots_block=slots_block,
+        )
 
-    def update(self, main_question: str, tables_block: str) -> str:
-        return self._update(main_question=main_question, tables_block=tables_block)
+
+class QuestionJudgePrompt(Prompt):
+    """Question-judge instructions — the question and table context travel in
+    the USER message (see ``JudgePanel``), never in this template."""
+    _prompt_path = PROMPT_PATH.joinpath("question_judge.md")
+
+    def update(self) -> str:
+        return self._update()
 
 
 def _render_plan_steps(plan: QueryPlan) -> str:

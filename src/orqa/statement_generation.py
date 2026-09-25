@@ -5,15 +5,16 @@ import math
 import random
 import sys
 from pathlib import Path
-from typing import Any, AsyncGenerator, Callable, Optional
+from typing import Any, AsyncGenerator, Callable, Iterator, Optional
 
 from .agent.agent import TableAnalysisAgent
 from .agent.agents.StatementAgent import StatementAgent
 from .agent.agents.SingleStatementAgent import SingleStatementAgent
 from .benchmark.families import FamilyIndex
 from .benchmark.hybrid_index import HybridDatasetIndex
-from .benchmark.index import load_index
-from .benchmark.questions import get_entry, store_entry
+from .benchmark.index import DatasetIndex, load_index, portal_view
+from .benchmark.solr_index import SolrDatasetIndex
+from .benchmark.questions import META_KEY, SECTION_SINGLE, get_entry, store_entry
 from .benchmark.retrieval_panel import RetrieverPanel, make_llm_keyword_extractor
 from .utils import (
     dataset_id_to_resource_id,
@@ -48,25 +49,107 @@ def _build_family_index(cfg: OrQAConfig) -> Optional[FamilyIndex]:
         return None
 
 
+def _build_gate_index(cfg: OrQAConfig, search_index: Any) -> Any:
+    """The index the gate's KEYWORD search and the anchor search run on.
+
+    ``retrieval_contract.keyword_backend: solr`` -> the portal's own Solr core
+    (see ``orqa.benchmark.solr_index``): the same retriever LakeGen queries.
+    Solr being unreachable is not fatal — it warns and uses the in-process
+    imitation configured by ``keyword_match``/``search_fields`` — but it IS
+    loud, because that imitation is only an approximation of the portal.
+    """
+    contract = cfg.mcp_search.retrieval_contract
+    if contract.keyword_backend == "solr" and search_index is not None:
+        records = getattr(search_index, "lexical_index", search_index)
+        try:
+            if not isinstance(records, DatasetIndex):
+                raise TypeError(
+                    f"the Solr gate needs the builtin metadata index for records, got {type(records).__name__}"
+                )
+            solr_index = SolrDatasetIndex.build(
+                records, contract.solr_core, contract.solr_url or None,
+                match=contract.keyword_match,
+            )
+            print(
+                f"[gate] keyword search runs on Solr core {contract.solr_core!r} "
+                f"({solr_index.ping()} documents).", flush=True,
+            )
+            return solr_index
+        except Exception as exc:  # unreachable Solr, unknown core, wrong backend, ...
+            logger.warning(
+                "Could not use Solr core %r for the retrieval gate (%s) — falling back "
+                "to the in-process imitation, which only approximates the portal.",
+                contract.solr_core, exc,
+            )
+    gate = portal_view(search_index, contract.keyword_match, contract.search_fields)
+    # The KEYWORD search is the lexical half. ``portal_view`` already unwraps a
+    # hybrid index when it builds an AND / field-restricted view, but with plain
+    # BM25 (``any``, all fields) it hands the index back untouched — and a hybrid
+    # index fuses BM25 with a semantic ranking, so the anchor search and the
+    # keyword retriever would silently verify against that fusion instead.
+    lexical = getattr(gate, "lexical_index", None)
+    if lexical is not None:
+        gate = lexical
+    if gate is not None:
+        print(
+            f"[gate] keyword search: {type(getattr(gate, '_index', gate)).__name__}, "
+            f"match={contract.keyword_match}, fields={list(contract.search_fields) or 'all'}, "
+            f"retrievers={list(contract.retrievers)}.", flush=True,
+        )
+    return gate
+
+
+def _require_index(cfg: OrQAConfig, search_index: Any) -> None:
+    """Refuse to run the retrieval gate without an index.
+
+    ``load_index`` returns ``None`` — after logging why — when the reverse index
+    cannot be built (Elasticsearch not running, metadata not indexed). Every
+    consumer then treats "no index" as "nothing to check", so a gate the
+    workflow turned ON silently became a gate that does nothing and the run
+    produced ungated questions for hours. Fail before any of that instead.
+    """
+    if search_index is None and cfg.mcp_search.retrieval_gate_enabled:
+        raise RuntimeError(
+            "The retrieval gate is enabled (tasks.mcp_search.retrieval_gate_enabled) "
+            f"but the reverse index (tasks.mcp_search.backend: {cfg.mcp_search.backend!r}) "
+            "could not be built or loaded, so every question would be generated "
+            "UNGATED. The log above says why — for elasticsearch, start it at "
+            "tasks.mcp_search.elasticsearch_url. Set retrieval_gate_enabled: false "
+            "to run without the gate on purpose."
+        )
+
+
 def _build_retrieval_panel(
-    cfg: OrQAConfig, search_index: Any, family_index: Optional[FamilyIndex]
+    cfg: OrQAConfig,
+    search_index: Any,
+    keyword_index: Optional[Any] = None,
+    universe: Optional[Any] = None,
+    require_enabled: bool = True,
+    with_keywords: bool = True,
 ) -> Optional[RetrieverPanel]:
     """The retriever panel behind the retrievability gate (see
     ``orqa.agent.utility.retrievability_gate``) — ``None`` when the gate
     is disabled (``retrieval_gate_enabled`` / ``retrieval_contract.enabled``)
-    or no index/family index is available, so callers only need to check
+    or no index is available, so callers only need to check
     for ``None`` rather than re-deriving these flags themselves.
+
+    ``require_enabled=False`` builds the panel whatever the gate switches say —
+    for a tool that MEASURES retrievability (the benchmark CLI's
+    ``--retrievability-report``) and must use exactly the retrievers the gate
+    does. ``with_keywords=False`` skips the LLM keyword extractor (and with it
+    the ``llm_keywords`` and ``hybrid_rrf`` retrievers).
     """
-    if (
-        family_index is None
-        or search_index is None
-        or not cfg.mcp_search.retrieval_gate_enabled
+    if search_index is None:
+        return None
+    if require_enabled and (
+        not cfg.mcp_search.retrieval_gate_enabled
         or not cfg.mcp_search.retrieval_contract.enabled
     ):
         return None
     keyword_extractor = None
     try:
-        keyword_extractor = make_llm_keyword_extractor(cfg.llm_config_path / "litellm.yaml")
+        if with_keywords:
+            keyword_extractor = make_llm_keyword_extractor(cfg.llm_config_path / "litellm.yaml")
     except Exception:
         logger.warning(
             "Could not build the llm_keywords retriever; the retrieval "
@@ -74,11 +157,19 @@ def _build_retrieval_panel(
             exc_info=True,
         )
     hybrid_index = search_index if isinstance(search_index, HybridDatasetIndex) else None
+    contract = cfg.mcp_search.retrieval_contract
     return RetrieverPanel(
         search_index,
         hybrid_index=hybrid_index,
         keyword_extractor=keyword_extractor,
-        family_index=family_index,
+        retrievers=contract.retrievers,
+        # ``llm_keywords`` searches the way the portal does (AND over its
+        # own fields) when a portal view is configured; None = the lexical
+        # index, as before.
+        keyword_index=keyword_index,
+        rrf_k=contract.hybrid_rrf_k,
+        rrf_depth=contract.hybrid_rrf_depth,
+        universe=universe,
     )
 
 # Pacing between generated groups, per 5k tokens the group consumed. NOT a
@@ -106,6 +197,13 @@ def _compute_timeout(max_tokens: int) -> float:
     """
     buckets = math.ceil(max_tokens / _TOKENS_PER_BUCKET)
     return buckets * _TIMEOUT_SECONDS_PER_5K_TOKENS
+
+
+def _tokens_used(content: dict) -> int:
+    """Total tokens a generation output reports (its ``token_usage`` is either
+    a usage dict or a bare number)."""
+    usage = content.get("token_usage")
+    return sum(usage.values()) if isinstance(usage, dict) else (usage or 0)
 
 
 # ── Match formatting: relationship spec -> QueryLink dict ─────────────────────
@@ -354,6 +452,107 @@ def _sample_single_table_datasets(
     return picked
 
 
+# A single-table slot whose table cannot be found within the contract's top K
+# is dropped — nothing is written for it — and refilled from the next table of
+# the same seeded order. At most this many replacements are tried per slot, so
+# a portal where almost nothing is retrievable cannot loop over its whole
+# corpus for one slot.
+MAX_SINGLE_TABLE_REPLACEMENTS = 25
+
+# The status a generation run reports when the table(s) it is fixed to cannot
+# be found by the retrievers within the top K: the pre-planning keyword check,
+# the question stage and the plan judge all end this way.
+UNRETRIEVABLE_STATUS = "unretrievable_group"
+
+
+def _iter_single_table_replacements(
+    datasets_path: Path,
+    exclude: set[Path],
+    extension: str = "csv",
+    seed: int = 0,
+    limit_to_n_columns: int | None = None,
+    scan_opts: dict | None = None,
+    family_of: Optional[Callable[[str], str]] = None,
+    max_groups_per_family: Optional[int] = None,
+) -> Iterator[Path]:
+    """Lazily yield usable single-table candidates beyond the ones already
+    sampled, in the same seeded order ``_sample_single_table_datasets`` draws
+    from and under the same usability filter (rows, columns, width) — so a
+    table that stands in for an unretrievable one is chosen exactly the way
+    the original was, and the same on every run. ``exclude``: paths to skip
+    (the sampled ones, and any table a stored entry already used)."""
+    all_files = sorted(datasets_path.glob(f"*.{extension}"))
+    if family_of is not None and max_groups_per_family is not None:
+        ordered = _family_stratified_order(all_files, family_of, seed, max_groups_per_family)
+    else:
+        ordered = all_files[:]
+        random.Random(seed).shuffle(ordered)
+
+    for filepath in ordered:
+        if filepath in exclude:
+            continue
+        if limit_to_n_columns is not None:
+            try:
+                n_columns, has_rows = dataset_index_shape(filepath, scan_opts or {})
+            except Exception:
+                continue
+            if n_columns == 0 or not has_rows or n_columns > limit_to_n_columns:
+                continue
+        yield filepath
+
+
+def _stored_single_table_stems(results: dict, kind: str) -> set[str]:
+    """The tables the stored single-table entries of ``kind`` were generated
+    on — a resumed run must not hand one of them to another slot."""
+    stems: set[str] = set()
+    for entry in (results.get(kind, {}).get(SECTION_SINGLE) or {}).values():
+        tables = (entry.get(META_KEY) or {}).get("tables") or {}
+        stems.update(str(stem) for stem in tables.values())
+    return stems
+
+
+@dataclass
+class SingleTableSlot:
+    """Outcome of filling one single-table slot: the table that produced an
+    entry (``None`` when every candidate was unretrievable), its generation
+    output and duration, and the tables skipped on the way."""
+    path: Optional[Path]
+    content: Optional[dict]
+    elapsed: float
+    skipped: list[Path] = field(default_factory=list)
+
+
+def _generate_single_table_slot(
+    primary: Path,
+    replacements: Iterator[Path],
+    generate: Callable[[Path], dict],
+    max_replacements: int = MAX_SINGLE_TABLE_REPLACEMENTS,
+    on_skip: Optional[Callable[[Path, dict], None]] = None,
+) -> SingleTableSlot:
+    """Generate for ``primary``; while the run reports it unretrievable
+    (``UNRETRIEVABLE_STATUS``) drop it and try the next of ``replacements``.
+
+    Only that status skips a table — any other outcome (success, a failure,
+    "no_valid_question", ...) is the slot's result, exactly as before. A
+    skipped table leaves nothing behind: the caller writes no entry for it.
+    """
+    skipped: list[Path] = []
+    candidate: Optional[Path] = primary
+    while candidate is not None:
+        start = __import__("time").perf_counter()
+        content = generate(candidate)
+        elapsed = __import__("time").perf_counter() - start
+        if (content.get("result") or {}).get("status") != UNRETRIEVABLE_STATUS:
+            return SingleTableSlot(candidate, content, elapsed, skipped)
+        skipped.append(candidate)
+        if on_skip is not None:
+            on_skip(candidate, content)
+        if len(skipped) > max_replacements:
+            break
+        candidate = next(replacements, None)
+    return SingleTableSlot(None, None, 0.0, skipped)
+
+
 def _cap_matches(
     all_matches: list,
     count: Optional[int],
@@ -525,9 +724,8 @@ def create_statements(
     retrieval_contract_min_agreement: int = 2,
     retrieval_contract_top_k_per_table: int = 10,
     retrieval_contract_max_top_k: int = 20,
-    retrieval_contract_max_residual_siblings: int = 30,
     retrieval_contract_single_table_top_k: int = 1,
-    generate_reference_questions: bool = False,
+    max_question_corrections: int = 3,
 ) -> list[dict]:
     bad_tokens = bad_tokens or []
 
@@ -593,14 +791,12 @@ def create_statements(
         retrieval_gate_enabled=retrieval_gate_enabled,
         plan_judge_count=plan_judge_count,
         code_judge_count=code_judge_count,
-        family_index=family_index,
         retrieval_panel=retrieval_panel,
         retrieval_contract_min_agreement=retrieval_contract_min_agreement,
         retrieval_contract_top_k_per_table=retrieval_contract_top_k_per_table,
         retrieval_contract_max_top_k=retrieval_contract_max_top_k,
-        retrieval_contract_max_residual_siblings=retrieval_contract_max_residual_siblings,
         retrieval_contract_single_table_top_k=retrieval_contract_single_table_top_k,
-        generate_reference_questions=generate_reference_questions,
+        max_question_corrections=max_question_corrections,
     )
 
 
@@ -617,47 +813,87 @@ def create_statements(
             analysis_cache_path=analysis_cache_path,
             search_index=search_index,
             keyword_search_top_k_coefficient=keyword_search_top_k_coefficient,
-            gate_unretrievable_groups=gate_unretrievable_groups,
+            # A single table no keyword search can place within the top K is
+            # skipped (and replaced below), whatever the workflow says about
+            # unretrievable multi-table groups — the check runs before any LLM
+            # call, so it is the cheap moment to give up on a table.
+            gate_unretrievable_groups=True,
             retrieval_gate_enabled=retrieval_gate_enabled,
             plan_judge_count=plan_judge_count,
             code_judge_count=code_judge_count,
-            family_index=family_index,
             retrieval_panel=retrieval_panel,
             retrieval_contract_min_agreement=retrieval_contract_min_agreement,
             retrieval_contract_top_k_per_table=retrieval_contract_top_k_per_table,
             retrieval_contract_max_top_k=retrieval_contract_max_top_k,
-            retrieval_contract_max_residual_siblings=retrieval_contract_max_residual_siblings,
             retrieval_contract_single_table_top_k=retrieval_contract_single_table_top_k,
+            max_question_corrections=max_question_corrections,
+        )
+
+        # Tables that can stand in for an unretrievable one: the rest of the
+        # seeded order, minus what is already sampled or already stored.
+        replacements = _iter_single_table_replacements(
+            csv_folder,
+            exclude=set(sampled) | {
+                csv_folder / f"{stem}.{extension}"
+                for stem in _stored_single_table_stems(results, kind)
+            },
+            extension=extension, seed=seed, limit_to_n_columns=max_cols, scan_opts=scan_opts,
+            family_of=family_of, max_groups_per_family=max_groups_per_family,
         )
 
         for st_idx, csv_path in enumerate(sampled):
-            dataset_name = csv_path.stem
-            aliases = {"Table_0": dataset_name}
             str_idx = f"st_{st_idx}"
 
             if _already_processed(results, kind, str_idx):
                 print(f"[st_{st_idx}] Already processed — skipping.")
                 continue
 
-            start = __import__("time").perf_counter()
+            def _generate(path: Path) -> dict:
+                return single_agent.generate_statements(
+                    path, {"Table_0": path.stem}, kind,
+                    datasets_metadata.get(dataset_id_to_resource_id(path.stem)),
+                    max_cols, sample_size=5,
+                )
 
-            content = single_agent.generate_statements(
-                csv_path, aliases, kind,
-                datasets_metadata.get(dataset_id_to_resource_id(dataset_name)),
-                max_cols, sample_size=5,
+            def _on_skip(path: Path, content: dict, st_idx: int = st_idx) -> None:
+                print(
+                    f"[st_{st_idx}] {path.stem} is not found within the top "
+                    f"{retrieval_contract_single_table_top_k} — skipped, no entry "
+                    "written; trying another table."
+                )
+                spent = _tokens_used(content)
+                if spent:
+                    __import__("time").sleep(_compute_timeout(spent))
+
+            try:
+                slot = _generate_single_table_slot(csv_path, replacements, _generate, on_skip=_on_skip)
+            except Exception:
+                logger.exception(
+                    "[st_%d] %s failed to generate — no entry written; skipping.",
+                    st_idx, csv_path.stem,
+                )
+                continue
+            if slot.path is None:
+                print(
+                    f"[st_{st_idx}] No table found within the top "
+                    f"{retrieval_contract_single_table_top_k} after {len(slot.skipped)} "
+                    "attempt(s) — no entry written for this slot."
+                )
+                continue
+            if slot.path != csv_path:
+                print(f"[st_{st_idx}] Using {slot.path.stem} instead of {csv_path.stem}.")
+
+            _store_generation(
+                results, kind, str_idx, slot.content, {"Table_0": slot.path.stem}, slot.elapsed,
             )
-
-            generation_time = __import__("time").perf_counter() - start
-
-            _store_generation(results, kind, str_idx, content, aliases, generation_time)
             save_json(results, output_file)
             sys.stdout.flush()
 
-            actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
+            actual_tokens = _tokens_used(slot.content)
             cooldown = _compute_timeout(actual_tokens)
             print(f"[st_{st_idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
             __import__("time").sleep(cooldown)
-            
+
     # ── Cross-table generation ────────────────────────────────────────────────
     for idx, match in enumerate(all_matches):
         #if _is_single_table_candidate(match):
@@ -678,12 +914,19 @@ def create_statements(
 
         start = __import__("time").perf_counter()
 
-        content = cross_agent.generate_statements(
-            dataset_paths, aliases, kind,
-            match_for_planner,
-            involved_cols, metadatas,
-            max_cols, sample_size=5
-        )
+        try:
+            content = cross_agent.generate_statements(
+                dataset_paths, aliases, kind,
+                match_for_planner,
+                involved_cols, metadatas,
+                max_cols, sample_size=5
+            )
+        except Exception:
+            logger.exception(
+                "[%d] %s failed to generate — no entry written; skipping.",
+                idx, ", ".join(aliases.values()),
+            )
+            continue
 
         generation_time = __import__("time").perf_counter() - start
 
@@ -947,12 +1190,26 @@ def generate_statements(cfg: OrQAConfig) -> None:
     # yet, Elasticsearch down, ...) — the check then no-ops rather than
     # blocking generation.
     search_index = load_index(cfg)
-    # The CKAN family index (family-stratified sampling + the retrieval
-    # contract's Level A/B — see FamilyIndex) and the retriever panel behind
-    # it (None when the gate is off or unbuildable) — built ONCE and shared
-    # across every generation call below, same lifetime as search_index.
+    _require_index(cfg, search_index)
+    # The CKAN family index (family-stratified sampling — see FamilyIndex),
+    # and the retriever panel behind the retrievability gate (None when the
+    # gate is off or unbuildable) — built ONCE and shared across every
+    # generation call below, same lifetime as search_index.
     family_index = _build_family_index(cfg)
-    retrieval_panel = _build_retrieval_panel(cfg, search_index, family_index)
+    # The index as the PORTAL searches it (AND over its own fields) when
+    # tasks.mcp_search.retrieval_contract asks for that — used for the
+    # keyword-anchor search and the panel's keyword retriever, so "found"
+    # means what it means to the portal. The unwrapped index still backs the
+    # dense retriever, and is untouched for any other consumer.
+    gate_index = _build_gate_index(cfg, search_index)
+    retrieval_panel = _build_retrieval_panel(
+        cfg,
+        search_index,
+        keyword_index=gate_index if gate_index is not search_index else None,
+        # Solr only holds part of the metadata the embedding cache covers:
+        # rank the other retrievers on the same field the portal has.
+        universe=gate_index.resource_ids() if isinstance(gate_index, SolrDatasetIndex) else None,
+    )
     for lang in ["PANDAS"]:#,"SQL"]:
         create_statements(
             cfg.llm_config_path.joinpath("litellm.yaml"),
@@ -968,7 +1225,7 @@ def generate_statements(cfg: OrQAConfig) -> None:
             single_table_query_count=cfg.statement_generation.single_table_query_count,
             languages=cfg.statement_generation.detected_languages,
             seed=cfg.seed,
-            search_index=search_index,
+            search_index=gate_index,
             keyword_search_top_k_coefficient=cfg.mcp_search.keyword_search_top_k_coefficient,
             multi_table_query_count=cfg.statement_generation.multi_table_query_count,
             gate_unretrievable_groups=cfg.mcp_search.gate_unretrievable_groups,
@@ -982,7 +1239,6 @@ def generate_statements(cfg: OrQAConfig) -> None:
             retrieval_contract_min_agreement=cfg.mcp_search.retrieval_contract.min_agreement,
             retrieval_contract_top_k_per_table=cfg.mcp_search.retrieval_contract.top_k_per_table,
             retrieval_contract_max_top_k=cfg.mcp_search.retrieval_contract.max_top_k,
-            retrieval_contract_max_residual_siblings=cfg.mcp_search.retrieval_contract.max_residual_siblings,
             retrieval_contract_single_table_top_k=cfg.mcp_search.retrieval_contract.single_table_top_k,
-            generate_reference_questions=cfg.statement_generation.generate_reference_questions,
+            max_question_corrections=cfg.statement_generation.max_question_corrections,
         )

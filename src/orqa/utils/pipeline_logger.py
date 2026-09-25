@@ -285,6 +285,10 @@ class PipelineLogger:
         ("expected_result_approval", "result-type"),
         ("metric_combination_approval", "combination"),
         ("topic_linkage_approval", "topic-linkage"),
+        ("readability_approval", "readability"),
+        ("grounding_approval", "grounding"),
+        ("table_necessity_approval", "table-need"),
+        ("difficulty_approval", "difficulty"),
         ("plan_compliance_approval", "compliance"),
         ("present_result_approval", "result"),
     )
@@ -350,6 +354,49 @@ class PipelineLogger:
                 print(_indent(f"{YELLOW}feedback   {RESET}{vote['feedback']}", level + 2))
             if vote.get("suggestions"):
                 print(_indent(f"{BLUE}suggestion {RESET}{vote['suggestions']}", level + 2))
+
+    def retrieval_votes(self, summary: dict, title: str = "", level: int = 1) -> None:
+        """The retriever panel's vote on one question (see ``orqa.agent.
+        utility.retrievability_gate.describe_votes``): the tally, then one line
+        per voter — lexical, semantic, hybrid — with the rank each table got."""
+        if not summary or not summary.get("voters"):
+            return
+        n = len(summary["voters"])
+        passes = summary.get("passes", 0)
+        tally = (
+            f"{GREEN}{passes} ✔{RESET} · {YELLOW}{n - passes} ✖{RESET}"
+            f"   {DIM}need {summary.get('need', n)} · top {summary.get('top_k', '?')}{RESET}"
+        )
+        head = f"{_badge('RETRIEVAL', BG_CYAN)}  {tally}"
+        if title:
+            head += f"  {DIM}{title}{RESET}"
+        print(_indent(head, level))
+        for voter in summary["voters"]:
+            mark = f"{GREEN}✔{RESET}" if voter.get("pass") else f"{YELLOW}✖{RESET}"
+            cells = []
+            for table in voter.get("tables", []):
+                if table.get("rank") is None:
+                    cell = f"{RED}{table['alias']} —{RESET}"
+                else:
+                    colour = GREEN if table.get("within") else YELLOW
+                    cell = f"{colour}{table['alias']} #{table['rank']}{RESET}"
+                if table.get("via"):
+                    cell += f"{DIM} (via {', '.join(table['via'])}){RESET}"
+                anchor = table.get("anchor")
+                if anchor and anchor.get("terms"):
+                    # The lexical gate's first check: the table's verified
+                    # keywords, and which of them the question lacks.
+                    keywords = " ".join(anchor["terms"])
+                    if anchor.get("missing"):
+                        cell += f"{DIM} · keywords [{keywords}] missing: {', '.join(anchor['missing'])}{RESET}"
+                    else:
+                        cell += f"{DIM} · keywords [{keywords}] {GREEN}✔ in question{RESET}"
+                cells.append(cell)
+            label = f"{voter.get('label', '?'):<8}"
+            print(_indent(
+                f"{mark} {label} {DIM}{voter.get('name', '')}{RESET}   " + "   ".join(cells),
+                level + 1,
+            ))
 
     # ------------------------------------------------------------------ #
     # Plan judge loop (judge → revise → re-judge)                         #

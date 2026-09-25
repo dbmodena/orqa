@@ -262,7 +262,15 @@ def load_normalized_datasets_metadata(metadata_path: Path) -> dict[str, dict]:
 
 
 def prepare_normalized_metadata_for_prompt(record: dict) -> dict:
-    """Adapt a normalized metadata record to the shape consumed by prompts."""
+    """Adapt a normalized metadata record to the shape consumed by prompts.
+
+    ``dataset_id`` and ``resource_id`` are deliberately NOT carried: they are
+    portal-internal identifiers (UUIDs on CKAN) that tell a model nothing about
+    the data, so no prompt built from this dict can ever show them. Neither are
+    ``dataset_url`` / ``download_url``, which embed those same ids (on the UK
+    CKAN corpus in a quarter of the download URLs) and are as uninformative.
+    Callers that need to look a record up already have its resource id — this
+    dict is keyed by it (see ``load_normalized_datasets_metadata``)."""
     return {
         "title": record.get("title", "N/A"),
         "resource_name": record.get("resource_name", "N/A"),
@@ -273,12 +281,8 @@ def prepare_normalized_metadata_for_prompt(record: dict) -> dict:
         "tags": record.get("tags", []),
         "temporal_coverage": record.get("temporal_coverage", "N/A"),
         "source": record.get("source", "N/A"),
-        "dataset_id": record.get("dataset_id", "N/A"),
-        "resource_id": record.get("resource_id", "N/A"),
         "created_at": record.get("created_at", "N/A"),
         "modified_at": record.get("modified_at", "N/A"),
-        "dataset_url": record.get("dataset_url", "N/A"),
-        "download_url": record.get("download_url", "N/A"),
         "format": record.get("format", "N/A"),
     }
 
@@ -396,6 +400,40 @@ def _sniff_csv_separator(dataset_path: Path, sample_bytes: int = 65_536) -> Opti
         return None
 
 
+def _read_csv_resilient(dataset_path: Path, csv_opts: dict) -> pd.DataFrame:
+    """``pd.read_csv`` with automatic, narrowest-first fallbacks for the two
+    malformed-CSV patterns actually seen in this corpus (both on Valencia's
+    CKAN) — neither is detectable upfront, only once the parser hits the
+    specific byte/row that trips it:
+
+    - Legacy Windows-codepage encoding instead of UTF-8 -> retry decoded as
+      latin-1, which (unlike cp1252) maps every byte 0x00-0xFF to a code
+      point and so cannot raise the same way twice.
+    - An unescaped delimiter inside an unquoted free-text cell, desyncing the
+      C parser's field count for just that row -> retry with bad lines
+      skipped rather than losing the whole table over one dirty row.
+
+    Each fallback is tried at most once (``csv_opts`` already carrying the
+    fallback value is the signal not to retry it again), so a file broken in
+    some third way still raises instead of looping.
+    """
+    try:
+        return pd.read_csv(dataset_path, **csv_opts)
+    except UnicodeDecodeError:
+        if "encoding" in csv_opts:
+            raise
+        return _read_csv_resilient(dataset_path, {**csv_opts, "encoding": "latin-1"})
+    except pd.errors.ParserError:
+        if "on_bad_lines" in csv_opts:
+            raise
+        logging.getLogger(__name__).warning(
+            "%s has malformed row(s) (unescaped delimiter in an unquoted "
+            "cell) — dropping the bad line(s) instead of the whole table.",
+            dataset_path,
+        )
+        return _read_csv_resilient(dataset_path, {**csv_opts, "on_bad_lines": "skip"})
+
+
 def pd_read_dataset(dataset_path: Path, opts: dict = {}) -> pd.DataFrame:
     match dataset_path.suffix:
         case ".csv":
@@ -404,7 +442,7 @@ def pd_read_dataset(dataset_path: Path, opts: dict = {}) -> pd.DataFrame:
                 sniffed = _sniff_csv_separator(dataset_path)
                 if sniffed is not None:
                     csv_opts["sep"] = sniffed
-            return pd.read_csv(dataset_path, **csv_opts)
+            return _read_csv_resilient(dataset_path, csv_opts)
         case ".parquet":
             return pd.read_parquet(dataset_path, **opts.get("parquet", {}))
         case _:

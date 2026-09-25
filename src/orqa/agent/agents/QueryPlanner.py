@@ -19,9 +19,14 @@ Design constraints implemented here (Requirements 5.1, 5.2, 6.1, 6.2):
 
 Plan *validation* and the re-request / free-text fallback (task 5.4) are
 implemented here too: :meth:`QueryPlanner.validate_plan` assigns contiguous
-``1..N`` step orders and checks table/column references, and :meth:`plan`
-re-requests the plan once on failure before falling back to a schema-valid
-free-text plan (Requirements 5.3, 5.4, 5.5, 5.6).
+``1..N`` step orders and checks table/column references, and
+:meth:`QueryPlanner.plan_batch` re-requests a plan once on failure before
+falling back to a schema-valid free-text plan (Requirements 5.3, 5.4, 5.5,
+5.6).
+
+The planner never writes a question: every plan answers one question that was
+written and approved upstream (see :mod:`orqa.agent.agents.QuestionStage`),
+which is pinned onto the plan and cannot change in a revision.
 """
 
 import json
@@ -29,7 +34,7 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Union, get_args
+from typing import Any, Iterable, List, Optional, Sequence, Union, get_args
 
 from pydantic import BaseModel, ValidationError
 
@@ -47,9 +52,9 @@ from ..prompting.models import (
 )
 from ..prompting.prompts import QueryPlannerPrompt
 from ..utility.column_provenance import compose_feedback, resolve_plan_columns
-from ..utility.difficulty_estimator import build_reconciliation_feedback, estimate_plan_tier
 from ..utility.structured_outputs import QueryLink, Table
 from ...utils import shield_dataframe_for_prompt
+from .table_analyzer import render_table_facts
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +75,60 @@ def _question_leaks_implementation(question: str) -> Optional[str]:
             "contains an underscore, which almost always means a raw column "
             "identifier was pasted into the question text verbatim"
         )
+    return None
+
+
+_HEADER_SEPARATORS = r"[\s_\-/]+"
+_CAMEL_CASE_RE = re.compile(r"[a-z][A-Z]")
+
+
+def _question_copies_column_header(question: str, headers: Iterable[str]) -> Optional[str]:
+    """Human-readable reason ``question`` reproduces a column header as it is
+    written in the table, or ``None``. The counterpart of the underscore check
+    above for the headers a question can copy WITHOUT an underscore.
+
+    Conservative on purpose — an ordinary word that merely coincides with a
+    header ("year", "borough", "amount") is just language and never flagged.
+    A header counts as copied when it is:
+
+    * a single identifier-like token (camel case, ALL CAPS such as ``DBN``, or
+      letters mixed with digits) that appears in the question exactly as
+      written; or
+    * two words written with capitals or joined by ``-``/``/``/``_`` ("Boro
+      Cd") that appear together exactly as written — a plain lowercase
+      two-word header is skipped, since the same two words are natural prose;
+    * three or more words that appear together, in any casing — nobody
+      says a three-word spreadsheet label by accident.
+    """
+    text = question or ""
+    for raw in headers:
+        header = str(raw).strip()
+        if not header or header.lower().startswith("unnamed"):
+            continue
+        words = [w for w in re.split(_HEADER_SEPARATORS, header) if w]
+        if not words:
+            continue
+        if len(words) == 1:
+            word = words[0]
+            identifier_like = (
+                bool(_CAMEL_CASE_RE.search(word))
+                or (word.isalpha() and word.isupper() and len(word) >= 2)
+                or (any(c.isdigit() for c in word) and any(c.isalpha() for c in word))
+            )
+            if identifier_like and re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(word)}(?![A-Za-z0-9])", text
+            ):
+                return f"copies the column header {header!r} as written"
+            continue
+        pattern = r"(?<![A-Za-z0-9])" + _HEADER_SEPARATORS.join(map(re.escape, words)) + r"(?![A-Za-z0-9])"
+        if len(words) >= 3:
+            found = re.search(pattern, text, re.IGNORECASE)
+        elif header != header.lower() or re.search(r"[_\-/]", header):
+            found = re.search(pattern, text)
+        else:
+            found = None
+        if found:
+            return f"copies the column header {header!r} as written"
     return None
 
 
@@ -170,89 +229,6 @@ class QueryPlanner:
     # Public API
     # ------------------------------------------------------------------
 
-    def plan(
-        self,
-        analyses: Sequence[dict],
-        aliases: dict,
-        match: Any,
-        involved_cols: Optional[dict],
-        stats: Sequence[TableStats],
-        languages: Optional[Sequence[str]] = None,
-        dfs: Optional[Sequence[Any]] = None,
-        table_metadata: Optional[dict] = None,
-    ) -> QueryPlan:
-        """Produce a structured query plan.
-
-        Args:
-            analyses: Per-table analysis dicts (one per alias).
-            aliases: Mapping of alias -> dataset name.
-            match: The upstream match constraint. Either a preformatted string,
-                ``None``, or an already-structured list of link dicts / QueryLinks.
-            involved_cols: Mapping of alias -> the columns that participate in the
-                mandatory relationship for that table.
-            stats: Per-table column statistics injected into the prompt.
-            languages: Detected languages for question phrasing.
-            dfs: The tables in scope (one per alias, same order), used to inject
-                a real up-to-10-row sample per table so questions ground their
-                concrete values in actually observed data rather than invented
-                ones.
-            table_metadata: Mapping of alias -> the table's portal metadata
-                (see ``table_analyzer.portal_metadata``), shown next to the
-                analyses so a question's period and program come from the
-                source rather than the analysis summary.
-
-        Returns:
-            A :class:`SQLQueryPlan` or :class:`PandasQueryPlan` (per ``self.kind``)
-            whose ``table_links`` preserve the provided constraints unchanged.
-        """
-        languages = list(languages or [])
-
-        # Build the mandatory relationship constraints ONCE. These are preserved
-        # verbatim in the produced plan (Requirements 6.1, 6.2).
-        constraint_links = self._build_constraint_links(match, involved_cols, aliases)
-
-        prompt = self._build_prompt(
-            analyses, aliases, constraint_links, stats, languages, dfs=dfs,
-            table_metadata=table_metadata,
-        )
-
-        # Known columns per alias are derived from the column statistics so plan
-        # validation (Requirement 5.5) can check every referenced column exists.
-        known_columns = self._known_columns(stats)
-
-        raw_plan, _usage = self._request_plan(prompt)
-        candidate = self._assemble_plan(raw_plan, constraint_links)
-
-        # First validation attempt. On success the normalised plan (contiguous
-        # 1..N orders) is returned directly (Requirement 5.3).
-        try:
-            return self.validate_plan(candidate, aliases, known_columns)
-        except PlanValidationError as exc:
-            first_error = str(exc)
-            logger.warning(
-                "Structured plan validation failed (%s); re-requesting once.\n"
-                "  raw plan: %s",
-                first_error,
-                json.dumps(raw_plan, ensure_ascii=False, default=str),
-            )
-
-        # Re-request the plan exactly once, feeding the validation error back to
-        # the model so it can correct the offending references (Requirement 5.6).
-        retry_prompt = self._retry_prompt(prompt, first_error)
-        raw_plan_retry, _usage_retry = self._request_plan(retry_prompt)
-        retry_candidate = self._assemble_plan(raw_plan_retry, constraint_links)
-
-        try:
-            return self.validate_plan(retry_candidate, aliases, known_columns)
-        except PlanValidationError as exc_retry:
-            logger.warning(
-                "Structured plan re-request also failed (%s); "
-                "falling back to a free-text plan.\n  raw plan: %s",
-                exc_retry,
-                json.dumps(raw_plan_retry, ensure_ascii=False, default=str),
-            )
-            return self._free_text_fallback(retry_candidate, aliases, constraint_links)
-
     def plan_batch(
         self,
         analyses: Sequence[dict],
@@ -261,277 +237,131 @@ class QueryPlanner:
         involved_cols: Optional[dict],
         stats: Sequence[TableStats],
         languages: Optional[Sequence[str]] = None,
-        num_plans: int = 3,
         dfs: Optional[Sequence[Any]] = None,
-        retrievable_keywords: Optional[list[str]] = None,
-        distinguishing_facets: Optional[dict] = None,
         table_metadata: Optional[dict] = None,
+        *,
+        questions: Sequence[dict],
     ) -> List[QueryPlan]:
-        """Produce several independent query plans in a single LLM call.
+        """Plan every approved question in a single LLM call.
 
-        Unlike :meth:`plan` (one plan, one question), this asks the model for
-        ``num_plans`` *distinct* business questions over the same tables, each
-        with its own ``question``/``question_keywords`` and its own ordered
-        ``steps``.
+        The planner never writes a question: each plan answers one question
+        already written AND approved upstream (see
+        ``orqa.agent.agents.QuestionStage``), and is asked for its ordered
+        ``steps``, each table's role, and the result declaration.
 
-        Each returned plan preserves the same mandatory ``table_links`` as
-        :meth:`plan` (the upstream ``match``/``involved_cols`` constraints are
-        never altered), and each plan is independently validated: a plan that
-        fails validation is re-requested once on its own (not the whole batch),
-        then falls back to a schema-valid free-text plan if the retry also
-        fails (mirrors the per-plan behaviour of :meth:`plan`/:meth:`validate_plan`).
+        Each returned plan preserves the mandatory ``table_links`` from the
+        upstream ``match``/``involved_cols`` constraints (never altered), and
+        each plan is independently validated: a plan that fails validation is
+        re-requested once on its own (not the whole batch), then falls back to
+        a schema-valid free-text plan if the retry also fails.
 
         Args:
             analyses: Per-table analysis dicts (one per alias).
             aliases: Mapping of alias -> dataset name.
-            match: The upstream match constraint (see :meth:`plan`).
+            match: The upstream match constraint.
             involved_cols: Mapping of alias -> mandatory relationship columns.
             stats: Per-table column statistics injected into the prompt.
-            languages: Detected languages for question phrasing.
-            num_plans: How many distinct plans to request. The model may return
-                fewer (e.g. a single-table run with little to decompose); it is
-                never padded back up to ``num_plans``.
+            languages: Detected languages for the plans' metadata fields.
             dfs: The tables in scope (one per alias, same order), used to inject
-                a real up-to-10-row sample per table so questions ground their
+                a real up-to-10-row sample per table so the steps ground their
                 concrete values in actually observed data rather than invented
                 ones.
-            retrievable_keywords: A keyword set EMPIRICALLY VERIFIED (see
-                ``orqa.agent.utility.keyword_suggestion.
-                suggest_retrievable_keywords``) to surface every table's
-                FAMILY within a bounded metadata-vocabulary search, computed
-                BEFORE this call against the real reverse index — not a
-                guess. Offered to the model as suggested question vocabulary
-                (see :meth:`_render_retrievable_keywords`) — a HINT only:
-                nothing here forces it into the returned plan, since actual
-                retrievability is now checked deterministically against the
-                question text itself (see
-                ``orqa.agent.utility.retrievability_gate.
-                check_question_retrievability``, run by the plan judge).
-                ``None``/empty when unavailable — the prompt then falls back
-                to its ordinary retrievability guidance alone.
-            distinguishing_facets: ``{alias: [detail, ...]}`` — the details
-                (a period, a qualifying word, a data-scope value; see
-                ``orqa.benchmark.families.distinguishing_facets``) that rule
-                a gold table's same-family siblings out. Rendered as a
-                DISTINGUISHING DETAILS prompt section the question must
-                state; also checked deterministically by the plan judge.
-            table_metadata: Same as :meth:`plan`; also forwarded to every
-                revision this batch triggers.
+            table_metadata: Mapping of alias -> the table's portal metadata
+                (see ``table_analyzer.portal_metadata``); also forwarded to
+                every revision this batch triggers.
+            questions: The approved questions, ``[{"question": str,
+                "question_keywords": [str, ...], "difficulty": "easy" |
+                "medium" | "hard"}, ...]``, at least one. Plan ``i`` is the
+                plan for ``questions[i]``, whose text, keywords and
+                ``difficulty`` are pinned onto it after every request (never
+                trusted to the model). The difficulty is the slot's target
+                tier, judged on the QUESTION upstream: nothing on the plan side
+                estimates, checks or revises against a tier, so plans in a
+                batch need not have distinct tiers. No free-text placeholder
+                plan is invented when the model returns nothing: the result
+                may then be empty, or shorter than ``questions`` (an unplanned
+                question is dropped, never guessed at).
 
         Returns:
-            A non-empty list of kind-appropriate query plans, each independently
-            schema-valid, each preserving the mandatory ``table_links``.
+            A list of kind-appropriate query plans, each independently
+            schema-valid, each preserving the mandatory ``table_links``; empty
+            when nothing could be planned.
         """
+        if not questions:
+            raise ValueError("plan_batch needs at least one approved question to plan")
         languages = list(languages or [])
-        num_plans = max(1, int(num_plans))
+        fixed = [dict(q) for q in questions]
 
         constraint_links = self._build_constraint_links(match, involved_cols, aliases)
         known_columns = self._known_columns(stats)
 
         prompt = self._build_prompt(
             analyses, aliases, constraint_links, stats, languages,
-            num_plans=num_plans, dfs=dfs,
-            retrievable_keywords=retrievable_keywords,
-            distinguishing_facets=distinguishing_facets,
+            dfs=dfs,
             table_metadata=table_metadata,
+            fixed_questions=fixed,
         )
         raw_set, _usage = self._request_plan_batch(prompt)
         raw_plans = self._extract_raw_plans(raw_set)
 
+        if len(raw_plans) != len(fixed):
+            logger.warning(
+                "Fixed-question planning returned %d plan(s) for %d "
+                "question(s); pairing by position — an unmatched "
+                "question is dropped.", len(raw_plans), len(fixed),
+            )
+        paired = list(zip(raw_plans, fixed))
+        raw_plans = [self._pin_question(rp, fq) for rp, fq in paired]
+        fixed_by_index = [fq for _, fq in paired]
+
         plans: List[QueryPlan] = [
             self._validate_or_retry_one(
                 raw_plan, prompt, constraint_links, aliases, known_columns,
+                fixed_question=fixed_question,
             )
-            for raw_plan in raw_plans
+            for raw_plan, fixed_question in zip(raw_plans, fixed_by_index)
         ]
 
         if not plans:
-            # The model returned nothing usable at all — fall back to a single
-            # free-text plan so the caller always gets at least one plan back.
-            empty = self._empty_plan(constraint_links)
-            plans = [self._free_text_fallback(empty, aliases, constraint_links)]
+            return []
 
-        plans = self._dedupe_difficulties(
-            plans, analyses, aliases, match, involved_cols, stats, languages,
-            dfs, retrievable_keywords, distinguishing_facets, table_metadata,
-        )
-        plans = self._reconcile_difficulty(
-            plans, analyses, aliases, match, involved_cols, stats, languages,
-            dfs, retrievable_keywords, distinguishing_facets, table_metadata,
-        )
         plans = [self._pin_table_descriptions(p, analyses) for p in plans]
 
         return plans
 
-    def _dedupe_difficulties(
-        self,
-        plans: List[QueryPlan],
-        analyses: Sequence[dict],
-        aliases: dict,
-        match: Any,
-        involved_cols: Optional[dict],
-        stats: Sequence[TableStats],
-        languages: Sequence[str],
-        dfs: Optional[Sequence[Any]],
-        retrievable_keywords: Optional[list[str]],
-        distinguishing_facets: Optional[dict],
-        table_metadata: Optional[dict] = None,
-    ) -> List[QueryPlan]:
-        """Ensure a batch has no duplicate difficulty tiers — deterministic,
-        code-level, no judge involved.
+    @staticmethod
+    def _revision_pins(plan: QueryPlan) -> dict:
+        """Fields a revision may never change: the question with its keywords
+        and its difficulty (both settled upstream, on the question)."""
+        return {
+            "difficulty": plan.difficulty,
+            "question": plan.question,
+            "question_keywords": list(plan.question_keywords),
+        }
 
-        Keeps each tier's FIRST occurrence unchanged. Every later occurrence
-        of an already-used tier is reassigned to one of the tiers the batch
-        is still missing (in easy -> medium -> hard order) and sent through
-        a forced revision so its STEPS are redesigned to genuinely earn that
-        new tier — never just relabeled. Complements (does not overlap with)
-        the plan judge's per-plan Check 7: this pass guarantees tier
-        UNIQUENESS across the batch; Check 7 guarantees each individual
-        plan's tier is honest.
-        """
-        if len(plans) < 2:
-            return plans
-
-        all_tiers = ["easy", "medium", "hard"]
-        used = {p.difficulty for p in plans}
-        missing = iter(t for t in all_tiers if t not in used)
-        seen: set = set()
-        result: List[QueryPlan] = []
-        for plan in plans:
-            if plan.difficulty not in seen:
-                seen.add(plan.difficulty)
-                result.append(plan)
-                continue
-            target = next(missing, None)
-            if target is None:
-                # No missing tier left to reassign to (only possible with a
-                # batch of more than 3 plans, which the live pipeline never
-                # requests) — leave the duplicate as-is rather than guess.
-                result.append(plan)
-                continue
-            logger.info(
-                "Plan difficulty dedup: reassigning duplicate '%s' -> '%s'",
-                plan.difficulty, target,
-            )
-            retarget = plan.model_copy(update={"difficulty": target})
-            feedback = (
-                f"This plan's difficulty (`{plan.difficulty}`) duplicates "
-                "another plan already in this batch. It is REASSIGNED to "
-                f"`{target}` — redesign the STEPS (add or remove operations "
-                f"or tables) so the plan's actual complexity genuinely earns "
-                f"the `{target}` tier per the DIFFICULTY rubric, not just the "
-                "label."
-            )
-            revised, _usage = self.revise_plan(
-                retarget, feedback, analyses, aliases, match, involved_cols,
-                stats, languages, dfs=dfs,
-                retrievable_keywords=retrievable_keywords,
-                distinguishing_facets=distinguishing_facets,
-                table_metadata=table_metadata,
-            )
-            seen.add(target)
-            result.append(revised if revised is not None else retarget)
-        return result
-
-    def _reconcile_difficulty(
-        self,
-        plans: List[QueryPlan],
-        analyses: Sequence[dict],
-        aliases: dict,
-        match: Any,
-        involved_cols: Optional[dict],
-        stats: Sequence[TableStats],
-        languages: Sequence[str],
-        dfs: Optional[Sequence[Any]],
-        retrievable_keywords: Optional[list[str]],
-        distinguishing_facets: Optional[dict],
-        table_metadata: Optional[dict] = None,
-    ) -> List[QueryPlan]:
-        """Verify each plan's declared `difficulty` against the deterministic
-        structural/data-engineering estimate (see
-        ``orqa.agent.utility.difficulty_estimator``) — code-level, no judge
-        involved, same "deterministic, no judge involved" spirit as
-        :meth:`_dedupe_difficulties` — and force one corrective revision on
-        a mismatch, feeding the estimate's own named gaps back as feedback
-        rather than a vague "make it harder/easier" instruction.
-
-        Runs AFTER :meth:`_dedupe_difficulties` (tier uniqueness first, so a
-        reassigned duplicate's revision is what gets checked here) and
-        BEFORE the plan ever reaches the judge panel — the same
-        "catch what's mechanically checkable before spending a judge call"
-        principle already used for keyword-searchability (see
-        ``agent._judge_plans``). This pass is now the ONLY difficulty
-        check: the plan judge no longer votes on the tier at all, because
-        difficulty is EFFORT computed deterministically from the plan's own
-        steps, not an opinion. A mismatch this pass cannot revise away is
-        stamped with the computed tier below rather than forwarded, so a
-        knowingly-wrong label never reaches the panel or the benchmark.
-
-        One revision attempt per plan, mirroring the rest of this file's
-        single-retry convention — a plan still mismatched after its
-        revision is passed through unchanged and left to the judge panel.
-        """
-        result: List[QueryPlan] = []
-        for plan in plans:
-            estimate = estimate_plan_tier(plan)
-            if estimate.tier == plan.difficulty:
-                result.append(plan)
-                continue
-            feedback = build_reconciliation_feedback(estimate, plan.difficulty)
-            logger.info(
-                "Plan difficulty reconciliation: declared '%s', computed "
-                "'%s' — revising once. %s",
-                plan.difficulty, estimate.tier, estimate.explanation,
-            )
-            revised, _usage = self.revise_plan(
-                plan, feedback, analyses, aliases, match, involved_cols,
-                stats, languages, dfs=dfs,
-                retrievable_keywords=retrievable_keywords,
-                distinguishing_facets=distinguishing_facets,
-                table_metadata=table_metadata,
-            )
-            candidate = revised if revised is not None else plan
-            re_estimate = estimate_plan_tier(candidate)
-            if re_estimate.tier != candidate.difficulty:
-                # The revision could not reshape the steps to the declared
-                # tier. Forwarding the mismatch to the judge is a dead end:
-                # Check 5 declares `structural_tier` authoritative ("never
-                # re-derive or second-guess") and narrows the vote to two
-                # DATA-ENGINEERING questions, so on a purely STRUCTURAL
-                # mismatch the judge has nothing it is permitted to weigh —
-                # it can only reject, round after round, while the
-                # never-relabel rule forbids the one fix that would resolve
-                # it. Observed live: a medium-slot plan burned all four
-                # attempts on `difficulty` alone with every other layer
-                # passing.
-                #
-                # Stamp the computed tier instead. The estimator is
-                # deterministic and already authoritative, so this makes the
-                # shipped label HONEST rather than letting a knowingly wrong
-                # one reach the benchmark. It may leave the batch with a
-                # duplicate tier — an outcome _dedupe_difficulties already
-                # accepts rather than guessing (see its "no missing tier
-                # left to reassign to" branch).
-                logger.warning(
-                    "Plan difficulty reconciliation: still mismatched after "
-                    "revision (declared '%s', computed '%s') — stamping the "
-                    "computed tier. %s",
-                    candidate.difficulty, re_estimate.tier,
-                    re_estimate.explanation,
-                )
-                candidate = candidate.model_copy(
-                    update={"difficulty": re_estimate.tier}
-                )
-            result.append(candidate)
-        return result
+    @staticmethod
+    def _pin_question(raw_plan: dict, fixed_question: dict) -> dict:
+        """A copy of a raw plan dict with the upstream-approved question and
+        keywords — and its difficulty tier — forced over whatever the model
+        returned; deterministic, like ``_pin_table_descriptions``: the prompt
+        already asks the model to copy them verbatim, but a request is not a
+        guarantee. A question carrying no valid tier leaves the model's own."""
+        pinned = {
+            **raw_plan,
+            "question": fixed_question["question"],
+            "question_keywords": list(fixed_question.get("question_keywords") or []),
+        }
+        tier = str(fixed_question.get("difficulty") or "").strip().lower()
+        if tier in get_args(_DIFFICULTY_LEVELS):
+            pinned["difficulty"] = tier
+        return pinned
 
     def _pin_table_descriptions(
         self, plan: QueryPlan, analyses: Sequence[dict]
     ) -> QueryPlan:
         """Overwrite each `tables[].description`/`.keywords` with the cached
         table-analysis value for that alias — deterministic, no judge
-        involved, same spirit as :meth:`_dedupe_difficulties` /
-        :meth:`_reconcile_difficulty` above.
+        involved.
 
         The prompt (query_planner.md) already asks the model to copy these
         verbatim from TABLE-LEVEL ANALYSIS, but that is a request, not a
@@ -585,27 +415,21 @@ class QueryPlanner:
         stats: Sequence[TableStats],
         languages: Optional[Sequence[str]] = None,
         dfs: Optional[Sequence[Any]] = None,
-        retrievable_keywords: Optional[list[str]] = None,
-        distinguishing_facets: Optional[dict] = None,
         table_metadata: Optional[dict] = None,
     ) -> tuple[Optional[QueryPlan], dict]:
         """Re-request ONE plan corrected against reviewer feedback.
 
+        The plan's question was approved upstream, so a revision may change
+        only the steps / table roles / the result declaration: the prompt says
+        so and the question and its keywords are pinned back onto the result,
+        exactly like ``difficulty`` is (see :meth:`_revision_pins`).
+
         Used by the plan judge panel's correction loop: when the panel rejects
         a plan, its aggregated feedback/suggestions are handed back here so
-        the planner can rewrite the question and/or steps. The revised plan
-        goes through the same structural validation as any other plan, with
-        one validation-error retry; the mandatory ``table_links`` constraints
-        are preserved unchanged, exactly as in :meth:`plan`.
-
-        Args:
-            retrievable_keywords: Same pre-verified keyword set as
-                :meth:`plan_batch` (must be the SAME set passed to the
-                original ``plan_batch`` call this plan came from, so a
-                revision never drifts away from the anchor the run started
-                with) — re-included here because a correction round rebuilds
-                the base prompt from scratch rather than reusing the
-                original call's.
+        the planner can rewrite the steps. The revised plan goes through the
+        same structural validation as any other plan, with one
+        validation-error retry; the mandatory ``table_links`` constraints are
+        preserved unchanged, exactly as in :meth:`plan_batch`.
 
         Returns:
             ``(revised_plan, usage_total)`` — ``revised_plan`` is ``None``
@@ -619,24 +443,29 @@ class QueryPlanner:
 
         base_prompt = self._build_prompt(
             analyses, aliases, constraint_links, stats, languages, dfs=dfs,
-            retrievable_keywords=retrievable_keywords,
-            distinguishing_facets=distinguishing_facets,
             table_metadata=table_metadata,
+            fixed_questions=[
+                {"question": plan.question, "question_keywords": list(plan.question_keywords)}
+            ],
+        )
+        rewrite_scope = (
+            "fix the steps, the tables' roles and the result declaration "
+            "as needed. The QUESTION is frozen — it was approved before "
+            "planning: keep `question` and `question_keywords` exactly "
+            "as given (anything you return for them is ignored), and "
+            "never try to fix a problem by rewording it."
         )
         correction_prompt = (
             f"{base_prompt}\n\n"
             "### PLAN CORRECTION REQUEST\n"
             "A review panel rejected the plan below. Revise it so every point "
-            "of the review feedback is addressed — rewrite the question and/or "
-            "the steps as needed, keeping the question concise, anchored to a "
-            "specific topic, and phrased like an average non-technical user "
-            "seeking an insight. Return a SINGLE flat JSON object matching the "
+            f"of the review feedback is addressed — {rewrite_scope} "
+            "Return a SINGLE flat JSON object matching the "
             "plan schema directly (`question`, `steps`, `table_links`, ...) at "
             "the top level. Do NOT wrap it in a `plans` list or any other key. "
-            "Do not try to fix a difficulty-correspondence rejection by "
-            "changing the `difficulty` value itself — it is fixed for this "
-            "plan; only add or remove STEPS so the plan's actual complexity "
-            "matches it (any `difficulty` you return here is ignored).\n\n"
+            "The `difficulty` is fixed for this plan and is not a reason to "
+            "add or remove steps (any `difficulty` you return here is "
+            "ignored).\n\n"
             "### PLAN TO CORRECT\n"
             f"{json.dumps(plan.model_dump(), indent=2, ensure_ascii=False, default=str)}\n\n"
             "### REVIEW FEEDBACK\n"
@@ -650,11 +479,11 @@ class QueryPlanner:
         raw_plan, usage = self._request_plan(correction_prompt)
         _accumulate(usage)
         candidate = self._assemble_plan(raw_plan, constraint_links)
-        # The difficulty tier is fixed for a correction round — the model may
-        # only change the STEPS to match it, never relabel. Force-override
-        # whatever the model returned, mirroring how table_links is already
-        # force-preserved above (see _assemble_plan's docstring).
-        candidate = candidate.model_copy(update={"difficulty": plan.difficulty})
+        # The question, its keywords and its difficulty are fixed for a
+        # correction round. Force-override whatever the model returned,
+        # mirroring how table_links is already force-preserved above (see
+        # _assemble_plan's docstring).
+        candidate = candidate.model_copy(update=self._revision_pins(plan))
         try:
             validated = self.validate_plan(candidate, aliases, known_columns)
             validated = self._pin_table_descriptions(validated, analyses)
@@ -670,7 +499,9 @@ class QueryPlanner:
         raw_retry, usage_retry = self._request_plan(retry_prompt)
         _accumulate(usage_retry)
         retry_candidate = self._assemble_plan(raw_retry, constraint_links)
-        retry_candidate = retry_candidate.model_copy(update={"difficulty": plan.difficulty})
+        retry_candidate = retry_candidate.model_copy(
+            update=self._revision_pins(plan)
+        )
         try:
             validated_retry = self.validate_plan(retry_candidate, aliases, known_columns)
             validated_retry = self._pin_table_descriptions(validated_retry, analyses)
@@ -689,12 +520,16 @@ class QueryPlanner:
         constraint_links: List[QueryLink],
         aliases: dict,
         known_columns: dict,
+        fixed_question: Optional[dict] = None,
     ) -> QueryPlan:
         """Validate a single raw plan from a batch, re-requesting just that one.
 
-        Mirrors the retry-once-then-fallback shape of :meth:`plan`, but scoped
-        to a single plan within the batch so one bad plan never forces a
-        re-request (and re-validation) of the whole set.
+        ``fixed_question`` (see ``plan_batch``'s ``questions``): re-pinned onto
+        the retry's raw plan too, since a re-request is a fresh model output.
+
+        Retries once, then falls back to a free-text plan, scoped to a single
+        plan within the batch so one bad plan never forces a re-request (and
+        re-validation) of the whole set.
         """
         candidate = self._assemble_plan(raw_plan, constraint_links)
         try:
@@ -708,9 +543,9 @@ class QueryPlanner:
                 json.dumps(raw_plan, ensure_ascii=False, default=str),
             )
 
-        # NOTE: base_prompt is the BATCH prompt (built with num_plans>1) and
-        # still contains its "produce N independent plans, return a `plans`
-        # list" instructions. But this retry is single-plan: _request_plan
+        # NOTE: base_prompt is the BATCH prompt (one plan per fixed question)
+        # and may still contain its "produce N plans, return a `plans` list"
+        # instructions. But this retry is single-plan: _request_plan
         # validates the response against the singular PandasQueryPlan/
         # SQLQueryPlan schema (via QueryPlannerClient), not the batch *Set*
         # schema. Without an explicit override, the model follows the
@@ -732,6 +567,8 @@ class QueryPlanner:
             first_error,
         )
         raw_retry, _usage = self._request_plan(retry_prompt)
+        if fixed_question is not None:
+            raw_retry = self._pin_question(raw_retry, fixed_question)
         retry_candidate = self._assemble_plan(raw_retry, constraint_links)
         try:
             return self.validate_plan(retry_candidate, aliases, known_columns)
@@ -1087,18 +924,6 @@ class QueryPlanner:
         """
         return f"{prompt}\n\n### VALIDATION FEEDBACK\n{error}"
 
-    def _empty_plan(self, constraint_links: List[QueryLink]) -> QueryPlan:
-        """A schema-valid, step-less plan used only as a fallback seed."""
-        if self._is_pandas:
-            return PandasQueryPlan(
-                question="", question_keywords=[], plan_keywords=[], steps=[],
-                table_links=constraint_links,
-            )
-        return SQLQueryPlan(
-            question="", question_keywords=[], plan_keywords=[], steps=[],
-            table_links=constraint_links,
-        )
-
     def _free_text_fallback(
         self,
         plan: QueryPlan,
@@ -1277,56 +1102,44 @@ class QueryPlanner:
         constraint_links: Sequence[QueryLink],
         stats: Sequence[TableStats],
         languages: Sequence[str],
-        num_plans: int = 1,
         dfs: Optional[Sequence[Any]] = None,
-        retrievable_keywords: Optional[list[str]] = None,
-        distinguishing_facets: Optional[dict] = None,
         table_metadata: Optional[dict] = None,
+        *,
+        fixed_questions: Sequence[dict],
     ) -> str:
-        if num_plans <= 1:
+        n_fixed = len(fixed_questions)
+        if n_fixed == 1:
             task_statement = (
-                "You are an expert data engineer. Produce an ordered, step-by-step "
-                "query plan that decomposes a single business question into concrete "
-                "operations over the provided tables. Return only valid JSON matching "
-                "the required schema.\n\n"
+                "You are an expert data engineer. Produce an ordered, "
+                "step-by-step query plan over the provided tables that "
+                "answers the FIXED QUESTION below. Return only valid JSON "
+                "matching the required schema.\n\n"
             )
-            batch_note = ""
         else:
             task_statement = (
                 "You are an expert data engineer. Produce "
-                f"{num_plans} INDEPENDENT, step-by-step query plans over the "
-                "provided tables, each decomposing a DIFFERENT business question. "
-                "Return only valid JSON matching the required schema, as a "
-                f"`plans` list of exactly {num_plans} plan objects.\n\n"
+                f"{n_fixed} step-by-step query plans over the provided "
+                "tables, one for EACH of the FIXED QUESTIONS below, in "
+                "the same order. Return only valid JSON matching the "
+                f"required schema, as a `plans` list of exactly {n_fixed} "
+                "plan objects.\n\n"
             )
-            if num_plans == 3:
-                difficulty_note = (
-                    "- Assign exactly one EASY, one MEDIUM, and one HARD plan across "
-                    "these 3 — one plan per tier, no repeats — per the DIFFICULTY "
-                    "rubric above. The tiers must come from genuinely different step "
-                    "structures, not from labeling three similarly-simple plans "
-                    "easy/medium/hard: if two plans would earn the same tier under "
-                    "the rubric applied honestly, restructure one of them (add a "
-                    "join/groupby/extra step, or simplify one down) until the three "
-                    "are actually distinct in complexity, not just in label.\n"
-                )
-            else:
-                difficulty_note = (
-                    f"- Spread these {num_plans} plans across the DIFFICULTY rubric "
-                    "above as evenly as possible, cycling easy -> medium -> hard -> "
-                    "easy -> ... so every tier is represented — never label multiple "
-                    "plans the same tier while leaving another tier completely "
-                    "unused when you have enough plans to cover all three. Each "
-                    "label must come from that plan's own step structure, honestly "
-                    "applied, not assigned to hit the target mix and then rationalized.\n"
-                )
-            batch_note = (
-                "MULTI-PLAN REQUIREMENTS:\n"
-                f"- Each of the {num_plans} plans is fully self-contained: its own "
-                "`question` and its own `steps`. Plans do NOT share steps.\n"
-                "- Do not repeat the same question across plans.\n"
-                f"{difficulty_note}\n"
-            )
+        batch_note = (
+            "FIXED-QUESTION REQUIREMENTS:\n"
+            "- The questions below are already approved. Plan i answers "
+            "question i: copy its text EXACTLY into that plan's "
+            "`question` — never reword, shorten or extend it — and copy "
+            "its listed terms into `question_keywords`.\n"
+            "- Design the steps that answer each question as naturally as "
+            "the tables allow. Every provided table must still be "
+            "genuinely needed by the steps.\n"
+            "- Copy each question's `difficulty` into that plan's "
+            "`difficulty`: it is fixed. Never shape, pad or trim the steps "
+            "to reach a tier.\n"
+            "- If a step would need a hardcoded literal for the current "
+            "date, avoid it and use a column value instead: the question "
+            "cannot be changed to state a reference point.\n\n"
+        )
 
         ops_statement = (
             "- Every step's `op` MUST be exactly one of these values — no "
@@ -1351,6 +1164,7 @@ class QueryPlanner:
         )
 
         return QueryPlannerPrompt().update(
+            fixed_questions=self._render_fixed_questions(fixed_questions),
             task_statement=task_statement,
             ops_statement=ops_statement,
             batch_note=batch_note,
@@ -1363,10 +1177,80 @@ class QueryPlanner:
             table_sample=self._render_table_sample(dfs, aliases),
             column_statistics=self._render_statistics(stats),
             detected_languages=json.dumps(list(languages), ensure_ascii=False),
-            retrievable_keywords=self._render_retrievable_keywords(retrievable_keywords),
-            distinguishing_details=self._render_distinguishing_details(distinguishing_facets),
             table_metadata=self._render_table_metadata(table_metadata, aliases),
         )
+
+    def question_context(
+        self,
+        analyses: Sequence[dict],
+        aliases: dict,
+        match: Any,
+        involved_cols: Optional[dict],
+        stats: Sequence[TableStats],
+        languages: Optional[Sequence[str]] = None,
+        dfs: Optional[Sequence[Any]] = None,
+        table_metadata: Optional[dict] = None,
+    ) -> dict:
+        """Prompt blocks for the question generator (see
+        ``orqa.agent.agents.QuestionGenerator``), rendered with this planner's
+        own renderers so the question agent sees the tables exactly as the
+        planner would. Column statistics are left out on purpose: a question
+        needs what the tables are about, which columns exist and real values —
+        not the cleaning signals the plan's steps will act on. The table FACTS
+        are in: computed over every row, they say which columns a question can
+        group or compare by, which is what a question's difficulty depends on.
+        """
+        links = self._build_constraint_links(match, involved_cols, aliases)
+        columns = {
+            table.alias: [f"{c.column} ({c.dtype})" for c in table.columns]
+            for table in stats
+        }
+        facts_block = "\n\n".join(
+            f"{alias}\n{render_table_facts(df)}"
+            for alias, df in zip(aliases, dfs or [])
+        ) or "(not available)"
+        tables_block = "\n".join([
+            "### TABLE ALIASES",
+            json.dumps(list(aliases.keys()), indent=2, ensure_ascii=False),
+            "",
+            "### TABLE-LEVEL ANALYSIS",
+            json.dumps({"tables": list(analyses)}, indent=2, ensure_ascii=False, default=str),
+            "",
+            "### TABLE METADATA (from the open-data portal)",
+            self._render_table_metadata(table_metadata, aliases),
+            "",
+            "### TABLE FACTS (computed over every row — a question can only group or compare by a column listed under Breakdowns)",
+            facts_block,
+            "",
+            "### COLUMNS (name and type — for your understanding only: never write a column name in the question)",
+            json.dumps(columns, indent=2, ensure_ascii=False),
+            "",
+            "### TABLE SAMPLE (real rows, up to 10 per table)",
+            self._render_table_sample(dfs, aliases),
+        ])
+        return {
+            "languages": ", ".join(languages or []) or "English",
+            "time_context": self._render_time_context(),
+            "links_block": self._render_links(links),
+            "tables_block": tables_block,
+        }
+
+    @staticmethod
+    def _render_fixed_questions(fixed_questions: Optional[Sequence[dict]]) -> str:
+        """The "### FIXED QUESTIONS" section — empty (omitted) unless the
+        questions were approved upstream. Ends with a blank line so it
+        slots in front of the next section header."""
+        if not fixed_questions:
+            return ""
+        lines = ["### FIXED QUESTIONS"]
+        for i, item in enumerate(fixed_questions, start=1):
+            lines.append(f"{i}. {item['question']}")
+            keywords = item.get("question_keywords") or []
+            if keywords:
+                lines.append(f"   question_keywords: {', '.join(keywords)}")
+            if item.get("difficulty"):
+                lines.append(f"   difficulty: {item['difficulty']}")
+        return "\n".join(lines) + "\n\n"
 
     @staticmethod
     def _render_table_metadata(table_metadata: Optional[dict], aliases: dict) -> str:
@@ -1377,71 +1261,6 @@ class QueryPlanner:
             {alias: table_metadata.get(alias) or {} for alias in aliases},
             indent=2, ensure_ascii=False, default=str,
         )
-
-    @staticmethod
-    def _render_retrievable_keywords(retrievable_keywords: Optional[list[str]]) -> str:
-        """The "### RETRIEVABLE KEYWORDS" prompt section — empty (section
-        omitted entirely, not printed as "none") when no pre-verified set is
-        available, so older behavior (retrievability guidance alone, no
-        anchor) is unchanged for portals with no reverse index configured.
-
-        A VOCABULARY HINT ONLY: unlike the old behavior, nothing pins these
-        into `question_keywords` — actual retrievability is checked
-        deterministically against the question TEXT by the plan judge (see
-        `orqa.agent.utility.retrievability_gate.
-        check_question_retrievability`), so a plan that ignores this hint is
-        still free to pass, and one that copies it verbatim into
-        `question_keywords` without also using it in the question's own
-        prose is still free to fail.
-        """
-        if not retrievable_keywords:
-            return ""
-        terms = ", ".join(f"`{kw}`" for kw in retrievable_keywords)
-        return (
-            "\n### RETRIEVABLE KEYWORDS (suggested vocabulary, not a "
-            "requirement)\n"
-            f"These exact terms — {terms} — were found, in a bounded search, "
-            "to surface every table's FAMILY within the retriever panel's "
-            "own top-K window. Not a checklist: treat them as the vocabulary "
-            "most likely to work, and lean on them for the terms that "
-            "actually pin this data down (a program or agency name, a "
-            "place, a period). Skip any that would only make the prose read "
-            "like a machine wrote it — a column header, a bare number, a "
-            "fragment that no person would say — and add whatever other "
-            "natural topical words the question needs. What actually "
-            "matters for retrieval is the QUESTION'S OWN PROSE, not this "
-            "list or `question_keywords` — a term copied into "
-            "`question_keywords` without also appearing in (or being "
-            "directly implied by) the question text does nothing.\n"
-        )
-
-    @staticmethod
-    def _render_distinguishing_details(distinguishing_facets: Optional[dict]) -> str:
-        """The "### DISTINGUISHING DETAILS" prompt section — empty when no
-        table in this group has same-family siblings a facet needs to rule
-        out (the common case for a family of one).
-
-        Unlike RETRIEVABLE KEYWORDS above, this is NOT a hint: the plan
-        judge's `check_question_retrievability` deterministically rejects a
-        question missing one of these, the same way it deterministically
-        rejects one whose family isn't reachable.
-        """
-        if not distinguishing_facets or not any(distinguishing_facets.values()):
-            return ""
-        lines = [
-            "\n### DISTINGUISHING DETAILS (must be stated in the question)\n"
-            "Each alias below shares its CKAN dataset with other files "
-            "(same title/topic, a different period/variant/scope) that this "
-            "question's PROSE must rule out by stating the listed detail(s) "
-            "in plain words — not just in `question_keywords`. A question "
-            "that would equally describe a sibling file is not retrievable "
-            "down to the right FILE even when it finds the right dataset."
-        ]
-        for alias, facets in distinguishing_facets.items():
-            if not facets:
-                continue
-            lines.append(f"- {alias}: {'; '.join(facets)}")
-        return "\n".join(lines) + "\n"
 
     @staticmethod
     def _render_time_context() -> str:

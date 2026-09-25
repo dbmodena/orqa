@@ -9,7 +9,7 @@ job*.sh
 venv
 .codex
 metadata_handling
-
+experiments
 *.ipynb_checkpoints
 data
 prev*
@@ -31,10 +31,10 @@ tests/*
 !tests/test_retrieval_panel.py
 !tests/test_retrievability_gate.py
 !tests/test_sampling.py
-!tests/test_reference_question_agent.py
 !tests/test_keyword_suggestion.py
 !tests/test_hybrid_index.py
 !tests/test_pandas_validator_errors.py
+!tests/test_normalize_metadata.py
 .claude
 .vscode
 # Archived TabPFN skill implementation — relocated out of the tracked
@@ -49,3 +49,5 @@ AGENTS.md
 metadata.json
 docs
 open_data
+# Local one-off scripts (e.g. question translation) — not part of the pipeline.
+scripts/

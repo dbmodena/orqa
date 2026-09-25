@@ -1,4 +1,4 @@
-"""The retriever panel behind the two-level retrievability contract.
+"""The retriever panel behind the retrievability contract.
 
 A question is only *retrievable* if it would actually be found — not by one
 search method's opinion, but by AGREEMENT across independently-built
@@ -9,22 +9,41 @@ makes — see ``orqa.agent.agents.BenchmarkSolver.BenchmarkSolverAgent.
 generate_keywords``). See ``orqa.agent.utility.retrievability_gate`` for how
 the panel's vote becomes a pass/fail gate.
 
-Ranks are collapsed to FAMILY ranks (see ``orqa.benchmark.families.
-FamilyIndex``) for the pass/fail decision — Level A only asks whether the
-right CKAN dataset was reached, never the specific file — while per-resource
-ranks are also returned for diagnostics.
+Ranks are those of the exact gold table: a retriever finds a table when the
+table itself — not merely another file of its dataset — is in the window.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Iterable, Optional, Sequence
-
-from .families import FamilyIndex
 
 # How far into a ranking a retriever is searched before giving up. Wider
 # than any plausible top_k so a rank just outside the pass/fail window is
 # still a real number for diagnostics, not a flat "not found" sentinel.
+logger = logging.getLogger(__name__)
+
 RANK_CEILING = 200
+
+# Every retriever a panel can hold, in the order they vote and are reported.
+#   lexical_question — BM25 over the raw question text (additive)
+#   dense_question   — embedding search over the question
+#   llm_keywords     — the solver's own LLM keyword extraction, searched
+#                      lexically (AND-matched, portal-restricted, when the
+#                      panel is given a portal view as its ``keyword_index``)
+#   hybrid_rrf       — Reciprocal Rank Fusion of llm_keywords + dense_question,
+#                      the fusion LakeGen's Solr hybrid mode uses
+RETRIEVER_NAMES = ("lexical_question", "dense_question", "llm_keywords", "hybrid_rrf")
+
+
+def _absent_rank(ranking: Sequence[str]) -> int:
+    """The rank reported for a gold id that is NOT in ``ranking``: strictly
+    beyond any window a caller can ask for. ``len(ranking) + 1`` — what this
+    used to be — sits INSIDE the window whenever a ranking is shorter than
+    ``top_k`` (a lexical AND search that matches only a handful of records,
+    an RRF list, a tiny corpus), so a table the retriever never returned
+    would pass."""
+    return max(len(ranking), RANK_CEILING) + 1
 
 
 def _unpack_keyword_result(result: Any) -> tuple[list[str], dict]:
@@ -74,9 +93,24 @@ class RetrieverPanel:
         keyword_extractor: ``question -> keywords`` (or ``(payload, usage)``,
             see ``_unpack_keyword_result``), or ``None`` to skip
             ``llm_keywords``. See ``make_llm_keyword_extractor``.
-        family_index: Collapses per-resource ranks to per-family ranks (see
-            ``orqa.benchmark.families.FamilyIndex``); ``None`` treats every
-            resource as its own singleton family.
+        retrievers: Which retrievers VOTE (names from ``RETRIEVER_NAMES``);
+            ``None`` — the default — is every retriever that is available.
+            A named retriever that is unavailable (no hybrid index, no
+            keyword extractor) is skipped; if that leaves none, every
+            available one votes instead (with a warning) rather than a gate
+            that can approve nothing.
+        keyword_index: The index ``llm_keywords`` searches. Defaults to the
+            lexical index; pass a ``PortalIndexView`` to make that retriever
+            answer the way the portal's AND-matching keyword search does.
+        universe: Resource ids the target search engine actually holds. Every
+            retriever's ranking is restricted to them, so a retriever that
+            ranks a wider collection (the local embedding cache covers the
+            whole normalized metadata; a Solr core may hold only part of it)
+            competes on the same field the real portal does. ``None`` keeps
+            every ranked id.
+        rrf_k / rrf_depth: ``hybrid_rrf``'s RRF constant (LakeGen uses 60) and
+            how many results each side contributes before fusing (LakeGen
+            fetches top 20).
     """
 
     def __init__(
@@ -84,23 +118,59 @@ class RetrieverPanel:
         lexical_index: Any,
         hybrid_index: Optional[Any] = None,
         keyword_extractor: Optional[Callable[[str], Any]] = None,
-        family_index: Optional[FamilyIndex] = None,
+        retrievers: Optional[Sequence[str]] = None,
+        keyword_index: Optional[Any] = None,
+        rrf_k: int = 60,
+        rrf_depth: int = 20,
+        universe: Optional[Iterable[str]] = None,
     ):
         self.lexical_index = getattr(hybrid_index, "lexical_index", None) or lexical_index
+        self.keyword_index = keyword_index if keyword_index is not None else self.lexical_index
         self.hybrid_index = hybrid_index
         self.keyword_extractor = keyword_extractor
-        self.family_index = family_index
+        if rrf_k < 1 or rrf_depth < 1:
+            raise ValueError("rrf_k and rrf_depth must be >= 1")
+        self.rrf_k = int(rrf_k)
+        self.rrf_depth = int(rrf_depth)
+        self.universe = frozenset(universe) if universe is not None else None
+        if retrievers is not None:
+            unknown = set(retrievers) - set(RETRIEVER_NAMES)
+            if unknown:
+                raise ValueError(
+                    f"unknown retriever(s) {sorted(unknown)}; valid: {list(RETRIEVER_NAMES)}"
+                )
+        self._requested = tuple(retrievers) if retrievers else None
         self._keyword_cache: dict[str, list[str]] = {}
         self._usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-    @property
-    def retriever_names(self) -> list[str]:
+    def _available(self) -> list[str]:
         names = ["lexical_question"]
         if self.hybrid_index is not None:
             names.append("dense_question")
         if self.keyword_extractor is not None:
             names.append("llm_keywords")
+        if self.hybrid_index is not None and self.keyword_extractor is not None:
+            names.append("hybrid_rrf")
         return names
+
+    @property
+    def retriever_names(self) -> list[str]:
+        """The retrievers that vote: available ones, narrowed to the
+        requested ``retrievers`` when given."""
+        available = self._available()
+        if self._requested is None:
+            # Default: what has always voted. ``hybrid_rrf`` is opt-in — adding
+            # it silently would shift every existing min_agreement decision.
+            return [n for n in available if n != "hybrid_rrf"]
+        chosen = [n for n in available if n in self._requested]
+        if not chosen:
+            logger.warning(
+                "None of the requested retrievers %s is available (have %s); "
+                "voting with every available retriever instead.",
+                list(self._requested), available,
+            )
+            return [n for n in available if n != "hybrid_rrf"]
+        return chosen
 
     def pop_usage(self) -> dict:
         """Token usage accumulated by ``llm_keywords`` calls since the last
@@ -126,14 +196,26 @@ class RetrieverPanel:
         """``{retriever_name: [resource_id, ...]}``, each ranked up to
         ``RANK_CEILING``. Only the retrievers this panel was actually built
         with appear."""
-        rankings: dict[str, list[str]] = {}
-        if question:
-            lexical_results = self.lexical_index.search(question, top_k=RANK_CEILING)
-        else:
-            lexical_results = []
-        rankings["lexical_question"] = [r.resource_id for r in lexical_results]
+        active = self.retriever_names
+        # hybrid_rrf fuses the other two, so it needs their rankings even when
+        # they do not vote themselves.
+        fuse = "hybrid_rrf" in active
+        computed: dict[str, list[str]] = {}
 
-        if self.hybrid_index is not None:
+        def keep(results) -> list[str]:
+            ids = [r.resource_id for r in results]
+            if self.universe is None:
+                return ids
+            return [rid for rid in ids if rid in self.universe]
+
+        if "lexical_question" in active:
+            if question:
+                lexical_results = self.lexical_index.search(question, top_k=RANK_CEILING)
+            else:
+                lexical_results = []
+            computed["lexical_question"] = keep(lexical_results)
+
+        if self.hybrid_index is not None and ("dense_question" in active or fuse):
             if question:
                 semantic_batches = self.hybrid_index.semantic_search_many(
                     [question], top_k=RANK_CEILING
@@ -141,40 +223,40 @@ class RetrieverPanel:
                 semantic_results = semantic_batches[0] if semantic_batches else []
             else:
                 semantic_results = []
-            rankings["dense_question"] = [r.resource_id for r in semantic_results]
+            computed["dense_question"] = keep(semantic_results)
 
-        if self.keyword_extractor is not None:
+        if self.keyword_extractor is not None and ("llm_keywords" in active or fuse):
             keywords = self._keywords_for(question) if question else []
             keyword_results = (
-                self.lexical_index.search(keywords, top_k=RANK_CEILING) if keywords else []
+                self.keyword_index.search(keywords, top_k=RANK_CEILING) if keywords else []
             )
-            rankings["llm_keywords"] = [r.resource_id for r in keyword_results]
+            computed["llm_keywords"] = keep(keyword_results)
 
-        return rankings
+        if fuse:
+            computed["hybrid_rrf"] = self._rrf(
+                [computed["llm_keywords"], computed["dense_question"]]
+            )
 
-    def _family_of(self, resource_id: str) -> str:
-        return self.family_index.family_id(resource_id) if self.family_index else resource_id
+        return {name: computed[name] for name in active}
 
-    def family_ranks(self, ranking: Sequence[str], gold_ids: Iterable[str]) -> dict[str, int]:
-        """1-indexed rank of each gold id's FAMILY — the best (lowest) rank
-        among any of its family's members appearing in ``ranking``. A gold
-        id whose family never appears gets the sentinel ``len(ranking) + 1``.
-        """
-        best_family_rank: dict[str, int] = {}
-        for i, resource_id in enumerate(ranking, start=1):
-            family = self._family_of(resource_id)
-            if family not in best_family_rank:
-                best_family_rank[family] = i
-        ceiling = len(ranking) + 1
-        return {
-            gold_id: best_family_rank.get(self._family_of(gold_id), ceiling)
-            for gold_id in gold_ids
-        }
+    def _rrf(self, rankings: Sequence[Sequence[str]]) -> list[str]:
+        """Reciprocal Rank Fusion: each ranking contributes ``1 / (k + rank)``
+        for its top ``rrf_depth`` results; a result absent from a ranking
+        gets nothing from it, so ranking well on EITHER side is enough.
+        Ties break on the first ranking's order, then id — deterministic."""
+        scores: dict[str, float] = {}
+        for ranking in rankings:
+            for rank, resource_id in enumerate(ranking[: self.rrf_depth], start=1):
+                scores[resource_id] = scores.get(resource_id, 0.0) + 1.0 / (self.rrf_k + rank)
+        first = {rid: i for i, rid in enumerate(rankings[0])} if rankings else {}
+        return sorted(scores, key=lambda r: (-scores[r], first.get(r, len(first)), r))
 
-    def resource_ranks(self, ranking: Sequence[str], gold_ids: Iterable[str]) -> dict[str, int]:
-        """1-indexed rank of each gold id itself (not its family)."""
+    def ranks(self, ranking: Sequence[str], gold_ids: Iterable[str]) -> dict[str, int]:
+        """1-indexed rank of each gold id in ``ranking``. A gold id that never
+        appears gets the sentinel ``_absent_rank`` — beyond ``RANK_CEILING``
+        however short the ranking is."""
         order = {resource_id: i for i, resource_id in enumerate(ranking, start=1)}
-        ceiling = len(ranking) + 1
+        ceiling = _absent_rank(ranking)
         return {gold_id: order.get(gold_id, ceiling) for gold_id in gold_ids}
 
     def vote(
@@ -183,34 +265,56 @@ class RetrieverPanel:
         gold_ids: Sequence[str],
         top_k: int,
         min_agreement: Optional[int] = None,
+        rankings: Optional[dict[str, list[str]]] = None,
+        extra: Optional[dict[str, dict]] = None,
     ) -> dict:
         """Rank ``question`` on every available retriever and vote.
 
-        A retriever "passes" when EVERY gold id's family rank is <= ``top_k``.
+        A retriever "passes" when EVERY gold id's rank is <= ``top_k``.
         ``approved`` is true when at least ``min_agreement`` retrievers pass
         — or, when fewer than ``min_agreement`` retrievers are available at
-        all, when ALL of them pass (see the module docstring's Level A).
+        all, when ALL of them pass.
 
-        Returns ``{"per_retriever": {name: {"pass", "family_ranks",
-        "resource_ranks"}}, "passes": int, "approved": bool,
+        ``rankings``: a precomputed :meth:`rank` result for this same
+        ``question``. Lets a caller that votes SEVERAL gold sets against one
+        question (e.g. one vote per table) pay for the retrievers — an
+        embedding call and an LLM keyword extraction — once, not per vote.
+
+        ``extra``: verdicts of voters that are not a single ranking of the
+        question — ``{name: {"pass": bool, "ranks": {...}, ...}}`` — each
+        counted as ONE vote next to
+        the ranked retrievers (see ``retrievability_gate._question_terms_vote``,
+        whose one verdict aggregates a keyword check per table).
+
+        Returns ``{"per_retriever": {name: {"pass", "ranks"}}, "passes": int, "approved": bool,
         "llm_keywords": [str, ...]}``.
         """
-        rankings = self.rank(question)
+        if rankings is None:
+            rankings = self.rank(question)
         per_retriever: dict[str, dict] = {}
         passes = 0
         for name, ranking in rankings.items():
-            family_ranks = self.family_ranks(ranking, gold_ids)
-            resource_ranks = self.resource_ranks(ranking, gold_ids)
-            ok = bool(family_ranks) and all(rank <= top_k for rank in family_ranks.values())
+            ranks = self.ranks(ranking, gold_ids)
+            # An EMPTY ranking finds nothing, so it can never pass: a missing
+            # gold table is ranked ``len(ranking) + 1``, which for an empty
+            # ranking is 1 — inside a top_k=1 window. That is what a
+            # keyword extractor returning no keywords, or a question sharing
+            # no term with the index, would otherwise silently approve.
+            ok = (
+                bool(ranking)
+                and bool(ranks)
+                and all(rank <= top_k for rank in ranks.values())
+            )
             if ok:
                 passes += 1
-            per_retriever[name] = {
-                "pass": ok,
-                "family_ranks": family_ranks,
-                "resource_ranks": resource_ranks,
-            }
+            per_retriever[name] = {"pass": ok, "ranks": ranks}
 
-        n_available = len(rankings)
+        for name, verdict in (extra or {}).items():
+            per_retriever[name] = verdict
+            if verdict["pass"]:
+                passes += 1
+
+        n_available = len(rankings) + len(extra or {})
         required = min(min_agreement, n_available) if min_agreement is not None else n_available
         approved = n_available > 0 and passes >= max(required, 1)
 

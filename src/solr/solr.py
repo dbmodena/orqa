@@ -2,10 +2,20 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
+
+# main.py (sibling of this file's parent) is the single source of truth for
+# target -> data layout resolution (TargetSpec, write_path, flat_layout, ...).
+# Importing it here — rather than hand-rolling a second DATADIR-based path
+# per domain — is the only way this file's notion of "where is a domain's
+# normalized metadata" cannot silently drift from what the actual workflow
+# (main.py + conf/config.py's write_path split) resolves it to.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import main as _main
 
 
 class Solr:
@@ -20,7 +30,33 @@ class Solr:
         self._solr_path = self._load_optional_path("SOLR_PATH")
         self._solr_home = self._load_solr_home()
         self._solr_bin = self._load_solr_bin()
-        self._collection_conf_path = self._solr_home / self.domain / "conf"
+        self._collection_conf_path = self._resolve_collection_conf_path()
+
+    def _resolve_collection_conf_path(self) -> Path:
+        """Where this collection's managed-schema.xml/solrconfig.xml actually
+        live.
+
+        ``bin/solr create -c <name>`` (no ``-d``) gives every collection its
+        OWN embedded copy at ``<solr_home>/<name>/conf`` — what this used to
+        assume unconditionally. But a collection can instead be built on a
+        named, possibly-shared CONFIGSET (``bin/solr create -c <name> -d
+        <configset>``), which lives at ``<solr_home>/configsets/<configset>/
+        conf`` instead and is merely referenced from the collection's
+        ``core.properties`` (``configSet=<configset>``) — true for every
+        collection on this project's shared Solr instance. Reading that
+        reference back is the only way to find the real path for an existing
+        collection; a not-yet-created one falls back to the embedded default,
+        matching what ``create_cluster`` (no ``-d``) will actually produce.
+        """
+        core_properties = self._solr_home / self.domain / "core.properties"
+        if core_properties.exists():
+            for line in core_properties.read_text().splitlines():
+                if line.startswith("configSet="):
+                    configset = line.split("=", 1)[1].strip()
+                    configset_path = self._solr_home / "configsets" / configset / "conf"
+                    if configset_path.exists():
+                        return configset_path
+        return self._solr_home / self.domain / "conf"
 
     @staticmethod
     def _load_optional_path(env_name: str) -> Path | None:
@@ -181,31 +217,31 @@ class Solr:
 
 # --- domain helpers -----------------------------------------------------------
 
-DOMAINS = ("nyc", "uk", "bologna")
-
-DOMAIN_CONFIG = {
-    "nyc": {
-        "data_subdir": "orqa/socrata/nyc",
-        "metadata_file": "metadata/flat_metadata.json",
-    },
-    "uk": {
-        "data_subdir": "orqa/ckan/uk",
-        "metadata_file": "metadata/metadata.json",
-    },
-    "bologna": {
-        "data_subdir": "orqa/ods/bologna",
-        "metadata_file": "metadata/normalized_metadata.json",
-    },
-}
+# Every target main.py knows about is a valid Solr domain — its target_id
+# doubles as the Solr core/collection name (see e.g. conf/workflow/*.yaml's
+# tasks.mcp_search.retrieval_contract.solr_core, which is set to the same
+# name for bologna/valencia/paris/nyc). A domain with no conf/solr/<domain>/
+# folder yet just fails `create`/`reload` with a clear FileNotFoundError.
+DOMAINS = tuple(spec.target_id for spec in _main.TARGETS)
 
 
 def _conf_dir(domain: str) -> Path:
     return (Path(__file__) / ".." / ".." / ".." / "conf" / "solr" / domain).resolve()
 
 
+def _target_spec(domain: str) -> "_main.TargetSpec":
+    for spec in _main.TARGETS:
+        if spec.target_id == domain:
+            return spec
+    raise ValueError(f"Unknown domain {domain!r}. Supported: {', '.join(DOMAINS)}")
+
+
 def _metadata_path(domain: str) -> Path:
-    cfg = DOMAIN_CONFIG[domain]
-    return Path(os.environ["DATADIR"]) / cfg["data_subdir"] / cfg["metadata_file"]
+    # Same OrQAConfig main.py itself builds for this target, so this always
+    # points at exactly what `normalize-metadata` last wrote — on write_path
+    # when a workflow yaml sets one, on DATADIR otherwise.
+    cfg = _main.load_cfg(_target_spec(domain))
+    return cfg.normalized_metadata_filepath
 
 
 def cmd_create(domain: str, use_sudo: bool = False) -> None:

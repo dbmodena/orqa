@@ -103,7 +103,7 @@ tasks:
     max_pool_time: 60
     languages: ["Spanish"]
 
-  # Reverse-index backend — used by the plan judge's retrievability check and the solve-benchmark step (see orqa.benchmark.solve)
+  # Reverse-index backend — used by the question stage's retrievability gate and the solve-benchmark step (see orqa.benchmark.solve)
   mcp_search:
     backend: builtin  # local BM25 index under <data_path>/index/ — no external service needed
     elasticsearch_url: http://localhost:9200

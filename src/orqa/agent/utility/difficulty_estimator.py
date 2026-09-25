@@ -1,5 +1,13 @@
 """Deterministic DIFFICULTY-tier estimator for structured query plans.
 
+DORMANT: nothing in the pipeline calls this any more. Plan-side difficulty
+estimation, checking and reconciliation were switched off — difficulty is the
+slot's target tier, judged on the QUESTION by the question judge and pinned onto
+the plan. The module is kept as the reference the question judge's tier rubric
+was written from (its thresholds are pinned to the prompts by
+``tests/test_question_difficulty.py``); the description below is how it worked
+when it ran on plans.
+
 Companion to ``retrievability_gate.py``: a code-computed fact fed into the
 plan judge / planner loop rather than an LLM vote, for exactly the parts of
 the DIFFICULTY rubric (see ``conf/prompts/query_planner.md``) that are pure

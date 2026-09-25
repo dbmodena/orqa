@@ -127,6 +127,9 @@ statement_judge:
   module: "utility.structured_outputs"
   class: "Judgments"
 
+# Plan judge: the question is FROZEN (approved by the question stage before
+# planning), so it votes four plan layers only — plan alignment, table usage,
+# result coherence, metric combination.
 plan_judge:
   module: "utility.structured_outputs"
   class: "PlanJudgment"
@@ -145,13 +148,17 @@ benchmark_solver_code:
   module: "utility.structured_outputs"
   class: "SolverCode"
 
-# Per-table decomposed reference questions for an approved multi-table query
-# (orqa.agent.agents.ReferenceQuestionAgent) — deliberately its own minimal
-# schema, not query_planner's, so this call carries none of a full plan's
-# fields (steps/difficulty/topic/story/...).
-reference_questions:
+# Question stage (orqa.agent.agents.QuestionGenerator / QuestionStage): the
+# generator writes anchor-built questions BEFORE any plan exists; the judge
+# panel (judge_profiles.plan) votes them on readability / topic linkage /
+# grounding / table necessity.
+question_generator:
   module: "utility.structured_outputs"
-  class: "ReferenceQuestionSet"
+  class: "QuestionDraftSet"
+
+question_judge:
+  module: "utility.structured_outputs"
+  class: "QuestionJudgment"
 
 # Local Ollama setup
 # model: ollama_chat/llama3.3:latest

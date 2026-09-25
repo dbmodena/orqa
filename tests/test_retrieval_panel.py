@@ -6,8 +6,7 @@ from typing import Iterable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from orqa.benchmark.families import FamilyIndex
-from orqa.benchmark.retrieval_panel import RetrieverPanel
+from orqa.benchmark.retrieval_panel import RANK_CEILING, RETRIEVER_NAMES, RetrieverPanel
 
 
 @dataclass
@@ -94,53 +93,23 @@ class TestRetrieverPanelRanking(unittest.TestCase):
 
 
 class TestRetrieverPanelRanks(unittest.TestCase):
-    def setUp(self):
-        records = [
-            {"dataset_id": "fam1", "resource_id": "gold"},
-            {"dataset_id": "fam1", "resource_id": "sibling"},
-            {"dataset_id": "fam2", "resource_id": "other"},
-        ]
-        self.family_index = FamilyIndex(records, Path("/nonexistent"))
-
-    def test_family_rank_collapses_to_best_member(self):
-        lexical = FakeLexicalIndex(["other", "sibling", "gold"])
-        panel = RetrieverPanel(lexical, family_index=self.family_index)
+    def test_rank_is_the_exact_position_of_the_table(self):
+        # "sibling" ranks ahead of "gold", but it is a different table: the
+        # rank of "gold" is its own position, never a neighbour's.
+        panel = RetrieverPanel(FakeLexicalIndex(["other", "sibling", "gold"]))
         ranking = panel.rank("q")["lexical_question"]
-        ranks = panel.family_ranks(ranking, ["gold"])
-        # "sibling" (same family as "gold") ranks 2nd, ahead of "gold" itself
-        # at 3rd — family rank should be the BEST (2), not gold's own (3).
-        self.assertEqual(ranks["gold"], 2)
-
-    def test_resource_rank_is_exact(self):
-        lexical = FakeLexicalIndex(["other", "sibling", "gold"])
-        panel = RetrieverPanel(lexical, family_index=self.family_index)
-        ranking = panel.rank("q")["lexical_question"]
-        ranks = panel.resource_ranks(ranking, ["gold"])
-        self.assertEqual(ranks["gold"], 3)
+        self.assertEqual(panel.ranks(ranking, ["gold"]), {"gold": 3})
 
     def test_missing_gets_ceiling_sentinel(self):
-        lexical = FakeLexicalIndex(["other"])
-        panel = RetrieverPanel(lexical, family_index=self.family_index)
+        # Beyond ANY window, however short the ranking: `len(ranking) + 1`
+        # (what this used to be) is inside a top_k=10 window for a 1-doc
+        # ranking, so a table the retriever never returned would pass.
+        panel = RetrieverPanel(FakeLexicalIndex(["other"]))
         ranking = panel.rank("q")["lexical_question"]
-        ranks = panel.family_ranks(ranking, ["gold"])
-        self.assertEqual(ranks["gold"], len(ranking) + 1)
-
-    def test_no_family_index_treats_resource_as_own_family(self):
-        lexical = FakeLexicalIndex(["sibling", "gold"])
-        panel = RetrieverPanel(lexical)  # no family_index
-        ranking = panel.rank("q")["lexical_question"]
-        ranks = panel.family_ranks(ranking, ["gold"])
-        self.assertEqual(ranks["gold"], 2)  # not collapsed to sibling's rank 1
+        self.assertGreater(panel.ranks(ranking, ["gold"])["gold"], RANK_CEILING)
 
 
 class TestRetrieverPanelVote(unittest.TestCase):
-    def setUp(self):
-        records = [
-            {"dataset_id": "fam1", "resource_id": "t0"},
-            {"dataset_id": "fam2", "resource_id": "t1"},
-        ]
-        self.family_index = FamilyIndex(records, Path("/nonexistent"))
-
     def test_two_of_three_pass(self):
         # lexical_question and llm_keywords both search the SAME lexical
         # index (the fake ignores its query argument), so both rank
@@ -152,7 +121,6 @@ class TestRetrieverPanelVote(unittest.TestCase):
             lexical,
             hybrid_index=hybrid,
             keyword_extractor=fake_keyword_extractor(["x"]),
-            family_index=self.family_index,
         )
         result = panel.vote("q", ["t0", "t1"], top_k=2, min_agreement=2)
         self.assertEqual(result["passes"], 2)
@@ -161,14 +129,14 @@ class TestRetrieverPanelVote(unittest.TestCase):
 
     def test_fewer_retrievers_than_min_agreement_requires_all(self):
         lexical = FakeLexicalIndex(["t0", "t1"])
-        panel = RetrieverPanel(lexical, family_index=self.family_index)  # only 1 retriever
+        panel = RetrieverPanel(lexical)  # only 1 retriever
         result = panel.vote("q", ["t0", "t1"], top_k=2, min_agreement=2)
         self.assertEqual(len(result["per_retriever"]), 1)
         self.assertTrue(result["approved"])  # the 1 available retriever passed
 
     def test_single_retriever_failing_rejects(self):
         lexical = FakeLexicalIndex(["other", "other2", "other3"])
-        panel = RetrieverPanel(lexical, family_index=self.family_index)
+        panel = RetrieverPanel(lexical)
         result = panel.vote("q", ["t0", "t1"], top_k=2, min_agreement=2)
         self.assertFalse(result["approved"])
         self.assertEqual(result["passes"], 0)
@@ -177,10 +145,53 @@ class TestRetrieverPanelVote(unittest.TestCase):
         lexical = FakeLexicalIndex(["t0", "t1"])
         panel = RetrieverPanel(
             lexical, keyword_extractor=fake_keyword_extractor(["alpha", "beta"]),
-            family_index=self.family_index,
         )
         result = panel.vote("q", ["t0", "t1"], top_k=2, min_agreement=1)
         self.assertEqual(result["llm_keywords"], ["alpha", "beta"])
+
+    def test_gold_absent_from_a_short_ranking_does_not_pass_a_wider_window(self):
+        # A lexical AND search returns only records matching EVERY keyword —
+        # often a handful. Gold not among them must fail top_k=10, not pass
+        # because the ranking happens to be shorter than the window.
+        lexical = FakeLexicalIndex(["other1", "other2", "other3"])
+        panel = RetrieverPanel(lexical)
+        result = panel.vote("q", ["t0"], top_k=10, min_agreement=1)
+        self.assertFalse(result["approved"])
+
+    def test_empty_ranking_never_passes(self):
+        # A missing gold table ranks len(ranking)+1 — which is 1 for an
+        # EMPTY ranking, i.e. inside a top_k=1 window. Nothing was found, so
+        # nothing may pass (e.g. the keyword extractor returned no keywords).
+        lexical = FakeLexicalIndex([])
+        panel = RetrieverPanel(lexical)
+        result = panel.vote("q", ["t0"], top_k=1, min_agreement=1)
+        self.assertFalse(result["per_retriever"]["lexical_question"]["pass"])
+        self.assertFalse(result["approved"])
+
+    def test_empty_keyword_extraction_does_not_count_as_a_pass(self):
+        lexical = FakeLexicalIndex(["t0"])
+        panel = RetrieverPanel(
+            lexical, keyword_extractor=fake_keyword_extractor([])
+        )
+        result = panel.vote("q", ["t0"], top_k=1, min_agreement=2)
+        self.assertTrue(result["per_retriever"]["lexical_question"]["pass"])
+        self.assertFalse(result["per_retriever"]["llm_keywords"]["pass"])
+        self.assertEqual(result["passes"], 1)
+        self.assertFalse(result["approved"])  # 1 of 2 required
+
+    def test_precomputed_rankings_skip_the_retrievers(self):
+        class Exploding:
+            def search(self, *a, **k):
+                raise AssertionError("must not search when rankings are supplied")
+
+            def get(self, resource_id):
+                return None
+
+        panel = RetrieverPanel(Exploding())
+        result = panel.vote(
+            "q", ["t0"], top_k=1, min_agreement=1, rankings={"lexical_question": ["t0", "t1"]}
+        )
+        self.assertTrue(result["approved"])
 
 
 if __name__ == "__main__":

@@ -3,8 +3,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -82,12 +84,13 @@ class MainCliTests(unittest.TestCase):
     def test_resolve_data_path_matches_existing_layout(self):
         expected = {
             ("canada", None): Path("/tmp/orqa-data/open_data/ckan/canada_small"),
-            ("uk", None): Path("/tmp/orqa-data/orqa/ckan/uk"),
+            ("uk", None): Path("/tmp/orqa-data/uk"),
             ("italy", "modena"): Path("/tmp/orqa-data/open_data/ckan/modena"),
-            ("italy", "bologna"): Path("/tmp/orqa-data/orqa/ods/bologna"),
+            ("italy", "bologna"): Path("/tmp/orqa-data/ods/bologna"),
             ("spain", "madrid"): Path("/tmp/orqa-data/orqa/ckan/madrid"),
-            ("france", "paris"): Path("/tmp/orqa-data/orqa/ods/paris"),
-            ("usa", "nyc"): Path("/tmp/orqa-data/orqa/socrata/nyc"),
+            ("spain", "valencia"): Path("/tmp/orqa-data/ckan/valencia"),
+            ("france", "paris"): Path("/tmp/orqa-data/ods/paris"),
+            ("usa", "nyc"): Path("/tmp/orqa-data/nyc"),
         }
 
         with patch.dict(os.environ, {"DATADIR": "/tmp/orqa-data"}, clear=False):
@@ -102,6 +105,30 @@ class MainCliTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "DATADIR is not set"):
                 main.resolve_data_path(spec)
+
+    def test_resolve_data_path_backend_layout_drops_group_segment(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workflow_path = Path(tmp_dir) / "workflow.yaml"
+            workflow_path.write_text("flat_layout: backend\n")
+            spec = main.resolve_target("spain", "valencia")
+            spec = replace(spec, workflow_path=workflow_path)
+
+            with patch.dict(os.environ, {"DATADIR": "/tmp/orqa-data"}, clear=False):
+                self.assertEqual(
+                    main.resolve_data_path(spec), Path("/tmp/orqa-data/ckan/valencia")
+                )
+
+    def test_resolve_data_path_rejects_invalid_flat_layout_value(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workflow_path = Path(tmp_dir) / "workflow.yaml"
+            workflow_path.write_text("flat_layout: sideways\n")
+            spec = replace(
+                main.resolve_target("canada", None), workflow_path=workflow_path
+            )
+
+            with patch.dict(os.environ, {"DATADIR": "/tmp/orqa-data"}, clear=False):
+                with self.assertRaisesRegex(ValueError, "Invalid flat_layout value"):
+                    main.resolve_data_path(spec)
 
     def test_run_steps_imports_only_requested_modules(self):
         spec = main.resolve_target("italy", "bologna")

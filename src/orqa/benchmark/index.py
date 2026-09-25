@@ -143,6 +143,9 @@ class DatasetIndex:
     same convention used by the rest of the pipeline.
     """
 
+    # portal_view: search() accepts match="all" and a field subset.
+    supports_match = True
+
     def __init__(
         self,
         records: Iterable[dict],
@@ -160,6 +163,9 @@ class DatasetIndex:
         # resource_id -> weighted document length
         self._doc_len: dict[str, float] = {}
         self._avg_doc_len: float = 0.0
+        # (resource_id, fields) -> distinct tokens of that record's text in
+        # those fields; filled lazily by ``searchable_terms``.
+        self._terms_cache: dict[tuple, frozenset[str]] = {}
 
         self._build(records)
 
@@ -224,6 +230,7 @@ class DatasetIndex:
         index._postings = defaultdict(dict, payload["postings"])
         index._doc_len = payload["doc_len"]
         index._avg_doc_len = payload["avg_doc_len"]
+        index._terms_cache = {}
         return index
 
     @classmethod
@@ -311,11 +318,94 @@ class DatasetIndex:
             "source_key": self.source,
         }
 
+    def searchable_terms(
+        self, resource_id: str, fields: Optional[Iterable[str]] = None
+    ) -> Optional[frozenset[str]]:
+        """The distinct index tokens of a record's text in ``fields`` (every
+        indexed field when ``None``); ``None`` for an unknown record.
+
+        This is what a search restricted to ``fields`` can match on that
+        record — e.g. a portal whose Solr ``qf`` has no column fields cannot
+        find a table by one of its column names, however well that name
+        scores in the merged posting lists.
+        """
+        record = self._records.get(resource_id)
+        if record is None:
+            return None
+        wanted = None if fields is None else frozenset(fields)
+        key = (resource_id, wanted)
+        cached = self._terms_cache.get(key)
+        if cached is not None:
+            return cached
+        tokens: set[str] = set()
+        for field_name, text in _record_field_texts(record).items():
+            if wanted is None or field_name in wanted:
+                tokens.update(tokenize(text))
+        result = frozenset(tokens)
+        self._terms_cache[key] = result
+        return result
+
+    def _score(
+        self,
+        terms: list[str],
+        match: str,
+        fields: Optional[frozenset[str]],
+    ) -> tuple[dict[str, float], dict[str, set[str]]]:
+        """BM25 scores (and matched terms) per record.
+
+        ``match="any"`` (the default everywhere): a record scores on every
+        term it contains, so more matching terms only add score — the
+        additive behavior this index has always had.
+
+        ``match="all"``: a record qualifies only if it contains EVERY term
+        (an unknown term therefore matches nothing), then ranks by the same
+        BM25 among those — the semantics of a Solr edismax query with
+        ``q.op=AND``.
+
+        ``fields`` restricts what counts as a match to those record fields.
+        Scores still use the merged, weighted term frequencies (a close
+        approximation of a per-field score, exact for membership).
+        """
+        scores: dict[str, float] = defaultdict(float)
+        matched: dict[str, set[str]] = defaultdict(set)
+        distinct = sorted(set(terms))
+        known = [t for t in distinct if self._idf(t) != 0.0]
+
+        candidates: Optional[set[str]] = None
+        if match == "all":
+            if not distinct or len(known) != len(distinct):
+                return {}, {}
+            by_size = sorted(known, key=lambda t: len(self._postings[t]))
+            candidates = set(self._postings[by_size[0]])
+            for term in by_size[1:]:
+                candidates.intersection_update(self._postings[term])
+                if not candidates:
+                    return {}, {}
+
+        for term in known:
+            idf = self._idf(term)
+            for resource_id, tf in self._postings[term].items():
+                if candidates is not None and resource_id not in candidates:
+                    continue
+                if fields is not None and term not in self.searchable_terms(resource_id, fields):
+                    continue
+                dl = self._doc_len[resource_id]
+                norm = BM25_K1 * (1 - BM25_B + BM25_B * dl / self._avg_doc_len)
+                scores[resource_id] += idf * (tf * (BM25_K1 + 1)) / (tf + norm)
+                matched[resource_id].add(term)
+
+        if match == "all":
+            complete = {rid for rid, hit in matched.items() if len(hit) == len(known)}
+            scores = {rid: sc for rid, sc in scores.items() if rid in complete}
+        return scores, matched
+
     def search(
         self,
         keywords: str | Iterable[str],
         top_k: int = 10,
         only_available: bool = False,
+        match: str = "any",
+        fields: Optional[Iterable[str]] = None,
     ) -> list[SearchResult]:
         """
         Rank datasets against a set of keywords.
@@ -324,24 +414,28 @@ class DatasetIndex:
         either way it is normalized with the same tokenizer used at
         indexing time. Set `only_available` to drop results whose CSV
         file is not present on disk.
+
+        `match="all"` requires every keyword to be present (Solr's
+        ``q.op=AND``); the default ``"any"`` is additive. `fields` limits
+        matching to the named record fields (see ``FIELD_WEIGHTS``).
         """
+        if match not in ("any", "all"):
+            raise ValueError(f"match must be 'any' or 'all', got {match!r}")
+        allowed: Optional[frozenset[str]] = None
+        if fields is not None:
+            allowed = frozenset(fields)
+            unknown = allowed - set(FIELD_WEIGHTS)
+            if unknown:
+                raise ValueError(
+                    f"unknown index field(s) {sorted(unknown)}; "
+                    f"valid fields: {sorted(FIELD_WEIGHTS)}"
+                )
         if isinstance(keywords, str):
             terms = tokenize(keywords)
         else:
             terms = [t for kw in keywords for t in tokenize(kw)]
 
-        scores: dict[str, float] = defaultdict(float)
-        matched: dict[str, set[str]] = defaultdict(set)
-
-        for term in sorted(set(terms)):
-            idf = self._idf(term)
-            if idf == 0.0:
-                continue
-            for resource_id, tf in self._postings[term].items():
-                dl = self._doc_len[resource_id]
-                norm = BM25_K1 * (1 - BM25_B + BM25_B * dl / self._avg_doc_len)
-                scores[resource_id] += idf * (tf * (BM25_K1 + 1)) / (tf + norm)
-                matched[resource_id].add(term)
+        scores, matched = self._score(terms, match, allowed)
 
         ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
 
@@ -372,6 +466,132 @@ class DatasetIndex:
         return results
 
 
+class PortalIndexView:
+    """A lexical view of a reverse index — the built-in :class:`DatasetIndex`
+    or ``orqa.benchmark.es_index.ESDatasetIndex``, anything that sets
+    ``supports_match`` — that answers the way the portal's own search does:
+    every keyword must match (Solr ``q.op=AND``), and only in the record
+    fields that portal actually searches.
+
+    The retrievability gate and the keyword-anchor search used to run on the
+    additive ``match="any"`` index, which is MORE lenient than the portal — a
+    keyword the gold table lacks merely adds nothing there, but under AND it
+    removes the table. Judging retrievability through this view makes "found"
+    mean what it means to the portal. The underlying index is not modified,
+    so consumers that want additive matching (the benchmark solver) are
+    unaffected.
+
+    This is an IMITATION, for when no Solr is reachable: it does not know the
+    core's document universe, its field names or its ``qf``, only what the
+    caller tells it in ``fields``. Prefer ``orqa.benchmark.solr_index.
+    SolrDatasetIndex``, which asks the real core.
+    """
+
+    # keyword_suggestion: candidate terms must be ones this view can match.
+    restricts_candidates = True
+
+    def __init__(
+        self,
+        index: DatasetIndex,
+        match: str = "all",
+        fields: Optional[Iterable[str]] = None,
+    ):
+        if match not in ("any", "all"):
+            raise ValueError(f"match must be 'any' or 'all', got {match!r}")
+        self._index = index
+        self.match = match
+        self.searchable_fields: Optional[frozenset[str]] = (
+            frozenset(fields) if fields else None
+        )
+        unknown = (self.searchable_fields or frozenset()) - set(FIELD_WEIGHTS)
+        if unknown:
+            raise ValueError(
+                f"unknown index field(s) {sorted(unknown)}; "
+                f"valid fields: {sorted(FIELD_WEIGHTS)}"
+            )
+
+    def _search_options(self) -> dict:
+        options: dict = {"match": self.match, "fields": self.searchable_fields}
+        if getattr(self._index, "supports_highlight", False):
+            # The gate runs hundreds of searches per table group and never
+            # reads matched_terms; highlighting is the slow part of an
+            # Elasticsearch search.
+            options["highlight"] = False
+        return options
+
+    def search(
+        self,
+        keywords: str | Iterable[str],
+        top_k: int = 10,
+        only_available: bool = False,
+    ) -> list[SearchResult]:
+        return self._index.search(
+            keywords, top_k=top_k, only_available=only_available, **self._search_options()
+        )
+
+    def search_many(
+        self,
+        queries: list[str | Iterable[str]],
+        top_k: int = 10,
+        only_available: bool = False,
+    ) -> list[list[SearchResult]]:
+        """``search`` for each query, in order — batched by the underlying
+        index when it can (Elasticsearch ``_msearch``), else one by one."""
+        batched = getattr(self._index, "search_many", None)
+        if callable(batched):
+            options = {"match": self.match, "fields": self.searchable_fields}
+            return batched(queries, top_k=top_k, only_available=only_available, **options)
+        return [self.search(q, top_k, only_available) for q in queries]
+
+    def searchable_terms(self, resource_id: str) -> Optional[frozenset[str]]:
+        """What this view can match on ``resource_id`` (see
+        ``DatasetIndex.searchable_terms``)."""
+        return self._index.searchable_terms(resource_id, self.searchable_fields)
+
+    def get(self, resource_id: str) -> Optional[dict]:
+        return self._index.get(resource_id)
+
+    def dataset_filepath(self, resource_id: str) -> Path:
+        return self._index.dataset_filepath(resource_id)
+
+    def __len__(self) -> int:
+        return len(self._index)
+
+    def __getattr__(self, name: str) -> Any:
+        # datasets_path / datasets_format / source: plain pass-through.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._index, name)
+
+
+def portal_view(
+    index: Any, match: str = "any", fields: Iterable[str] = ()
+) -> Any:
+    """``index`` as the portal searches it — or ``index`` itself, unchanged.
+
+    Returns a :class:`PortalIndexView` over the lexical index (the
+    lexical half of a hybrid index) when ``match`` is ``"all"`` or ``fields``
+    restricts the searched fields. Works over any index that ``supports_match``
+    — the built-in one and the Elasticsearch one. Returns ``index`` untouched
+    when the defaults are requested, and — with a warning — when the index
+    cannot match that way, so a run degrades to the additive behavior it had
+    before rather than failing.
+    """
+    fields = tuple(fields or ())
+    if match == "any" and not fields:
+        return index
+    lexical = getattr(index, "lexical_index", index)
+    if not getattr(lexical, "supports_match", False):
+        logger.warning(
+            "Portal-faithful matching (match=%r, fields=%s) needs an index that "
+            "supports it (builtin or elasticsearch); %s does not — falling back "
+            "to additive matching.",
+            match, list(fields), type(index).__name__,
+        )
+        return index
+    return PortalIndexView(lexical, match=match, fields=fields)
+
+
 def load_index(cfg) -> Optional[Any]:
     """Build/load the reverse index for the backend ``cfg.mcp_search.backend``
     selects, creating it from the normalized metadata when missing or stale.
@@ -391,6 +611,13 @@ def load_index(cfg) -> Optional[Any]:
                 os.environ.get("ELASTICSEARCH_URL", "").strip()
                 or cfg.mcp_search.elasticsearch_url
             )
+            # tasks.mcp_search.elasticsearch_managed: start (installing first,
+            # once) a LOCAL Elasticsearch for this run instead of expecting one.
+            managed = getattr(cfg.mcp_search, "elasticsearch_managed", None)
+            if managed is not None and managed.enabled:
+                from orqa.benchmark import es_local
+
+                es_local.ensure_running(cfg, es_url)
             es = es_index.connect(es_url)
             index, rebuilt = es_index.ESDatasetIndex.build_or_load(
                 es,
@@ -416,6 +643,9 @@ def load_index(cfg) -> Optional[Any]:
 
     action = "Created" if rebuilt else "Reusing"
     logger.info("%s %s (%d datasets)", action, location, len(index))
+    # main.py leaves logging unconfigured, so the line above is never shown; this
+    # one says the index is up and which one it is.
+    print(f"[index] {action} {location} ({len(index)} datasets) — index ready.", flush=True)
 
     if cfg.mcp_search.hybrid_search_enabled:
         try:

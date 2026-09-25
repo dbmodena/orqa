@@ -481,10 +481,9 @@ class LLMClientStatementGenerator(LLMClientStructured):
                     "topic": plan.get("topic", ""),
                     "story": plan.get("story", ""),
                     "tables": plan.get("tables", []),
-                    # Effort tier, computed deterministically from the plan's
-                    # own steps (difficulty_estimator.estimate_plan_tier) and
-                    # reconciled before judging — never voted on, and not part
-                    # of the generation LLM's own output.
+                    # The slot's target tier, judged on the question upstream
+                    # and pinned onto the plan — not estimated from the plan,
+                    # and not part of the generation LLM's own output.
                     "difficulty": plan.get("difficulty", ""),
                     # Plan-declared result contract, judged by the plan panel
                     # (PlanJudgment.expected_result_check) and mechanically

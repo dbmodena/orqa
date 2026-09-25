@@ -43,6 +43,14 @@ REQUIRED_SCHEMA_KEYS = [
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"\s+")
 
+# Tell-tale byte sequences left behind when UTF-8 bytes get decoded as
+# latin-1/cp1252 upstream (e.g. Bologna's ODS field labels hand out "EtÃ
+# singolo" instead of "Età singolo") — never legitimate in the languages
+# these portals publish in, so safe to detect and repair in _clean_text.
+_MOJIBAKE_SIGNATURE_RE = re.compile(
+    r"Ã[\x82-\x9f\xa0-\xbf]|â€[\x98\x99\x9c\x9d\x93\x94\xa6\xb0]|Â[\xa0-\xbf]"
+)
+
 
 def normalize_metadata_records(records: list[dict], source: str) -> list[dict]:
     """Normalize a list of raw metadata records into a flat unified schema."""
@@ -173,8 +181,10 @@ def _normalize_ckan_record(record: dict[str, Any]) -> list[dict[str, Any]]:
                     # The dataset title and description are shared by all its
                     # resources; a resource's own name and description tell
                     # them apart ("2021-12-31 Organogram (Junior)"), so they
-                    # are kept unless they only repeat the dataset's.
-                    "resource_name": resource_name if resource_name != title else None,
+                    # are kept unless they only repeat the dataset's — or,
+                    # for an ArcGIS-harvested file, name nothing but its
+                    # format (see _identifying_resource_name).
+                    "resource_name": _identifying_resource_name(resource_name, title),
                     "resource_description": (
                         resource_description
                         if resource_description != description
@@ -528,8 +538,89 @@ def _clean_text(value: Any) -> str | None:
         return None
     if not isinstance(value, str):
         value = str(value)
+    value = _repair_mojibake(value)
     value = value.strip()
     return value or None
+
+
+def _repair_mojibake(text: str) -> str:
+    """Undo a latin-1/cp1252 mis-decode of UTF-8 bytes, if one is detected.
+
+    Only touches text carrying the tell-tale byte pattern, and only keeps
+    the repair if the round-trip cleanly produces text free of both the
+    original signature and the unicode replacement character — so clean
+    text is never touched.
+    """
+    if not _MOJIBAKE_SIGNATURE_RE.search(text):
+        return text
+    try:
+        repaired = text.encode("cp1252").decode("utf-8")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return text
+    if "�" in repaired or _MOJIBAKE_SIGNATURE_RE.search(repaired):
+        return text
+    return repaired
+
+
+# A resource "name" made only of these says nothing about the table. On
+# data.gov.uk an ArcGIS-harvested resource is named after its format, so 5,508
+# of 27,390 UK resources are called "CSV" or "CSV Download" — a field the index
+# weights as highly as the title (see orqa.benchmark.index.FIELD_WEIGHTS).
+_FORMAT_LABELS = frozenset({
+    "csv", "tsv", "xls", "xlsx", "ods", "json", "geojson", "xml", "zip", "pdf",
+    "txt", "kml", "kmz", "api", "html", "htm", "rdf", "wfs", "wms", "parquet",
+    "shp", "shapefile", "doc", "docx", "rss", "atom",
+})
+_FILLER_WORDS = frozenset({
+    "download", "downloads", "file", "files", "data", "link", "links",
+    "resource", "open", "format", "export", "view", "here", "click",
+    "dataset", "table", "attachment", "preview",
+    "the", "a", "an", "of", "for", "in", "on", "and", "or", "to", "as", "this",
+})
+_FORMAT_EXTENSION = re.compile(
+    r"\.(?:" + "|".join(sorted(_FORMAT_LABELS)) + r")\s*$", re.IGNORECASE)
+_FORMAT_TOKEN = re.compile(
+    r"(?<![0-9a-z])(?:" + "|".join(sorted(_FORMAT_LABELS)) + r")(?![0-9a-z])",
+    re.IGNORECASE)
+_EMPTY_BRACKETS = re.compile(r"\(\s*\)|\[\s*\]|\{\s*\}")
+# Brackets are excluded: stripping them would turn "Organogram (Junior)" into
+# "Organogram (Junior". Pairs left empty by token removal are collapsed instead.
+_EDGE_SEPARATORS = " -–—_,;:/|"
+
+
+def _says_nothing_but_its_format(value: Any) -> bool:
+    """Is this name only a file format and publishing filler?
+
+    ``"CSV"`` and ``"CSV Download"`` are; ``"Organogram - Senior CSV data"``,
+    which keeps a word of its own, is not.
+    """
+    words = [word for word in re.split(r"[^0-9a-zA-Z]+", str(value or "")) if word]
+    return not [
+        word for word in words
+        if word.casefold() not in _FORMAT_LABELS
+        and word.casefold() not in _FILLER_WORDS
+    ]
+
+
+def _strip_format_noise(value: Any) -> str | None:
+    """Drop a trailing file extension and any standalone format token.
+
+    Filler words survive: they decide whether a name is worthless, but removing
+    them from a real name would change what it says ("Price Paid Data").
+    """
+    text = _FORMAT_EXTENSION.sub("", str(value or "").strip())
+    text = _FORMAT_TOKEN.sub(" ", text)
+    text = _EMPTY_BRACKETS.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip(_EDGE_SEPARATORS) or None
+
+
+def _identifying_resource_name(resource_name: Any, title: Any) -> str | None:
+    """The resource's own name, or None when it adds nothing to the title."""
+    name = _clean_text(resource_name)
+    if name is None or name == title or _says_nothing_but_its_format(name):
+        return None
+    cleaned = _strip_format_noise(name)
+    return None if cleaned is None or cleaned == title else cleaned
 
 
 def _unique_strings(values: Iterable[Any] | None) -> list[str]:

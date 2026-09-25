@@ -301,20 +301,13 @@ class StatementGeneration:
     # sampling stays plain seeded shuffling, the pre-existing behavior.
     max_groups_per_family: Optional[int] = None
 
-    # For each approved MULTI-table query, additionally generate one
-    # per-table question DECOMPOSED from that query's own plan (each
-    # table's judged `reason` — its business-level contribution to the
-    # question) — e.g. a main question over a January and a February table
-    # yields "What is the total of January parking tickets?" /
-    # "...February parking tickets?", not independently invented questions.
-    # Each is gated at retrieval_contract.single_table_top_k, the same
-    # deterministic rank a real single-table question would be held to.
-    # Never written out as its own benchmark case — folded into that
-    # query's own record as `reference_questions` metadata only (see
-    # StatementOrchestrator._generate_reference_questions_for_query). False
-    # by default: costs one extra small LLM call per approved query (plus a
-    # bounded few retries for any table that misses its gate).
-    generate_reference_questions: bool = False
+    # Question generation is split from planning: an agent first writes each
+    # question FROM the verified retrieval keywords, and a gate (retriever
+    # panel -> question judges) approves it BEFORE any plan exists; the
+    # planner then plans the frozen, approved question (see
+    # orqa.agent.agents.QuestionStage). `max_question_corrections` is how many
+    # times a rejected question is rewritten before its slot is dropped.
+    max_question_corrections: int = 3
 
     @property
     def target_language(self) -> str:
@@ -329,9 +322,15 @@ class StatementGeneration:
         self.enable_single_table = _coerce_bool(
             self.enable_single_table, "enable_single_table"
         )
-        self.generate_reference_questions = _coerce_bool(
-            self.generate_reference_questions, "generate_reference_questions"
-        )
+        if (
+            not isinstance(self.max_question_corrections, int)
+            or isinstance(self.max_question_corrections, bool)
+            or self.max_question_corrections < 0
+        ):
+            raise ValueError(
+                "max_question_corrections must be a non-negative int, got "
+                f"{self.max_question_corrections!r}"
+            )
 
         # Validate single_table_query_count is a positive int or None
         if self.single_table_query_count is not None:
@@ -371,16 +370,64 @@ class StatementGeneration:
 
 
 @dataclass
+class ManagedElasticsearchConfig:
+    """Let OrQa run a LOCAL Elasticsearch itself (no Docker, no service to
+    start): ``load_index`` starts it before connecting and stops it at exit.
+    See ``orqa.benchmark.es_local``. Only meaningful with ``backend:
+    elasticsearch`` and a localhost ``elasticsearch_url``.
+    """
+
+    enabled: bool = False
+    # An unpacked Elasticsearch distribution (the directory holding bin/,
+    # jdk/, lib/). Empty: $ES_HOME, else
+    # <data_path>/index/elasticsearch/elasticsearch-<version>.
+    home: str = ""
+    # Where the index and logs live (path.data = <dir>/data, path.logs =
+    # <dir>/logs). Empty: <data_path>/index/elasticsearch.
+    data_dir: str = ""
+    # JVM heap (-Xms = -Xmx). The UK index is ~27k records; 2g is plenty.
+    heap: str = "2g"
+    # Seconds to wait for the server to answer after starting it.
+    startup_timeout: float = 180.0
+    # True: leave the server running when the run ends (needed when two runs
+    # share it — the run that started it would otherwise stop it under the other).
+    keep_running: bool = False
+    # Download and unpack `version` on first use when nothing is installed at
+    # the DEFAULT location. An explicit `home`/$ES_HOME is never installed into.
+    auto_install: bool = True
+    version: str = "8.17.0"
+
+    def __post_init__(self):
+        self.enabled = _coerce_bool(self.enabled, "elasticsearch_managed.enabled")
+        self.keep_running = _coerce_bool(self.keep_running, "elasticsearch_managed.keep_running")
+        self.auto_install = _coerce_bool(self.auto_install, "elasticsearch_managed.auto_install")
+        self.home = str(self.home or "").strip()
+        self.data_dir = str(self.data_dir or "").strip()
+        self.heap = str(self.heap).strip()
+        if not re.fullmatch(r"[1-9][0-9]*[mMgG]", self.heap):
+            raise ValueError(
+                f"elasticsearch_managed.heap must look like '2g' or '512m', got {self.heap!r}"
+            )
+        self.startup_timeout = float(self.startup_timeout)
+        if self.startup_timeout <= 0:
+            raise ValueError("elasticsearch_managed.startup_timeout must be > 0")
+        self.version = str(self.version).strip()
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", self.version):
+            raise ValueError(
+                f"elasticsearch_managed.version must look like '8.17.0', got {self.version!r}"
+            )
+
+
+@dataclass
 class RetrievalContractConfig:
-    """The two-level retrievability contract (see
-    ``orqa.agent.utility.retrievability_gate``): Level A checks that a
-    question's FAMILY (CKAN dataset) is reachable by a panel of retrievers;
-    Level B checks that the question states whatever distinguishes the gold
-    FILE from its same-family siblings.
+    """The retrievability contract (see
+    ``orqa.agent.utility.retrievability_gate``): a question is retrievable
+    when a panel of retrievers — lexical gate, semantic, hybrid RRF —
+    majority-agrees that it finds every gold table within the top K.
     """
 
     enabled: bool = True
-    # Which retrievers vote Level A. "dense_question" is silently skipped
+    # Which retrievers vote. "dense_question" is silently skipped
     # when hybrid retrieval isn't enabled; "llm_keywords" is silently
     # skipped when no LLM config is available to the caller building the
     # panel — either way min_agreement degrades to "all available".
@@ -391,21 +438,44 @@ class RetrievalContractConfig:
     # actually scored against — K never grows past this even for a
     # many-table plan.
     max_top_k: int = 20
-    # Level A's target for a SINGLE-table plan (exactly one plan table) —
+    # The target for a SINGLE-table plan (exactly one plan table) —
     # literal rank 1 by default, deterministic rather than a window: with
     # only one target there's no reason to settle for less (see
     # ``orqa.agent.utility.retrievability_gate.build_contract``). Multi-table
     # plans are unaffected — they always use the top_k_per_table/max_top_k
     # window above.
     single_table_top_k: int = 1
-    # A table with more than this many still-unresolved (metadata- and
-    # scope-facet-indistinguishable) siblings has its group skipped
-    # (status "ambiguous_family") rather than generated over — beyond this
-    # many, "state enough detail to rule every sibling out" stops being a
-    # question a real user would ever phrase.
-    max_residual_siblings: int = 30
+    # Portal-faithful matching for the gate and the keyword-anchor search (see
+    # orqa.benchmark.index.PortalIndexView). "any" (default): additive BM25 —
+    # a keyword the table lacks just adds nothing. "all": every keyword must
+    # match, like the portal's Solr edismax `q.op=AND`, where one such keyword
+    # removes the table. Builtin backend only.
+    keyword_match: str = "any"
+    # Where the gate's KEYWORD search runs. "index" (default): the reverse
+    # index of tasks.mcp_search.backend — builtin or elasticsearch — searched
+    # per keyword_match/search_fields (with "all", an Elasticsearch
+    # cross_fields AND: every keyword in some field, like the portal).
+    # "solr": the portal's own Solr core (`solr_core`), queried directly with
+    # q.op=AND through solr.client.LocalSolrClient (orqa.benchmark.solr_index).
+    # Solr is reachable at `solr_url`, else $SOLR_URL, else localhost:8983; if
+    # it cannot be reached the run warns and falls back to "index".
+    keyword_backend: str = "index"
+    solr_core: str = ""
+    solr_url: str = ""
+    # The normalized-record fields the portal actually searches (any of
+    # title, resource_name, tags, columns, publisher, description). Empty =
+    # every field. A Solr core whose `qf` lists no column fields (UK, Canada)
+    # cannot find a table by a column name — leave "columns" out there.
+    search_fields: tuple[str, ...] = ()
+    # `hybrid_rrf` (add it to `retrievers`): RRF constant and how many results
+    # each side contributes before fusing — LakeGen: k=60, top 20.
+    hybrid_rrf_k: int = 60
+    hybrid_rrf_depth: int = 20
 
     def __post_init__(self):
+        from orqa.benchmark.index import FIELD_WEIGHTS
+        from orqa.benchmark.retrieval_panel import RETRIEVER_NAMES
+
         self.enabled = _coerce_bool(self.enabled, "retrieval_contract.enabled")
         if isinstance(self.retrievers, str):
             self.retrievers = (self.retrievers,)
@@ -415,7 +485,38 @@ class RetrievalContractConfig:
         self.top_k_per_table = int(self.top_k_per_table)
         self.max_top_k = int(self.max_top_k)
         self.single_table_top_k = int(self.single_table_top_k)
-        self.max_residual_siblings = int(self.max_residual_siblings)
+        unknown = set(self.retrievers) - set(RETRIEVER_NAMES)
+        if unknown:
+            raise ValueError(
+                f"retrieval_contract.retrievers has unknown name(s) {sorted(unknown)}; "
+                f"valid: {list(RETRIEVER_NAMES)}"
+            )
+        if self.keyword_backend not in ("index", "solr"):
+            raise ValueError(
+                f"retrieval_contract.keyword_backend must be 'index' or 'solr', got {self.keyword_backend!r}"
+            )
+        if self.keyword_backend == "solr" and not str(self.solr_core).strip():
+            raise ValueError("retrieval_contract.keyword_backend 'solr' needs solr_core (the core's name)")
+        self.solr_core = str(self.solr_core or "").strip()
+        self.solr_url = str(self.solr_url or "").strip()
+        if self.keyword_match not in ("any", "all"):
+            raise ValueError(
+                f"retrieval_contract.keyword_match must be 'any' or 'all', got {self.keyword_match!r}"
+            )
+        if isinstance(self.search_fields, str):
+            self.search_fields = (self.search_fields,)
+        else:
+            self.search_fields = tuple(self.search_fields or ())
+        unknown = set(self.search_fields) - set(FIELD_WEIGHTS)
+        if unknown:
+            raise ValueError(
+                f"retrieval_contract.search_fields has unknown field(s) {sorted(unknown)}; "
+                f"valid: {sorted(FIELD_WEIGHTS)}"
+            )
+        self.hybrid_rrf_k = int(self.hybrid_rrf_k)
+        self.hybrid_rrf_depth = int(self.hybrid_rrf_depth)
+        if self.hybrid_rrf_k < 1 or self.hybrid_rrf_depth < 1:
+            raise ValueError("retrieval_contract.hybrid_rrf_k and hybrid_rrf_depth must be >= 1")
         if self.min_agreement < 1:
             raise ValueError("retrieval_contract.min_agreement must be >= 1")
         if self.top_k_per_table < 1:
@@ -424,8 +525,6 @@ class RetrievalContractConfig:
             raise ValueError("retrieval_contract.max_top_k must be >= 1")
         if self.single_table_top_k < 1:
             raise ValueError("retrieval_contract.single_table_top_k must be >= 1")
-        if self.max_residual_siblings < 0:
-            raise ValueError("retrieval_contract.max_residual_siblings must be >= 0")
 
 
 @dataclass
@@ -504,14 +603,20 @@ class MCPSearch:
     # this one is False, since the check it gates never runs at all.
     retrieval_gate_enabled: bool = True
 
-    # The two-level retrievability contract (family reachable + distinguishing
-    # details stated) — see RetrievalContractConfig and
+    # The retrievability contract (retriever-panel majority vote) — see
+    # RetrievalContractConfig and
     # orqa.agent.utility.retrievability_gate. Independent of
     # retrieval_gate_enabled above: that flag is the master kill switch for
     # BOTH mechanisms; this one only configures the contract's own knobs
     # once the gate is on.
     retrieval_contract: RetrievalContractConfig = field(
         default_factory=RetrievalContractConfig
+    )
+
+    # OrQa-managed local Elasticsearch (no Docker) — see
+    # ManagedElasticsearchConfig / orqa.benchmark.es_local.
+    elasticsearch_managed: ManagedElasticsearchConfig = field(
+        default_factory=ManagedElasticsearchConfig
     )
 
     # Name of the per-city Elasticsearch index, derived from the data path
@@ -927,8 +1032,19 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     detected_languages  = parsed["tasks"]["query_generation"].get(
         "languages", ["English"]
     )
-    generate_reference_questions = parsed["tasks"]["query_generation"].get(
-        "generate_reference_questions", False
+    query_generation_task = parsed["tasks"]["query_generation"]
+    # The old flow (the planner writes question and steps together) is gone; a
+    # yaml that still switches the stage off would otherwise be silently
+    # ignored while its author expects the old flow.
+    if "question_stage" in query_generation_task and not _coerce_bool(
+        query_generation_task["question_stage"], "question_stage"
+    ):
+        raise ValueError(
+            "tasks.query_generation.question_stage was removed: the question "
+            "stage is always on — delete the key"
+        )
+    max_question_corrections = parsed["tasks"]["query_generation"].get(
+        "max_question_corrections", 3
     )
     statement_generation = StatementGeneration(
         kind=kind,
@@ -941,7 +1057,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         single_table_query_count=single_table_query_count,
         multi_table_query_count=multi_table_query_count,
         max_groups_per_family=max_groups_per_family,
-        generate_reference_questions=generate_reference_questions,
+        max_question_corrections=max_question_corrections,
     )
 
     # reverse-index backend config (defaults keep older yamls working)
@@ -977,8 +1093,16 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         retrieval_gate_enabled=mcp_search_task.get(
             "retrieval_gate_enabled", True
         ),
+        elasticsearch_managed=ManagedElasticsearchConfig(
+            **(mcp_search_task.get("elasticsearch_managed") or {})
+        ),
         retrieval_contract=RetrievalContractConfig(
-            **(mcp_search_task.get("retrieval_contract") or {})
+            **{
+                key: value
+                for key, value in (mcp_search_task.get("retrieval_contract") or {}).items()
+                # retired with the sibling checks — older yamls may still set it
+                if key != "max_residual_siblings"
+            }
         ),
     )
 

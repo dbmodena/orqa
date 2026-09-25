@@ -56,14 +56,10 @@ _EXPECTED_RESULT_TYPE_DESCRIPTION = (
 _DIFFICULTY_LEVELS = Literal["easy", "medium", "hard"]
 
 _DIFFICULTY_DESCRIPTION = (
-    "This plan's structural-complexity tier, per the DIFFICULTY rubric in "
-    "the system prompt — judge it from `steps` alone, AFTER deciding them, "
-    "never chosen first and reverse-engineered into the steps. In a "
-    "multi-plan batch this is a "
-    "fixed per-slot requirement (e.g. exactly one easy, one medium, one "
-    "hard plan) — assign it honestly to what THIS plan's steps actually "
-    "do; do not force two plans into the same tier just because their "
-    "step counts look similar."
+    "The difficulty tier of the QUESTION this plan answers (easy, medium or "
+    "hard). It is fixed: copy the tier given with the fixed question. It is "
+    "not derived from `steps` and nothing checks it against them — never "
+    "shape, pad or trim the steps to reach a tier."
 )
 
 _EXPECTED_RESULT_DESCRIPTION_DESCRIPTION = (

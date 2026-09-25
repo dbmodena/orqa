@@ -11,7 +11,6 @@ from orqa.agent.utility.retrievability_gate import (
     build_contract,
     check_question_retrievability,
 )
-from orqa.benchmark.families import FamilyIndex
 from orqa.benchmark.retrieval_panel import RetrieverPanel
 
 
@@ -33,18 +32,8 @@ class FakeLexicalIndex:
 
 
 class TestCheckQuestionRetrievability(unittest.TestCase):
-    def setUp(self):
-        records = [
-            {"dataset_id": "fam1", "resource_id": "gold", "resource_name": "Organogram 2021"},
-            {"dataset_id": "fam1", "resource_id": "sib", "resource_name": "Organogram 2020"},
-        ]
-        self.family_index = FamilyIndex(records, Path("/nonexistent"))
-        self.records_by_id = {r["resource_id"]: r for r in records}
-        self.record_lookup = self.records_by_id.get
-
     def _panel(self, ranking):
-        lexical = FakeLexicalIndex(ranking, self.records_by_id)
-        return RetrieverPanel(lexical, family_index=self.family_index)
+        return RetrieverPanel(FakeLexicalIndex(ranking))
 
     def test_no_panel_or_contract_auto_passes(self):
         result = check_question_retrievability("some question", None, None)
@@ -53,7 +42,7 @@ class TestCheckQuestionRetrievability(unittest.TestCase):
 
     def test_empty_question_auto_passes(self):
         contract = RetrievalContract(top_k=2, min_agreement=1, tables=[
-            TableContract("Table_0", "gold", "fam1", 2, facets=[], residual_siblings=[]),
+            TableContract("Table_0", "gold"),
         ])
         panel = self._panel(["gold"])
         result = check_question_retrievability("", contract, panel)
@@ -65,7 +54,7 @@ class TestCheckQuestionRetrievability(unittest.TestCase):
         # -maintained keyword list would have. The gate now searches the
         # QUESTION TEXT itself.
         contract = RetrievalContract(top_k=2, min_agreement=1, tables=[
-            TableContract("Table_0", "gold", "fam1", 2, facets=[], residual_siblings=[]),
+            TableContract("Table_0", "gold"),
         ])
         panel = self._panel(["unrelated1", "unrelated2"])  # gold not retrieved at all
         result = check_question_retrievability(
@@ -73,14 +62,14 @@ class TestCheckQuestionRetrievability(unittest.TestCase):
         )
         self.assertFalse(result["approved"])
         self.assertIn("Table_0", result["missing_tables"])
-        self.assertIn("Level A", result["feedback"])
+        self.assertIn("Retrievability", result["feedback"])
 
     def test_level_a_miss_names_unused_anchor_keywords(self):
         # The anchor was computed for this table group but never made it
         # into the question's prose — the feedback should say so and name
         # the exact missing terms, not just report ranks.
         contract = RetrievalContract(top_k=2, min_agreement=1, tables=[
-            TableContract("Table_0", "gold", "fam1", 2, facets=[], residual_siblings=[]),
+            TableContract("Table_0", "gold"),
         ])
         panel = self._panel(["unrelated1", "unrelated2"])  # gold not retrieved at all
         result = check_question_retrievability(
@@ -99,7 +88,7 @@ class TestCheckQuestionRetrievability(unittest.TestCase):
         # planner to "add these terms" again would be useless — the
         # feedback should say the anchor alone isn't enough instead.
         contract = RetrievalContract(top_k=2, min_agreement=1, tables=[
-            TableContract("Table_0", "gold", "fam1", 2, facets=[], residual_siblings=[]),
+            TableContract("Table_0", "gold"),
         ])
         panel = self._panel(["unrelated1", "unrelated2"])  # gold not retrieved at all
         result = check_question_retrievability(
@@ -112,86 +101,50 @@ class TestCheckQuestionRetrievability(unittest.TestCase):
         self.assertIn("already present in the question", result["feedback"])
         self.assertIn("still misses the required rank", result["feedback"])
 
-    def test_missing_facet_gives_feedback_naming_it(self):
-        from orqa.benchmark.families import Facet
-
+    def test_a_question_that_finds_the_table_is_approved(self):
         contract = RetrievalContract(top_k=2, min_agreement=1, tables=[
-            TableContract(
-                "Table_0", "gold", "fam1", 2,
-                facets=[Facet(kind="temporal", label="period: 2021", period=None)],
-                residual_siblings=[],
-            ),
+            TableContract("Table_0", "gold"),
         ])
-        # Give the temporal facet a real Period so missing_facets can compare it.
-        from orqa.benchmark.families import Period
-        from datetime import date
-        contract.tables[0].facets[0] = Facet(
-            kind="temporal", label="period: 2021",
-            period=Period(date(2021, 1, 1), date(2021, 12, 31)),
-        )
-        panel = self._panel(["gold", "sib"])  # Level A passes fine
         result = check_question_retrievability(
-            "How many staff work at this organisation", contract, panel
-        )
-        self.assertFalse(result["approved"])
-        self.assertTrue(result["missing_facets"])
-        self.assertEqual(result["missing_facets"][0]["table"], "Table_0")
-        self.assertIn("Level B", result["feedback"])
-        self.assertIn("period: 2021", result["feedback"])
-
-    def test_plan_with_facets_and_two_of_three_retrievers_is_approved(self):
-        from orqa.benchmark.families import Facet, Period
-        from datetime import date
-
-        contract = RetrievalContract(top_k=2, min_agreement=1, tables=[
-            TableContract(
-                "Table_0", "gold", "fam1", 2,
-                facets=[Facet(
-                    kind="temporal", label="period: 2021",
-                    period=Period(date(2021, 1, 1), date(2021, 12, 31)),
-                )],
-                residual_siblings=[],
-            ),
-        ])
-        panel = self._panel(["gold", "sib"])
-        result = check_question_retrievability(
-            "How many staff worked at this organisation in 2021", contract, panel
+            "How many staff worked at this organisation in 2021",
+            contract,
+            self._panel(["gold", "other"]),
         )
         self.assertTrue(result["approved"])
         self.assertEqual(result["missing_tables"], [])
-        self.assertEqual(result["missing_facets"], [])
+        self.assertNotIn("missing_facets", result)
+
+    def test_only_the_exact_table_counts_not_a_file_of_its_dataset(self):
+        # "sibling" shares the gold table's dataset but is a different file:
+        # finding it is not finding the table.
+        contract = RetrievalContract(top_k=2, min_agreement=1, tables=[
+            TableContract("Table_0", "gold"),
+        ])
+        result = check_question_retrievability(
+            "How many staff", contract, self._panel(["sibling", "other"])
+        )
+        self.assertFalse(result["approved"])
+        self.assertEqual(result["missing_tables"], ["Table_0"])
 
 
 class TestBuildContract(unittest.TestCase):
+    TABLES = [
+        {"alias": "Table_0", "resource_id": "t0"},
+        {"alias": "Table_1", "resource_id": "t1"},
+    ]
+
     def test_top_k_formula(self):
-        records = {
-            "t0": {"resource_id": "t0", "dataset_id": "d0"},
-            "t1": {"resource_id": "t1", "dataset_id": "d1"},
-        }
-        family_index = FamilyIndex(list(records.values()), Path("/nonexistent"))
         contract = build_contract(
-            [{"alias": "Table_0", "resource_id": "t0"}, {"alias": "Table_1", "resource_id": "t1"}],
-            family_index,
-            records.get,
-            top_k_per_table=10,
-            max_top_k=15,
-            min_agreement=2,
-            max_residual_siblings=5,
+            self.TABLES, top_k_per_table=10, max_top_k=15, min_agreement=2,
         )
         # min(15, 10*2) = 15
         self.assertEqual(contract.top_k, 15)
-        self.assertEqual(len(contract.tables), 2)
+        self.assertEqual([t.alias for t in contract.tables], ["Table_0", "Table_1"])
+        self.assertEqual(contract.gold_ids, ["t0", "t1"])
 
     def test_multi_table_top_k_capped_by_max(self):
-        records = {
-            "t0": {"resource_id": "t0", "dataset_id": "d0"},
-            "t1": {"resource_id": "t1", "dataset_id": "d1"},
-        }
-        family_index = FamilyIndex(list(records.values()), Path("/nonexistent"))
         contract = build_contract(
-            [{"alias": "Table_0", "resource_id": "t0"}, {"alias": "Table_1", "resource_id": "t1"}],
-            family_index, records.get,
-            top_k_per_table=10, max_top_k=8, min_agreement=1, max_residual_siblings=5,
+            self.TABLES, top_k_per_table=10, max_top_k=8, min_agreement=1,
         )
         # min(8, 10*2) = 8
         self.assertEqual(contract.top_k, 8)
@@ -199,58 +152,26 @@ class TestBuildContract(unittest.TestCase):
     def test_single_table_defaults_to_rank_1(self):
         # A single-table plan targets literal rank 1 by default, NOT the
         # top_k_per_table/max_top_k window — see build_contract's docstring.
-        records = {"t0": {"resource_id": "t0", "dataset_id": "d0"}}
-        family_index = FamilyIndex(list(records.values()), Path("/nonexistent"))
         contract = build_contract(
-            [{"alias": "Table_0", "resource_id": "t0"}],
-            family_index, records.get,
-            top_k_per_table=10, max_top_k=20, min_agreement=1, max_residual_siblings=5,
+            self.TABLES[:1], top_k_per_table=10, max_top_k=20, min_agreement=1,
         )
         self.assertEqual(contract.top_k, 1)
 
     def test_single_table_top_k_override(self):
-        records = {"t0": {"resource_id": "t0", "dataset_id": "d0"}}
-        family_index = FamilyIndex(list(records.values()), Path("/nonexistent"))
         contract = build_contract(
-            [{"alias": "Table_0", "resource_id": "t0"}],
-            family_index, records.get,
-            top_k_per_table=10, max_top_k=20, min_agreement=1, max_residual_siblings=5,
+            self.TABLES[:1], top_k_per_table=10, max_top_k=20, min_agreement=1,
             single_table_top_k=3,
         )
         self.assertEqual(contract.top_k, 3)
 
-    def test_residual_siblings_populated_without_scope_loader(self):
-        records = {
-            "gold": {"resource_id": "gold", "dataset_id": "fam", "resource_name": "CSV"},
-            "sib": {"resource_id": "sib", "dataset_id": "fam", "resource_name": "CSV"},
-        }
-        family_index = FamilyIndex(list(records.values()), Path("/nonexistent"))
+    def test_the_contract_carries_no_family_or_facet_data(self):
         contract = build_contract(
-            [{"alias": "Table_0", "resource_id": "gold"}],
-            family_index, records.get,
-            top_k_per_table=10, max_top_k=10, min_agreement=1, max_residual_siblings=5,
+            self.TABLES[:1], top_k_per_table=10, max_top_k=20, min_agreement=1,
         )
-        self.assertEqual(contract.tables[0].residual_siblings, ["sib"])
-
-    def test_scope_loader_resolves_residual_siblings(self):
-        records = {
-            "gold": {"resource_id": "gold", "dataset_id": "fam", "resource_name": "CSV"},
-            "sib": {"resource_id": "sib", "dataset_id": "fam", "resource_name": "CSV"},
-        }
-        family_index = FamilyIndex(list(records.values()), Path("/nonexistent"))
-
-        def scope_loader(resource_id, columns):
-            scopes = {"gold": {"region": "London"}, "sib": {"region": "Leeds"}}
-            return scopes.get(resource_id)
-
-        contract = build_contract(
-            [{"alias": "Table_0", "resource_id": "gold"}],
-            family_index, records.get,
-            top_k_per_table=10, max_top_k=10, min_agreement=1, max_residual_siblings=5,
-            scope_loader=scope_loader,
+        self.assertEqual(
+            contract.to_dict(),
+            {"contract_version": 2, "top_k": 1, "min_agreement": 1, "tables": {"t0": "Table_0"}},
         )
-        self.assertEqual(contract.tables[0].residual_siblings, [])
-        self.assertTrue(any(f.kind == "scope" for f in contract.tables[0].facets))
 
 
 if __name__ == "__main__":

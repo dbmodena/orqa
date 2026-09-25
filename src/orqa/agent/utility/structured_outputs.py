@@ -478,10 +478,10 @@ class Query(BaseModel):
         )
     )
     # NOTE: no `difficulty` field here either, for the same reason as
-    # `tables` above. Difficulty is decided exactly once, during PLANNING
-    # (see prompting.models.SQLQueryPlan/PandasQueryPlan.difficulty), where
-    # it is COMPUTED deterministically from the plan's own steps and never
-    # voted on by any judge. StatementClient.complete
+    # `tables` above. Difficulty is the slot's target tier, judged on the
+    # QUESTION by the question judge and pinned onto the plan (see
+    # prompting.models.SQLQueryPlan/PandasQueryPlan.difficulty); nothing on the
+    # plan side estimates or votes on it. StatementClient.complete
     # stamps the plan's own `difficulty` onto every query generated from it,
     # the same way it already does for `query_plan`/`question_keywords`/etc.
     code: str = Field(
@@ -693,54 +693,315 @@ class SolverCode(BaseModel):
     )
 
 
-class ReferenceQuestionItem(BaseModel):
-    """One table's decomposed contribution to an approved multi-table
-    question — see ``orqa.agent.agents.ReferenceQuestionAgent``. Deliberately
-    narrow (3 fields) compared to ``SQLQueryPlan``/``PandasQueryPlan``: this
-    call only ever decomposes an ALREADY-approved question/table role, never
-    invents a fresh plan, so it needs none of a full plan's fields (steps,
-    difficulty, topic, story, table_links, ...)."""
+class PlanJudgment(BaseModel):
+    """Verdict of one panel judge on a query plan whose QUESTION is frozen —
+    the question was written and approved upstream
+    (``orqa.agent.agents.QuestionStage``: retrievability, readability, topic
+    linkage, grounding, table necessity), so none of that is asked here. Four
+    layers, majority-aggregated one by one (``JudgePanel._aggregate`` with
+    ``vote_fields``): ``plan_approval`` (the steps produce exactly what the
+    question asks), ``table_usage_approval`` (every table's role is
+    justified), ``expected_result_approval`` (the declared result is the
+    natural conclusion of the steps AND accounts for every analysis the plan
+    performs — two uncombined branches are exactly a declaration that fails
+    to account for both) and ``metric_combination_approval`` (any figure
+    blended from 2+ tables into one output value is dimensionally sound).
+    DIFFICULTY is deliberately absent: it is the slot's target, judged on the
+    QUESTION upstream, never estimated or voted on at the plan. Deliberately small (a few flat fields) because plan panels run
+    on small models: the check fields come FIRST so the model reasons before
+    it commits to the votes. ``approved`` is derived, never voted."""
 
-    table: str = Field(
+    alignment_check: str = Field(
         ...,
         description=(
-            "The table alias this question targets — must exactly match one "
-            "of the aliases given under \"Tables\" in the prompt."
+            "1-2 sentences applying Check 2 (steps produce exactly what the "
+            "question asks). Name the missing or unjustified step, or state "
+            "that none applies."
+        ),
+    )
+    table_check: str = Field(
+        ...,
+        description=(
+            "1-2 sentences applying Check 3 (every table genuinely required, "
+            "per the swap test). Name each table whose justification fails, "
+            "or state that none does."
+        ),
+    )
+    unjustified_tables: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Aliases (e.g. ['Table_2']) of tables failing Check 3; empty when "
+            "every table is justified. The question is frozen, so the fix is "
+            "in the table's `reason` and the steps — never a reworded question."
+        ),
+    )
+    expected_result_check: str = Field(
+        ...,
+        description=(
+            "1-2 sentences applying Check 4 (the declared result matches the "
+            "question, is the natural conclusion the steps build toward, and "
+            "accounts for EVERY analysis the plan performs). Name the specific "
+            "mismatch or the unaccounted-for result, or state that none applies."
+        ),
+    )
+    metric_combination_check: str = Field(
+        ...,
+        description=(
+            "1-2 sentences applying Check 5 (a figure blended from 2+ tables "
+            "into one output value is dimensionally and conceptually sound). "
+            "Name the unsound combination, or state briefly that it passes."
+        ),
+    )
+    plan_approval: bool = Field(
+        ..., description="Vote on Check 2 (steps match the question). See alignment_check."
+    )
+    table_usage_approval: bool = Field(
+        ...,
+        description=(
+            "Vote on Check 3 (every table required). Must be false whenever "
+            "unjustified_tables is non-empty."
+        ),
+    )
+    expected_result_approval: bool = Field(
+        default=True, description="Vote on Check 4. See expected_result_check."
+    )
+    metric_combination_approval: bool = Field(
+        default=True,
+        description=(
+            "Vote on Check 5; always true when no step blends figures across "
+            "tables. See metric_combination_check."
+        ),
+    )
+    approved: bool = Field(
+        default=False,
+        description="Derived: the AND of the four votes (recomputed server-side).",
+    )
+    feedback: str = Field(
+        ...,
+        description=(
+            "Approved: one sentence on why all layers hold. Rejected: the "
+            "specific flaw per failed layer, quoting the offending step, "
+            "justification or declaration."
+        ),
+    )
+    suggestions: str = Field(
+        ...,
+        description=(
+            "Empty when approved. Otherwise one actionable sentence per failed "
+            "layer. Never suggest dropping a table, dropping a branch, "
+            "changing `difficulty`, or changing the (frozen) question."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _force_consistent_verdicts(self) -> "PlanJudgment":
+        if self.unjustified_tables:
+            self.table_usage_approval = False
+        self.approved = (
+            self.plan_approval
+            and self.table_usage_approval
+            and self.expected_result_approval
+            and self.metric_combination_approval
         )
+        return self
+
+
+class QuestionTableReason(BaseModel):
+    """Why a question needs ONE of its tables — the writer's own claim, handed
+    to the question judge, which tests it (Check 4, table necessity)."""
+
+    alias: str = Field(
+        ...,
+        description="The table alias exactly as listed in TABLE ALIASES.",
+    )
+    reason: str = Field(
+        ...,
+        description=(
+            "ONE sentence naming what this table contributes to THIS "
+            "question: the specific measure, group, filter or period the "
+            "question asks about that comes from it. Concrete enough that it "
+            "could not be pasted under a different table; never boilerplate "
+            "such as 'for context' or 'provides relevant data'. May name "
+            "columns and values (it is never shown to the asker)."
+        ),
+    )
+
+
+class QuestionDraft(BaseModel):
+    """One candidate question for one slot — see ``orqa.agent.agents.
+    QuestionGenerator``. Deliberately just the question and why it needs each
+    table: no steps, no result shape, no keyword list. The retrieval keywords
+    are the verified anchor the question was BUILT FROM, recomputed
+    deterministically from the final text (``question_gate.covered_terms``),
+    never authored here. ``table_reasons`` go to the question judge with the
+    question (they are not passed on to the planner)."""
+
+    slot: int = Field(
+        ...,
+        description="The slot number this question answers, exactly as listed in the prompt.",
     )
     question: str = Field(
         ...,
         description=(
-            "A standalone question answerable from THIS TABLE ALONE — the "
-            "specific slice of the main question this table's own ROLE says "
-            "it contributes, not a generic question about the table's "
-            "general subject and not the main question restated whole."
-        )
+            "The question, in plain everyday words as an average user "
+            "would write it — never a column header, code or identifier — "
+            "built around the anchor terms of the slot that read naturally, "
+            "in their exact wording."
+        ),
+    )
+    table_reasons: List[QuestionTableReason] = Field(
+        ...,
+        description=(
+            "Exactly one entry per table alias in TABLE ALIASES (also for a "
+            "single table): why this question needs that table. Written "
+            "after the question and consistent with it."
+        ),
     )
     question_keywords: List[str] = Field(
         default_factory=list,
         description=(
-            "3-6 distinctive retrieval keywords drawn from the question, in "
-            "this table's own vocabulary."
-        )
+            "Only when the slot lists NO anchor terms: 3-6 distinctive "
+            "single words or short terms that literally appear in the "
+            "question. Leave empty otherwise."
+        ),
     )
 
     @field_validator("question_keywords")
     @classmethod
-    def limit_keywords(cls, v: List[str]) -> List[str]:
-        seen = set()
-        unique_keywords = []
-        for kw in v:
-            if kw not in seen:
-                seen.add(kw)
-                unique_keywords.append(kw)
-        return unique_keywords[:6]
+    def dedupe(cls, v: List[str]) -> List[str]:
+        seen: set = set()
+        out = []
+        for item in v:
+            if item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
 
 
-class ReferenceQuestionSet(BaseModel):
-    """One :class:`ReferenceQuestionItem` per table listed in the prompt."""
+class QuestionDraftSet(BaseModel):
+    """One :class:`QuestionDraft` per slot listed in the prompt."""
 
-    questions: List[ReferenceQuestionItem] = Field(default_factory=list)
+    questions: List[QuestionDraft] = Field(default_factory=list)
+
+
+class QuestionJudgment(BaseModel):
+    """Verdict of one panel judge on a candidate QUESTION, before any plan
+    exists.
+
+    Owns what can be judged from the question and the tables alone —
+    readability for an average user, topic linkage, whether the tables can
+    ground it, whether it needs every table, and whether it demands about as
+    much analysis as its slot's target difficulty. Retrievability is NOT voted
+    here: it is measured against the real retriever panel before the judges
+    are ever called (``orqa.agent.utility.question_gate``). Step alignment,
+    result coherence and metric soundness are the PLAN judge's, later.
+
+    Voted in five independent layers and majority-aggregated per layer (see
+    ``JudgePanel._aggregate`` with ``vote_fields``); ``approved`` is derived.
+    Check fields come first so a small model reasons before it votes.
+    """
+
+    readability_check: str = Field(
+        ...,
+        description=(
+            "1-2 sentences applying Check 1 (reads like an average, "
+            "non-technical open-data user; one clear ask). Name and quote "
+            "the flaw, or state that none applies."
+        ),
+    )
+    topic_check: str = Field(
+        ...,
+        description=(
+            "1-2 sentences applying Check 2 (names the specific program/"
+            "initiative/agency the table is about, not just the generic "
+            "activity; states a fixed period). Name the vague phrasing, or "
+            "state that none applies."
+        ),
+    )
+    grounding_check: str = Field(
+        ...,
+        description=(
+            "1-2 sentences applying Check 3 (every measure, entity, place "
+            "and period the question asks about exists in these tables). "
+            "Name what is missing, or state that none is."
+        ),
+    )
+    table_check: str = Field(
+        ...,
+        description=(
+            "1-2 sentences applying Check 4 (answering needs every listed "
+            "table, as each table's stated reason claims). Name each table "
+            "the question does not need or whose reason is missing, generic "
+            "or not what the question asks for, or state that none is."
+        ),
+    )
+    difficulty_check: str = Field(
+        ...,
+        description=(
+            "1-2 sentences applying Check 5 (the question demands about as "
+            "much analysis as its slot's target difficulty). Count the "
+            "analytical operations it needs (subset, group, aggregate, rank/"
+            "top-N, correlate) and compare with the slot's tier, or state "
+            "that the data cannot support the tier."
+        ),
+    )
+    unjustified_tables: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Aliases of tables the question does not genuinely need; empty "
+            "when every table is needed (always empty for a single table)."
+        ),
+    )
+    readability_approval: bool = Field(..., description="Vote on Check 1.")
+    topic_linkage_approval: bool = Field(default=True, description="Vote on Check 2.")
+    grounding_approval: bool = Field(..., description="Vote on Check 3.")
+    table_necessity_approval: bool = Field(
+        default=True,
+        description=(
+            "Vote on Check 4; must be false whenever unjustified_tables is "
+            "non-empty. Always true for a single table."
+        ),
+    )
+    difficulty_approval: bool = Field(
+        ...,
+        description=(
+            "Vote on Check 5: false when the question needs clearly less "
+            "(or clearly more) analysis than its slot's difficulty asks for."
+        ),
+    )
+    approved: bool = Field(
+        default=False,
+        description="Derived: the AND of the five votes (recomputed server-side).",
+    )
+    feedback: str = Field(
+        ...,
+        description=(
+            "Approved: one sentence on why all layers hold. Rejected: the "
+            "specific flaw per failed layer, quoting the offending words."
+        ),
+    )
+    suggestions: str = Field(
+        ...,
+        description=(
+            "Empty when approved. Otherwise one actionable sentence per "
+            "failed layer describing how to REWRITE THE QUESTION (for the "
+            "difficulty layer: which analysis to add or drop). Never "
+            "suggest dropping a required retrieval-anchor term."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _force_consistent_verdicts(self) -> "QuestionJudgment":
+        if self.unjustified_tables:
+            self.table_necessity_approval = False
+        self.approved = (
+            self.readability_approval
+            and self.topic_linkage_approval
+            and self.grounding_approval
+            and self.table_necessity_approval
+            and self.difficulty_approval
+        )
+        return self
 
 
 class ViolatedCriterion(str, Enum):
@@ -867,192 +1128,3 @@ class Judgments(BaseModel):
         ...,
         description="One Judgment per input pair, in input order.",
     )
-
-
-class PlanJudgment(BaseModel):
-    """Verdict of one panel judge on a single structured query plan.
-
-    The plan judge owns QUESTION quality, TABLE justification and the
-    RESULT contract (the code judge no longer re-judges any of them): is the
-    question concise, pinned to a specific topic, written like an average
-    user seeking insights — do the plan's steps reflect it — does the
-    question genuinely need every provided table — and is the declared
-    result the coherent conclusion of everything the plan computes?
-    DIFFICULTY is deliberately absent: it is EFFORT, computed
-    deterministically from the plan's own steps (see
-    ``utility.difficulty_estimator``) and reconciled before judging, never
-    voted on.
-    Deliberately small (a few flat fields) because plan panels run on small
-    models: the check fields come FIRST so the model reasons before it commits
-    to the votes.
-
-    Voting is LAYERED across SIX independent layers — ``question_approval``
-    (realistic, average-user, keyword-retrievable question), ``plan_approval``
-    (steps produce exactly what the question asks), ``table_usage_approval``
-    (every table justified by the question), ``expected_result_approval``
-    (the declared result is the natural conclusion of the steps AND accounts
-    for every analysis the plan performs — this absorbs what used to be a
-    separate convergence layer, since two uncombined branches are exactly a
-    declaration that fails to account for both),
-    ``metric_combination_approval`` (any figure blended
-    from 2+ tables into one output value is dimensionally sound, never a
-    silent sum across incommensurate units or undifferentiated time
-    periods), and ``topic_linkage_approval`` (the question names the
-    table's specific real-world program/initiative when its identity
-    hinges on one, rather than a generic activity that could just as
-    plausibly belong to some other, unrelated program — AND, when the
-    table is one of several time-vintages of the same subject that
-    open-data portals routinely republish, names the specific period
-    that pins down THIS vintage rather than a vague/absent one that
-    could equally describe a different year's edition) — voted
-    independently, and the panel majority-aggregates each
-    layer on its own — the plan passes only when ALL layer majorities approve
-    (see ``JudgePanel._aggregate`` with ``vote_fields``). ``approved`` is
-    derived, never voted directly.
-    """
-
-    question_check: str = Field(
-        ...,
-        description=(
-            "1-2 sentences applying Check 1 (question quality: pinpointing, "
-            "retrievability, temporal scope). Name the specific flaw and "
-            "quote the offending phrase, or state that none applies."
-        ),
-    )
-    alignment_check: str = Field(
-        ...,
-        description=(
-            "1-2 sentences applying Check 2 (steps produce exactly what the "
-            "question asks). Name the missing or unjustified step, or state "
-            "that none applies."
-        ),
-    )
-    table_check: str = Field(
-        ...,
-        description=(
-            "1-2 sentences applying Check 3 (every table genuinely required, "
-            "per the swap test). Name each table whose justification fails, "
-            "or state that none does."
-        ),
-    )
-    unjustified_tables: List[str] = Field(
-        default_factory=list,
-        description=(
-            "Aliases (e.g. ['Table_2']) of tables failing Check 3; empty when "
-            "every table is justified. Filling this means the QUESTION must be "
-            "reframed to need the table — never that the table be dropped."
-        ),
-    )
-    expected_result_check: str = Field(
-        ...,
-        description=(
-            "1-2 sentences applying Check 4 (the declared result matches the "
-            "question, is the natural conclusion the steps build toward, and "
-            "accounts for EVERY analysis the plan performs). Name the specific "
-            "mismatch or the unaccounted-for result, or state that none applies."
-        ),
-    )
-    metric_combination_check: str = Field(
-        ...,
-        description=(
-            "1-2 sentences applying Check 5 (a figure blended from 2+ tables "
-            "into one output value is dimensionally and conceptually sound). "
-            "Name the unsound combination, or state briefly that it passes "
-            "(as it always does with no cross-table blended metric)."
-        ),
-    )
-    topic_linkage_check: str = Field(
-        ...,
-        description=(
-            "1-2 sentences applying Check 6 (the question names the table's "
-            "specific program AND its specific time-vintage, judged "
-            "independently of Check 1). Name the generic or vague phrasing, "
-            "or state briefly that it passes."
-        ),
-    )
-    question_approval: bool = Field(
-        ...,
-        description="Vote on Check 1 (question quality). See question_check.",
-    )
-    plan_approval: bool = Field(
-        ...,
-        description="Vote on Check 2 (steps match the question). See alignment_check.",
-    )
-    table_usage_approval: bool = Field(
-        ...,
-        description=(
-            "Vote on Check 3 (every table required). Must be false whenever "
-            "unjustified_tables is non-empty."
-        ),
-    )
-    expected_result_approval: bool = Field(
-        default=True,
-        description=(
-            "Vote on Check 4 (the declared result is the coherent, natural "
-            "conclusion of the steps AND accounts for every analysis the plan "
-            "performs). See expected_result_check."
-        ),
-    )
-    metric_combination_approval: bool = Field(
-        default=True,
-        description=(
-            "Vote on Check 5 (cross-table blended figures are sound); always "
-            "true when no step blends any. See metric_combination_check."
-        ),
-    )
-    topic_linkage_approval: bool = Field(
-        default=True,
-        description=(
-            "Vote on Check 6 (question names the table's specific program and "
-            "time-vintage), judged independently of Check 1. See "
-            "topic_linkage_check."
-        ),
-    )
-    approved: bool = Field(
-        default=False,
-        description=(
-            "Derived: the AND of all six layer votes above (recomputed "
-            "server-side, so just set it consistently)."
-        ),
-    )
-
-    feedback: str = Field(
-        ...,
-        description=(
-            "Approved: one sentence on why all layers hold. Rejected: the "
-            "specific flaw per failed layer, quoting the offending question "
-            "part, step, or justification."
-        ),
-    )
-    suggestions: str = Field(
-        ...,
-        description=(
-            "Empty when approved. Otherwise one actionable sentence per failed "
-            "layer, following that Check's own fix guidance. Three absolute "
-            "prohibitions: never suggest dropping a table (Checks 3 and 5), "
-            "never suggest dropping a branch or changing the question instead "
-            "of the steps (Check 4), and never suggest changing the "
-            "`difficulty` value or phrase the fix as 'lower'/'raise' it — "
-            "always 'simplify the plan by...' / 'make the plan more complex "
-            "by...', and never as one option alongside a steps-based fix in "
-            "the same sentence."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _force_consistent_verdicts(self) -> "PlanJudgment":
-        """The overall verdict and the table layer are derived, never free:
-        ``approved`` is the AND of the six layer votes, and flagged
-        unjustified tables force the table layer down — so a judge can't
-        e.g. list an unjustified table while voting the layer up."""
-        if self.unjustified_tables:
-            self.table_usage_approval = False
-        self.approved = (
-            self.question_approval
-            and self.plan_approval
-            and self.table_usage_approval
-            and self.expected_result_approval
-            and self.metric_combination_approval
-            and self.topic_linkage_approval
-        )
-        return self

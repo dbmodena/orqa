@@ -1,18 +1,18 @@
 seed: 42
-source: socrata
-flat_layout: false
-#write_path: "/home/bilel/gits/orqa/data/nyc"
+source: ckan
+flat_layout: true
+write_path: "/home/bilel/gits/orqa/data/nyc"
 
 # Folder under this target's data directory that holds the tables every step
 # after `clean` reads (index, candidates-discovery, query generation,
 # benchmark). The download-format subfolder is still appended, so the default
-# below resolves to <DATADIR>/orqa/socrata/nyc/datasets/csv — and, with
-# flat_layout: true, to <DATADIR>/nyc/datasets/csv.
+# below resolves to <DATADIR>/orqa/ckan/uk/datasets/parquet — and, with
+# flat_layout: true, to <DATADIR>/uk/datasets/parquet.
 # Omit the key to get "datasets"; set it to point the run at a separately
-# prepared table folder, e.g. "cleaned_datasets" -> .../cleaned_datasets/csv.
+# prepared table folder, e.g. "cleaned_datasets" -> .../cleaned_datasets/parquet.
 # The crawler always downloads into the literal "datasets" folder regardless,
 # so `crawl`/`clean` keep working when this is overridden.
-#table_dir: "cleaned_datasets"
+table_dir: "datasets"
 pandas:
   read:
     csv:
@@ -68,23 +68,11 @@ tasks:
     from_dataset_index: 0
     batch_fetch_metadata: 10
     accept_zip: True
-    download_format: csv 
+    download_format: parquet 
     engine: pandas
     max_resource_size: 20MB
     max_workers: 4
     verbose: True
-
-  cleaning:
-    filter_column_patterns:
-      - "^the_geom$"
-      - "^location$"
-      - "^polygon$"
-      - "shape"
-      - "^coordinates$"
-      - "(brooklyn|manhattan|queens|bronx)_cooperatives_comparable_properties_address"
-      - "(brooklyn|manhattan|queens|bronx)_condominium_property_address"
-      - "comparable_rental_\\d_address"
-      
 
   indexing:
     max_process_workers: 2
@@ -93,7 +81,7 @@ tasks:
   candidates_discovery:
     # discovery pipeline: 'blend' (BLEND+SLOTH) or 'semantic' (embeddings+HNSW)
     method: semantic
-    n_random_dataset_seeds: 50
+    n_random_dataset_seeds: 20
     min_dataset_height: 10
     # Column-count ceiling for a table to enter the pipeline AT ALL. A table
     # WIDER than this is filtered out during indexing/embedding — treated
@@ -109,95 +97,172 @@ tasks:
     sm_micro_avg_threshold: 0.5
     # Embedding + clustering discovery
     top_k_neighbors: 10
-    cosine_similarity_threshold: 0.35
+    cosine_similarity_threshold: 0.8
     correlation_threshold: 0.5
     correlation_method: pearson
     embedding_batch_size: 64
     target_cluster_size: 40
     cluster_overlap_margin: 0.1
-    max_cluster_size: 30
+    max_cluster_size: 60
     sm_matcher: coma
-    tokens_budget: 5000000
-    max_datasets_to_process: 2000
+    tokens_budget: 1000000
+    max_datasets_to_process: 100
   query_generation:
-    kind: "PANDAS"
+    kind: "SQL"
     max_response_tokens: 300
     max_memory_usage: 512
     max_pool_time: 60
     enable_single_table: "yes"
-    single_table_query_count: 3
-    multi_table_query_count: 4
+    # A sampled table that cannot be found within
+    # mcp_search.retrieval_contract.single_table_top_k — no keyword search
+    # places it (checked before any LLM call), or the question stage ends
+    # "unretrievable_group" — is skipped: NO entry is written for it,
+    # and its slot (st_5, ...) is refilled by the next table of the same seeded
+    # order, up to 25 replacements per slot. Other failures are still recorded.
+    single_table_query_count: 150
+    multi_table_query_count: 100
     languages: ["English"]
-    # Family-stratified sampling (see
-    # orqa.statement_generation._sample_single_table_datasets): NYC/Socrata
-    # records carry no CKAN dataset grouping, so every table is its own
-    # singleton family and this has no practical effect here — kept for
-    # consistency with the other portals.
+    # Family-stratified sampling: no single CKAN dataset family (83% of UK
+    # gold tables belong to one with other files, median 38, max 1,426)
+    # contributes more than this many single-table candidates until every
+    # family has had a turn.
     max_groups_per_family: 2
-    # For each approved multi-table query, also generate one per-table
-    # question DECOMPOSED from that query's own plan (each table's judged
-    # "reason" — its business-level contribution to the question), e.g. a
-    # January+February parking-tickets question yields a January-only and a
-    # February-only reference question, each gated at mcp_search.
-    # retrieval_contract.single_table_top_k. Logged as `reference_questions`
-    # metadata on the approved query — never sampled as its own case.
-    # False by default: costs one extra small LLM call per approved query.
-    generate_reference_questions: false
+    # Question generation is split from planning. For each slot an agent first
+    # writes a question FROM the verified retrieval keywords (the anchor found by
+    # searching the index) and a gate — the retriever panel, then the question
+    # judges — approves it BEFORE any plan exists; the planner then plans the
+    # frozen question, and the plan judges only judge the plan. A multi-table
+    # question is gated per table: the lexical gate runs one keyword check per
+    # table (does the question contain words that find it within
+    # retrieval_contract.top_k_per_table? a check that also finds other tables
+    # covers them) and counts as ONE vote next to dense_question and hybrid_rrf,
+    # under min_agreement — not as one search that must find every table. Logged
+    # per slot as `question_feedback`.
+    # Rewrites a rejected question gets before its slot is dropped.
+    max_question_corrections: 3
 
-  # Reverse-index backend — used by the plan judge's retrievability check and the solve-benchmark step (see orqa.benchmark.solve)
+  # Reverse-index backend — used by the question stage's retrievability gate and the solve-benchmark step (see orqa.benchmark.solve)
   mcp_search:
-    backend: builtin  # local BM25 index under <data_path>/index/ — no external service needed
+    # elasticsearch: the reverse index lives in Elasticsearch (index
+    # "orqa-<provider>-<city>", built from normalized_metadata.json on the first
+    # run and rebuilt whenever that file changes). Elasticsearch MUST be running
+    # at elasticsearch_url — a run refuses to start rather than generate
+    # ungated questions if it is not. `builtin` needs no external service.
+    backend: elasticsearch
     elasticsearch_url: http://localhost:9200
-    # Adaptive top-K for the plan judge's keyword-searchability gate: each
-    # plan's own K = round(number_of_tables_in_plan * this coefficient), so
-    # a plan joining more tables is held to a wider net than a single-table
-    # one instead of every plan sharing one fixed K.
-    keyword_search_top_k_coefficient: 9.0
+    # OrQa runs the Elasticsearch itself — no Docker, nothing to start by hand.
+    # generate-statements (and solve-benchmark) start a local server before they
+    # connect and stop it when they exit. Everything lives in
+    # data/uk/index/elasticsearch/ : the unpacked distribution
+    # (elasticsearch-<version>/, downloaded once on the first run, ~1.5 GB, the
+    # download is unpacked as it streams), data/ (the index) and logs/.
+    # The server runs single-node on loopback with security AND disk watermarks
+    # off. Set keep_running: true if two runs share it.
+    elasticsearch_managed:
+      enabled: true
+      heap: 2g
+      keep_running: false
+    # Use the existing semantic-discovery metadata vectors to rerank the
+    # complete lexical candidate set. Both components are normalized to
+    # [0, 1] before fusion, and every search consumer uses this same index.
+    hybrid_search_enabled: true
+    lexical_weight: 0.5
+    semantic_weight: 0.5
+    # How lexical/semantic get combined (see orqa.benchmark.hybrid_index):
+    # "weighted_score" (default, unchanged) averages the two normalized
+    # scores using the weights above; "rrf" instead fuses on each side's
+    # RANK (LakeGen's own Solr setup does this) — a candidate that ranks
+    # #1 on EITHER side alone already scores well, no need to also be
+    # strong on the other. lexical_weight/semantic_weight are ignored
+    # under "rrf".
+    fusion_method: weighted_score
+    rrf_k: 60
+    query_embedding_input_type: search_query
+    query_embedding_cache_size: 2048
+    # Adaptive top-K of the PRE-planning retrievability check for a multi-table
+    # group: K = round(number_of_tables_in_group * this coefficient), so a group
+    # of more tables is held to a wider net than a single table instead of every
+    # group sharing one fixed K.
+    keyword_search_top_k_coefficient: 5.0
     # Whether the PRE-planning retrievability check (run once per table
     # group, before any LLM call) may abort a group as "unretrievable_group"
-    # when no keyword combination can surface every table within top-K.
+    # when its bounded metadata-vocabulary search cannot surface every table
+    # within top-K.
     # False: the check still runs and still hands the planner a verified
     # keyword anchor when one is found — only the abort-on-failure half is
     # disabled, so an unresolved group just proceeds to planning without
     # an anchor instead of being skipped outright.
+    # (Single-table generation ignores this flag: a single table with no
+    # keyword anchor in the top K is always skipped and replaced — see
+    # tasks.query_generation.single_table_query_count.)
     gate_unretrievable_groups: false
     # Master on/off switch for the retrieval gate as a whole — the
-    # PRE-planning keyword suggestion above AND the plan judge's reactive
-    # keyword-searchability layer. False disables both outright, regardless
-    # of whether a reverse index is otherwise available.
-    # Was false because `backend: elasticsearch` pointed at a service that
-    # isn't running here, silently no-op-ing both mechanisms; now that
-    # `backend: builtin` needs no external service, there's nothing left to
-    # gate on.
-    retrieval_gate_enabled: false
-    # Two-level retrievability contract (see
-    # orqa.agent.utility.retrievability_gate) — configured for when
-    # retrieval_gate_enabled is turned back on; inert while it's false.
+    # PRE-planning keyword suggestion above AND the question stage's
+    # retriever-panel gate. Keep this enabled so hybrid retrieval is
+    # actually used to generate and verify the suggested keyword anchor.
+    retrieval_gate_enabled: true
+    # Retrievability contract (see orqa.agent.utility.retrievability_gate): a
+    # question passes when a panel of retrievers — lexical gate, semantic and
+    # hybrid RRF — majority-agrees that it finds every gold table within the
+    # top K. Nothing else is checked.
     retrieval_contract:
       enabled: true
-      retrievers: [lexical_question, dense_question, llm_keywords]
+      # The gate's keyword search uses AND logic: `keyword_match: all` — every
+      # keyword must be present in SOME searched field, as in the portal's Solr
+      # (edismax q.op=AND), so one keyword the table lacks removes it. On the
+      # live Solr core that is `q.op=AND`; on the Elasticsearch index above it
+      # is a multi_match `cross_fields` / operator `and`. AND also switches the
+      # pipeline to per-table anchors, since no single AND query surfaces a
+      # multi-table group: each table gets its own verified anchor, searched
+      # alone, and a multi-table question is gated per table (see retrievers).
+      # `keyword_match: any` is the additive alternative, a multi_match
+      # `cross_fields` / operator `or` scored by Elasticsearch's BM25 with the
+      # per-field boosts, summed across fields — a record scores on every
+      # keyword it contains, in whichever field, so a keyword the table lacks
+      # merely adds nothing to it and the rest decide its rank. (Not
+      # `best_fields`: that keeps only the single best field, so a keyword only
+      # the tags hold could never tell apart records that share a title.)
+      #   search_fields   -> [] = all six record fields (title, resource_name,
+      #     tags, columns, publisher, description); list names to restrict.
+      #   retrievers      -> the three ways the portal is queried:
+      #     llm_keywords (keyword search, BM25), dense_question (semantic) and
+      #     hybrid_rrf (their Reciprocal Rank Fusion, as LakeGen runs it).
+      #     lexical_question (BM25 over the raw question text) is left out: the
+      #     keyword search above is what LakeGen runs.
+      #     In every question llm_keywords is replaced by the lexical gate: a
+      #     deterministic keyword check per table, together ONE vote next to
+      #     dense_question and hybrid_rrf under min_agreement. A table's check
+      #     is (1) its verified keywords — the anchor the pre-planning search
+      #     proved finds it, e.g. [belfast, ni]: a question that contains all of
+      #     them is searched with exactly that query and passes — and, when the
+      #     question lacks part of them, (2) the question's own words the table
+      #     can match. A table is covered when either finds it within top_k (a
+      #     check that also finds other tables covers them). The gate is not
+      #     an LLM keyword extraction, so the same question always votes the same.
+      # NOTE: this is an approximation of LakeGen's Solr, built from the
+      # normalized metadata. Measured under AND, against the live `uk` core it
+      # returned the same result set for only ~10% of random keyword queries
+      # (an index built from Solr's own documents: ~44%); its BM25 ranking has
+      # not been compared with Solr's. To query the live core directly instead
+      # set `keyword_backend: solr` and `solr_core: uk_fixed` (Solr at
+      # $SOLR_URL, default http://localhost:8983/solr).
+      # Old behaviour: keyword_match: any and retrievers
+      # [lexical_question, dense_question, llm_keywords].
+      keyword_backend: solr #index
+      solr_core: nyc
+      keyword_match: all
+      search_fields: []
+      retrievers: [llm_keywords, dense_question, hybrid_rrf]
+      hybrid_rrf_k: 60        # LakeGen's RRF constant
+      hybrid_rrf_depth: 20    # each side's top-20 is fused (LakeGen's top_k)
       min_agreement: 2
       top_k_per_table: 10
-      max_top_k: 20
+      max_top_k: 20          # LakeGen's retrieval pool
       # Single-table plans (exactly one table) target literal rank 1
       # instead of the top_k_per_table/max_top_k window above — a keyword
       # combination that surfaces the table at all reaches rank 1 for no
       # extra search cost when there's only one target.
-      single_table_top_k: 1
-      max_residual_siblings: 30
-
-  # How many judges vote on each panel (see orqa.agent.agents.JudgePanel).
-  # judge_profiles.plan/code in conf/llm/litellm.yaml stay the pool of
-  # CANDIDATE judge models (currently 3 each); this only caps how many of
-  # them are actually used per run — independently for the plan panel
-  # (judges a structured plan before any code is written) and the code
-  # panel (judges the generated question/code/result triple).
-  #   mono: use just the first configured judge — a single verdict, no
-  #     voting. Cheaper and faster; no cross-model disagreement signal.
-  #   trio: use the first three configured judges — majority vote.
-  judges:
-    plan_mode: mono
-    code_mode: mono
+      single_table_top_k: 10
 
   # Round-trip benchmark solver (step: solve-benchmark) — see
   # orqa.benchmark.solve / src/orqa/benchmark/readme.md.
@@ -208,4 +273,6 @@ tasks:
     # Valentine matcher for that pairwise pass — schema-only and fast:
     # up to C(top_k_tables, 2) pairs get matched per question.
     matcher: similarity_flooding
-
+  judges:
+    plan_mode: mono
+    code_mode: mono

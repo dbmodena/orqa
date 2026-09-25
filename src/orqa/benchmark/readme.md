@@ -77,6 +77,30 @@ metadata changes:
   `tasks.mcp_search.elasticsearch_url` (the `ELASTICSEARCH_URL` env
   variable takes precedence).
 
+### Running Elasticsearch without Docker
+
+Set `tasks.mcp_search.elasticsearch_managed.enabled: true` and OrQa runs the
+server itself: any step that loads the index (`generate-statements`,
+`solve-benchmark`, `python -m orqa.benchmark --retrievability-report`) starts a
+local Elasticsearch before it connects and stops it when the step exits. A
+server that is already running is reused and left alone. Everything lives next
+to the portal's other index files:
+
+```
+<data_path>/index/elasticsearch/
+├── elasticsearch-<version>/   the unpacked distribution (bundles its own JDK)
+├── data/                      the index itself
+└── logs/                      server logs + orqa-elasticsearch.out
+```
+
+The distribution is downloaded on the first run (`auto_install`), unpacked as it
+streams (the ~640 MB archive is never written to disk) and checked against
+Elastic's SHA-512; it needs about 1.5 GB plus the index. To install ahead of
+time: `python -m orqa.benchmark.es_local install --dest <data_path>/index/elasticsearch`.
+The server runs single-node on loopback with security and disk watermarks off
+(so it keeps working on a nearly full disk). Only a `localhost` URL is managed.
+`keep_running: true` leaves it up after the step — set it if two runs share it.
+
 ## Running it
 
 A workflow step: the city selects the data and its workflow yaml.

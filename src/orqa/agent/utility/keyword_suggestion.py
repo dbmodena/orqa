@@ -1,13 +1,14 @@
 """Deterministic keyword suggestion for a table group's retrievability.
 
-The plan judge's retrievability check (see
-``orqa.agent.utility.retrievability_gate``) verifies a plan's QUESTION
-AFTER the planner has already written it — a rejected plan only learns it
+The question stage's retrievability gate (see
+``orqa.agent.utility.question_gate`` and
+``orqa.agent.utility.retrievability_gate``) verifies a QUESTION AFTER the
+question writer has already written it — a rejected question only learns it
 guessed wrong, then guesses again, burning an LLM correction round each
-time (see ``StatementOrchestrator._judge_plans``).
+time (see ``QuestionStage``).
 
-This module inverts that: given the exact table group a plan will use,
-BEFORE any plan is drafted, it searches the tables' real indexed vocabulary
+This module inverts that: given the exact table group a question is about,
+BEFORE any question is drafted, it searches the tables' real indexed vocabulary
 — title, resource name, tags, publisher AND the tables' own column schema,
 all competing in the same search rather than columns being held back as a
 rescue tier — and verifies every trial against the same reverse index the
@@ -27,9 +28,9 @@ Hybrid indexes can expose ``search_many``; additions/removals are then query-
 embedded in a batch so semantic optimization does not make one provider call
 per candidate term.
 
-The result is BUDGETED, not minimal: at most four keywords per table (see
-``_MAX_KEYWORDS_PER_TABLE``), because the planner has to weave every one of
-them into a question in natural prose. Within that budget the search never
+The result is BUDGETED, not minimal: at most five keywords per table (see
+``_MAX_KEYWORDS_PER_TABLE``), because the question writer has to weave every
+one of them into a question in natural prose. Within that budget the search never
 trims a term for being merely redundant, and a longer set is usually the
 safer one — it tends to rank at 1 rather than at the top_k boundary the
 climb stops on.
@@ -61,6 +62,7 @@ it affordable enough to run as a rare escalation.
 """
 
 import itertools
+import math
 from typing import Any, Optional
 
 from orqa.benchmark.index import tokenize, _record_field_texts
@@ -80,7 +82,7 @@ _STOPWORDS = frozenset({
 # ("id", "index", pandas' "Unnamed: 0", ...). Like _STOPWORDS above they
 # are never what distinguishes ONE dataset from the rest of the corpus,
 # and unlike a real column name they read as a machine artifact rather
-# than a word the planner can weave into a natural-language question.
+# than a word the question writer can weave into a natural-language question.
 _COLUMN_NOISE = frozenset({
     "id", "ids", "idx", "index", "key", "col", "cols", "column", "columns",
     "field", "fields", "unnamed", "nan", "null", "none", "row", "rows",
@@ -97,8 +99,8 @@ _COLUMN_NOISE = frozenset({
 _MAX_COLUMN_TERMS = 25
 
 # Hard cap on the returned keyword count, per table in the group. The
-# result is handed to the planner as an anchor every plan's question must
-# weave into natural prose (see QueryPlanner._render_retrievable_keywords),
+# result is handed to the question writer as the vocabulary each question is
+# built around (see QuestionGeneratorAgent), woven into natural prose,
 # and that is only writable while the list stays short: a question can
 # carry five terms about a table, not twenty. The search is free to be
 # non-minimal WITHIN this budget — nothing trims a merely redundant term —
@@ -184,7 +186,7 @@ def _candidate_pools(
     or a union's shared column is by construction vocabulary the whole
     group has in common. They are also what the question is actually about
     ("...by borough", "...per year"), so anchoring on them reads naturally
-    in the prose the planner has to write.
+    in the prose the question writer has to write.
 
     ``actual_columns`` comes from the already-loaded DataFrame and is
     listed before the portal's own column metadata: it is the schema the
@@ -226,6 +228,44 @@ def _candidate_pools(
         if term not in metadata and term not in link and term not in _COLUMN_NOISE
     ][:max_column_terms]
     return metadata, link, columns
+
+
+def _score_ties(
+    index: Any, keywords: set[str], tables: list[dict], ceiling: int
+) -> dict[str, int]:
+    """How many results score EXACTLY what each table scores for ``keywords``
+    (the table itself included) — ``{alias: n}``.
+
+    A rank inside a tie is a position, not a relevance claim: records that are
+    identical in every field the index searches (a portal's re-uploads of one
+    file) score identically on every query, and the engine orders them by its
+    internal document order. So "rank 5" can really mean "one of nine
+    indistinguishable records, and the engine happens to list this one 5th" —
+    which no keyword can improve, and which a rebuilt index may reorder.
+
+    One extra search for the FINAL keyword set, so the search itself is
+    untouched: fitness still uses the plain rank. A table with no score
+    (an index or test double that returns none) or outside the ranked ceiling
+    is left out — the caller then simply has no tie information for it.
+    """
+    if not keywords:
+        return {}
+    query = sorted(keywords)
+    # Same convention as the search's own trials: a batching index (ES
+    # ``_msearch``, hybrid query embeddings) is asked through ``search_many``.
+    results = (
+        index.search_many([query], top_k=ceiling)[0]
+        if hasattr(index, "search_many")
+        else index.search(query, top_k=ceiling)
+    )
+    scores = {r.resource_id: getattr(r, "score", None) for r in results}
+    known = [score for score in scores.values() if score is not None]
+    ties: dict[str, int] = {}
+    for t in tables:
+        own = scores.get(t["resource_id"])
+        if own is not None:
+            ties[t["alias"]] = sum(math.isclose(score, own, rel_tol=1e-9) for score in known)
+    return ties
 
 
 def _exhaustive_rescue(
@@ -299,6 +339,7 @@ def suggest_retrievable_keywords(
     max_iterations: int = 20,
     max_column_terms: int = _MAX_COLUMN_TERMS,
     max_keywords_per_table: int = _MAX_KEYWORDS_PER_TABLE,
+    exclude_terms: Optional[Any] = None,
 ) -> dict:
     """Greedily find a keyword set that surfaces every table within top_k.
 
@@ -320,7 +361,7 @@ def suggest_retrievable_keywords(
         index: A ``DatasetIndex``/``ESDatasetIndex`` (or ``None`` when
             unavailable for this portal — no-ops to an empty, unachieved
             result rather than raising, same degradation convention as
-            ``check_keyword_searchability``).
+            ``retrievability_gate.check_question_retrievability``).
         top_k: The target window every table must land inside.
         max_iterations: Cap on the greedy climb's add/remove steps — so a
             table group with no good shared vocabulary fails fast rather
@@ -335,6 +376,19 @@ def suggest_retrievable_keywords(
         max_keywords_per_table: Hard cap on the RESULT, multiplied by the
             number of tables — a two-table group may return at most twice
             this many keywords. See ``_MAX_KEYWORDS_PER_TABLE``.
+        exclude_terms: Terms (or phrases — every token is excluded) the
+            search may not use: what a question writer reported it cannot
+            work into natural prose. The anchor is re-searched around them
+            rather than left with a hole.
+
+    When ``index`` sets ``restricts_candidates`` (a ``SolrDatasetIndex``, or a
+    ``PortalIndexView`` imitating one), candidates are also restricted to terms
+    it can actually match on the table's record — ``index.searchable_terms`` —
+    and the candidate vocabulary is read from ``index.candidate_record`` (the
+    document the search engine really holds) when it has one, else ``get``.
+    Under AND matching a single term the document lacks removes the table
+    from the results entirely, and a column name is no use as an anchor on a
+    portal that does not search columns.
 
     Returns:
         ``{"keywords": [str, ...], "achieved": bool, "hit_count": int,
@@ -355,7 +409,12 @@ def suggest_retrievable_keywords(
         inside that budget just for being redundant. ``column_keywords``
         is the subset of ``keywords`` that no table's title/tags/publisher
         could have supplied — i.e. what the column schema contributed to
-        the winning combination.
+        the winning combination. ``ties`` (present only when the index
+        returns scores) is ``{alias: n}``: how many records score exactly
+        what that table does for the final keywords, itself included. ``n >
+        1`` means its rank is a position inside a tie of indistinguishable
+        records, ordered by the engine's internal document order — not
+        something any keyword can improve (see ``_score_ties``).
     """
     if index is None or not tables:
         return {
@@ -381,11 +440,21 @@ def suggest_retrievable_keywords(
         for t in tables
     }
 
+    excluded = {
+        token for term in (exclude_terms or ()) for token in tokenize(str(term))
+    }
+
     metadata_pools: dict[str, list[str]] = {}
     link_pools: dict[str, list[str]] = {}
     column_pools: dict[str, list[str]] = {}
+    candidate_record = getattr(index, "candidate_record", None)
+    restricts = bool(getattr(index, "restricts_candidates", False))
     for t in tables:
-        record = index.get(t["resource_id"])
+        # The document the engine really holds, when the index can supply it:
+        # a normalized record's `title` and `resource_name` are not
+        # necessarily what the portal indexes under either name.
+        record = (candidate_record(t["resource_id"]) if callable(candidate_record) else None) \
+            or index.get(t["resource_id"])
         (
             metadata_pools[t["alias"]],
             link_pools[t["alias"]],
@@ -396,6 +465,14 @@ def suggest_retrievable_keywords(
             link_by_alias[t["alias"]],
             max_column_terms,
         )
+        matchable = index.searchable_terms(t["resource_id"]) if restricts else None
+        if excluded or matchable is not None:
+            for pools in (metadata_pools, link_pools, column_pools):
+                pools[t["alias"]] = [
+                    term for term in pools[t["alias"]]
+                    if term not in excluded
+                    and (matchable is None or term in matchable)
+                ]
 
     # Vocabulary ONLY a column could have supplied: a term can sit in one
     # table's column pool and another table's title, so this is a
@@ -506,7 +583,7 @@ def suggest_retrievable_keywords(
         # missing aliases, so that the strictly-greater comparison below
         # keeps the metadata candidate when two are EXACTLY as good — the
         # index weights title/tags above columns (see FIELD_WEIGHTS), and
-        # a title term reads more naturally in the question the planner
+        # a title term reads more naturally in the question the writer
         # then has to weave it into.
         # At the budget the climb can no longer grow, but it can still
         # SWAP: the removal sweep below drops a term that is carrying its
@@ -662,7 +739,9 @@ def suggest_retrievable_keywords(
                         r_hit_count, r_ranks, r_fitness
                     )
 
-    return {
+    ties = _score_ties(index, selected, tables, ceiling)
+
+    result = {
         "keywords": sorted(selected),
         "achieved": current_hit_count == len(tables),
         "hit_count": current_hit_count,
@@ -680,3 +759,9 @@ def suggest_retrievable_keywords(
         # was what made this group retrievable, without re-deriving it.
         "column_keywords": sorted(term for term in selected if term in column_only),
     }
+    if ties:
+        # How many records score exactly what each table does for the final
+        # keywords (itself included) — see ``_score_ties``. Only present when
+        # the index reported scores.
+        result["ties"] = ties
+    return result

@@ -22,19 +22,8 @@ A step often creates a column no table contains: an aggregate's result, a flag o
 
 DECLARE ONCE. A derived column is declared only in the step that creates it. From that step onward it behaves exactly like a real column of the data: any later step may reference it by name in `columns` or `params` for any purpose — filtering, grouping, aggregating, sorting, ranking, joining, correlating, or as the origin of a further derived column. Never re-declare it in a later step, and never declare a name that a table already has.
 
-### WRITING THE QUESTION
-Write as an average, curious open-data user would — NOT a data expert: no knowledge of the underlying data, never seen a table, no querying competence. Conversational, plain everyday language, aimed at one specific concrete insight (a real place, group, category, or period from the data) rather than a generic exploration.
-- Never mention table names, column names, or file structure, and never use technical analytics vocabulary ("outlier", "impute", "regression").
-- Never gloss a plain phrase with a parenthetical abbreviation lifted from a column name ("...middle and high school (mshs) percentages (pct)..." — drop the parenthetical).
-- Never quote a category's raw coded or delimiter-joined value; describe it in plain business words.
-- Never narrate a `clean` step's technical criteria (non-numeric/null exclusions, outlier filtering, bad-token literals) — a curious user wouldn't know the data needed cleaning. Put that precision in `expected_result_description` and let the `clean` step enforce it silently.
-- CORRELATION: when the plan has a `correlate` step the question MAY use the plain word "correlate"/"correlation" — ordinary language, not jargon. It must NEVER name the method in `params.method` ("Pearson", "Spearman", "Kendall") or say "coefficient". Pick exactly ONE framing — either a yes/no ask ("is there a correlation between...") or a magnitude ask ("how much do... correlate") — never both stitched into one run-on question.
-- RETRIEVABLE: downstream, a panel of retrievers (lexical search over the question text, a semantic/embedding search over the question text, and an independent LLM's own keyword extraction) searches for these tables from the question ALONE — a real, deterministic check, not a guess. Weave the distinctive subject vocabulary that identifies the table(s) — topic, entity type, agency, place, period, per TABLE-LEVEL ANALYSIS and TABLE METADATA — naturally into the question, spelling out an acronym at least once and naming the publisher/program the way the portal itself writes it (never a merged word like "HomeOffice" for "Home Office"). This never conflicts with the naive-user persona: plain topical words ("NYPD training sessions in Brooklyn"), never data-speak ("the training events table").
-- `question_keywords` may ONLY contain terms that literally appear in the question text (single words or short established terms, never descriptive phrases, never a term absent from the question's own prose) — not generic filler a keyword extractor would discard. Retrievable is not the same as SPECIFIC: prefer the table's own distinctive proper-noun vocabulary (a program/agency/dataset name from its analysis keywords) over generic common nouns that might retrieve it by luck. A reader must be able to tell which real-world program the question is about.
-- If a DISTINGUISHING DETAILS section appears below, it lists what singles this table's specific FILE out from other files of the SAME dataset — state every listed detail in the question's own prose too; missing one is checked exactly as deterministically as RETRIEVABLE above.
-- TOPIC-LINKED: when a table's identity hinges on ONE specific named program/initiative/agency/scheme — narrower than the generic activity it falls under — the question must NAME that program, not just the generic activity. A question can be concrete and retrievable while still leaving a reader unable to tell which real-world program it is about; that gets rejected downstream. Skip this only when the table's subject genuinely is the generic category.
-- TEMPORAL SCOPE: when a table is tied to a fixed period rather than an ongoing feed (check TABLE METADATA's `resource_name` and `temporal_coverage`, not only the analysis) — a specific year, a date range, a snapshot/"as of" date, a hardcoded cutoff — state that period ("...in 2014", "...between 1916 and 1997") instead of phrasing it as current data. Portals routinely republish the SAME subject as separate tables across periods, so the stated period must be the SPECIFIC one that distinguishes THIS table's vintage — never a vague reference ("in recent years", "historically") that could equally describe another year's edition.
-- DERIVED "NOW" ANCHOR: this applies even to an ongoing feed if a `derive` step computes something relative to the CURRENT date (an age, a tenure, a "years since X") using a hardcoded literal for "now" rather than a column in the table. That literal is a hidden temporal anchor — the answer silently changes every recomputation. Either state the reference point in the question ("...as of 2026") and in `expected_result_description`, or reframe around a value that doesn't assume "now" (report the raw year instead of an age derived from it).
+### THE QUESTION IS GIVEN
+Each plan's `question` is fixed by the FIXED QUESTIONS section — do not write or reword one. Everything a question must do (plain everyday words, the tables' distinctive vocabulary, a fixed-period scope, naming the specific program) was settled and checked before you were called. Your job is the plan: the steps, each table's role, the result declaration and the remaining metadata fields.
 
 ### DATA QUALITY / CLEANING
 Tables are shown RAW — no bad-token conversion, numeric coercion, or null-row dropping. Beyond the usual `dtype`/`cardinality`/`top_values`, each column in COLUMN STATISTICS carries:
@@ -55,34 +44,8 @@ Tables are shown RAW — no bad-token conversion, numeric coercion, or null-row 
 
 A `clean` step's `params` follows the `{{"actions": [...]}}` convention on the step schema; cite the exact literal tokens from the stats above in the step's `description`, never invented ones. If a `clean` step touches a column a later `join`/`union` relies on, place it BEFORE that step.
 
-### DIFFICULTY
-DIFFICULTY IS EFFORT, NOT SIZE. Assign every plan's `difficulty` — `easy`, `medium`, or `hard` — by one question: **how much effort would a data expert, already well versed in these tables, spend to realise this query?** Not how long the plan looks. An expert handed the join keys in VERIFIED TABLE RELATIONSHIPS spends no real effort connecting tables — that is typing, not difficulty. What costs them effort is JUDGMENT: choosing the grain of an aggregation, deciding which values are sentinels and which are real, designing a bucket that means something, reconciling incommensurate units.
-
-Two axes stand in for that effort, and a plan needs only ONE of them to earn a tier — they are never summed: the DATA-ENGINEERING axis (analytical judgment turning messy raw values into usable features, regardless of joins) measures it directly; the STRUCTURAL axis (how many distinct analytical decisions were composed) is a coarser stand-in. Both are proxies — good ones, not perfect. Never pick a label first and design steps to match it.
-
-**Every trigger below is MECHANICALLY COMPUTED from your `steps` by code before any judge sees the plan.** A plan whose computed tier doesn't match its declared `difficulty` is sent back with the exact gap named. Hitting the target tier is a matter of your steps literally satisfying a trigger, not persuading anyone.
-
-Two step types NEVER count toward any STRUCTURAL step total, no matter how many actions they carry:
-- a `clean` step (null handling, casts, bad-token replacement, dropping rows) — bookkeeping the data required, not analytical complexity;
-- a PLAIN `derive` step — one NOT using `technique: "flag"|"bucket"` (a date-part extraction, a cast, a unit conversion, straightforward arithmetic) — ordinary derivation uncurated tables routinely need.
-
-A `derive` step whose `params.actions` DO use `technique: "flag"` or `"bucket"` is different: that is substantive analytical work. It counts as a regular step on the STRUCTURAL axis AND can earn a tier on its own on the DATA-ENGINEERING axis, at a lower count than an arbitrary step would need.
-
-Each axis's tier is the HIGHEST tier any ONE of its own triggers reaches — never summed across triggers or axes:
-
-| Level | STRUCTURAL axis — any ONE trigger | DATA-ENGINEERING axis — any ONE trigger |
-|---|---|---|
-| Easy | Default when no Medium/Hard trigger fires. | Default when none fires (at most one `flag`/`bucket` derive step). |
-| Medium | A `group` step feeding 2+ `aggregate`/`correlate` steps — OR 3+ chained non-`clean`, non-plain-`derive` steps — OR 2+ `aggregate`/`correlate` steps total. | 2+ `flag`/`bucket` derive steps, each preserving a genuinely DIFFERENT messy-data pattern (a censored-value bucket AND a separate sentinel flag) — even on a single table with no joins. |
-| Hard | A further `join`/`union` merging two branches EACH already independently built by ITS OWN prior `join`/`union` — OR 4+ chained non-`clean`, non-plain-`derive` steps spanning 3+ distinct op types — OR a `group` keyed on 2+ columns AND feeding 2+ aggregations. | A `bucket` derive step whose logic is compound (3+ output categories encoding real domain judgment, e.g. a multi-branch `np.select`/`pd.cut`) AND whose bucketed feature feeds a further `group`/`aggregate` step — a genuine non-join path to `hard` on a single table. |
-
-**EASY IS A BUDGET ON EFFORT, NEVER ON AMBITION.** Mechanically the budget is 2 effort-bearing steps for `easy`, 3 for `medium`, 4+ for `hard` — where `clean` and plain `derive` steps cost NOTHING (see above) and a `join`/`union` beyond the first costs nothing either. An easy plan is one an expert answers almost directly; a medium plan needs one genuine judgment call; a hard plan composes several.
-
-A tight budget is not a licence to ask a dull question. The free steps are where an easy plan buys its interest — a plain `derive` computing a rate, a share, a per-unit normalisation, or a difference costs you nothing and is often the most interesting thing in the plan. Do NOT reach for a `filter` or a `group` just to make an easy question feel substantial: those DO spend the budget, tip the plan into the next tier, and get it sent back. Raise ambition in the QUESTION; hold the effort flat.
-
-**MULTIPLE TABLES — you do NOT have to plan a join/union on every question, and multi-table does NOT mean multi-step.** Table count alone is never a structural qualifier: a single `join`/`union` step's `tables` list may name any number of aliases at once (a 3- or 4-way combination as ONE step), and it still counts as exactly ONE step regardless of how many tables it touches. "3+ tables combined" is NOT a medium/hard trigger; only the step/chain/branch counts above are. When TABLE ALIASES lists more than two tables, every alias still needs a genuine justified role, but for the EASY slot prefer the cheapest valid STRUCTURE — pull every table into one wide `join`/`union` step (or bring a table in through a single lightweight `select`/`filter`) — and spend your effort on the QUESTION instead, not on extra steps. Reserve an actual multi-branch composition — two SEPARATE joins, each independently built before being combined — for the medium/hard slots, where that structure is what earns the tier.
-
-**CHAINS ARE NEVER REQUIRED, AT ANY TIER.** Writing `A⋈B` then `⋈C` instead of one wide `A⋈B⋈C` is pure phrasing — it buys no difficulty and is not counted. Combine ONCE, then earn the tier through the analysis that follows. Every tier is reachable this way at any table count: across five tables with a single combining step, `+ aggregate` is easy, `+ group + aggregate` is medium, and `+ group + 2 aggregates` is hard — and two genuinely distinct `flag`/`bucket` derive steps reach medium on the data-engineering axis with no extra combining step at all.
+### DIFFICULTY IS GIVEN
+Each plan's `difficulty` is fixed by its question (see FIXED QUESTIONS): it was judged on the question before you were called. Copy it into `difficulty` and nothing more — never shape, pad or trim the steps to reach a tier. Plan the analysis the question naturally needs, in as many steps as it takes.
 
 ### COMBINING METRICS ACROSS TABLES
 When a plan blends figures from more than one table into a single output value (a `derive`/`aggregate` producing a "combined total" or blended score), the combination must be substantively meaningful. This does NOT apply to `correlate`: a coefficient is scale-invariant (normalized to [-1, 1] regardless of units), so correlating a COUNT against a dollar amount is sound and needs no unit reconciliation.
@@ -91,7 +54,7 @@ When a plan blends figures from more than one table into a single output value (
 - Same-unit does NOT mean summable: plain counts from conceptually unrelated administrative processes (building-permit + parking-ticket + tree-planting counts) are as meaningless added as mismatched units. Ask whether the sum is one quantity a domain expert would recognize and name ("total complaints" across sub-categories of the SAME register is fine). A generic thematic label slapped on afterward ("combined civic activity") is a rationalization, not a shared referent.
 - Sanity-check against a concrete row: if one term can be near-zero while the combined value barely changes because another dominates, the combination isn't meaningful — present the components separately or as a dimensionally-valid ratio.
 
-{batch_note}### TIME CONTEXT
+{batch_note}{fixed_questions}### TIME CONTEXT
 {time_context}
 
 ### DETECTED LANGUAGES
@@ -113,8 +76,7 @@ A verified relationship is also EVIDENCE, not only a recipe. Its key columns tel
 ### TABLE METADATA (from the open-data portal)
 Each table's own entry in the portal, keyed by alias. `title` is shared by every file of a dataset, while `resource_name` and `resource_description` describe this particular file and often carry its snapshot date or edition; `temporal_coverage` is the period the portal declares. Take a table's period, vintage and program from here when the analysis leaves them out or disagrees with it. Metadata describes the whole file, never a subset of its rows: a question narrowed to a place, unit or category that is only one of a column's values still needs a step filtering on it (see COLUMN STATISTICS).
 {table_metadata}
-{retrievable_keywords}
-{distinguishing_details}
+
 ### TABLE SAMPLE (real rows, up to 10 per table)
 Ground every question in these actual observed values — especially a hypothetical scenario's concrete inputs (a real grade level, a real program type seen below) — never invent a value that doesn't plausibly come from this data.
 {table_sample}

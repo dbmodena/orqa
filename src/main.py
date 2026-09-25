@@ -172,21 +172,36 @@ def resolve_target(country: str, city: str | None) -> TargetSpec:
     return target
 
 
-def _is_flat_layout(workflow_path: Path) -> bool:
-    """Cheap peek at a workflow yaml's top-level `flat_layout: true` flag.
+_FLAT_LAYOUT_ALIASES = {True: "city", False: "nested"}
+
+
+def _layout_mode(workflow_path: Path) -> str:
+    """Cheap peek at a workflow yaml's top-level `flat_layout` setting.
 
     Read before the full config load (``conf.load_config`` only receives
     ``data_path`` already computed, so it can never influence how that path
-    is built) — this is the one flag that has to be known earlier, to decide
-    whether DATADIR is organized as <group>/<backend>/<city> (default) or
-    just <city> (flat: some DATADIR mounts are handed over pre-organized
-    without the portal-name nesting).
+    is built) — this is the one setting that has to be known earlier, to
+    decide how DATADIR is organized for this target:
+      - "nested" (default / ``flat_layout: false``): <group>/<backend>/<city>.
+      - "backend" (``flat_layout: backend``): <backend>/<city> — some
+        DATADIR mounts are handed over pre-organized without the portal/group
+        segment, but still split by source backend (ckan/ods/socrata/...).
+      - "city" (``flat_layout: true``): just <city> — mounts pre-organized
+        without any nesting at all.
     """
     if not workflow_path.exists():
-        return False
+        return "nested"
     with open(workflow_path, "r") as f:
         parsed = yaml.safe_load(f) or {}
-    return bool(parsed.get("flat_layout", False))
+    raw = parsed.get("flat_layout", False)
+    if isinstance(raw, bool):
+        return _FLAT_LAYOUT_ALIASES[raw]
+    if isinstance(raw, str) and raw.strip().lower() in {"nested", "backend", "city"}:
+        return raw.strip().lower()
+    raise ValueError(
+        f"Invalid flat_layout value {raw!r} in {workflow_path}; expected "
+        "true, false, 'nested', 'backend', or 'city'."
+    )
 
 
 def resolve_data_path(spec: TargetSpec) -> Path:
@@ -196,11 +211,16 @@ def resolve_data_path(spec: TargetSpec) -> Path:
             "DATADIR is not set. Define DATADIR to the base directory used for OrQA data."
         )
     relative_path = spec.relative_data_path
-    if _is_flat_layout(spec.workflow_path):
+    mode = _layout_mode(spec.workflow_path)
+    if mode == "city":
         # Collapse <group>/<backend>/<city> down to just <city> — `backend`
         # stays available separately via spec.backend/cfg.source for
         # cleaning-function dispatch, this only affects the on-disk path.
         relative_path = Path(relative_path.name)
+    elif mode == "backend":
+        # Collapse <group>/<backend>/<city> down to <backend>/<city> — drop
+        # only the leading portal/group segment.
+        relative_path = Path(relative_path.parent.name) / relative_path.name
     return Path(data_dir) / relative_path
 
 
