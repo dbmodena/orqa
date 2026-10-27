@@ -25,7 +25,9 @@ class TaskProposerLLMClient(LLMClientStructured):
             config_path: Path to YAML configuration file
         """
         # 1. Load configuration
-        super().__init__(config_path, "table_analyzer")
+        # "response_model" is the discovery-task schema (Result). The
+        # "table_analyzer" key this used to read now holds TableAnalyses.
+        super().__init__(config_path, "response_model")
 
     def _value_validation_error(
         self, content: dict, schema: list
@@ -71,6 +73,22 @@ class TaskProposerLLMClient(LLMClientStructured):
             return True, formatted_error
 
         return False, None
+
+    def _correlation_validation_error(
+        self, result: dict, column_typings: dict
+    ) -> str | None:
+        """Correlation columns must be numeric."""
+        for task in result.get("join_correlation_tasks", []):
+            column = task.get("correlation_column")
+            if column and not column_typings.get(column, False):
+                return (
+                    "❌ Correlation ERROR - Non-numerical column used.\n\n"
+                    f"The result: {result}\n\n"
+                    f"The column '{column}' is not numerical.\n\n"
+                    "Correlation can only be computed on numerical columns "
+                    "(Int*, UInt*, Float*).\n"
+                )
+        return None
 
     def complete(
         self,
@@ -134,25 +152,15 @@ class TaskProposerLLMClient(LLMClientStructured):
                         invalid, error_msg = self._value_validation_error(
                             result, schema
                         )
+                        if not invalid and column_typings is not None:
+                            error_msg = self._correlation_validation_error(
+                                result, column_typings
+                            )
+                            invalid = error_msg is not None
                         if invalid:
+                            messages.append({"role": "assistant", "content": content})
                             messages.append({"role": "user", "content": error_msg})
                             continue
-                        elif column_typings is not None:
-                            for tasks in result["join_correlation_tasks"]:
-                                if tasks["correlation_column"]:
-                                    if not column_typings[tasks["correlation_column"]]:
-                                        error_msg = (
-                                            "❌ Correlation ERROR - Non-numerical column used.\n\n"
-                                            f"The result: {result}\n\n"
-                                            f"The column '{tasks['correlation_column']}' has dtype '{column_typings[tasks['correlation_column']]}', "
-                                            "which is not numerical.\n\n"
-                                            "Correlation can only be computed on numerical columns "
-                                            "(Int*, UInt*, Float*).\n"
-                                        )
-                                        messages.append(
-                                            {"role": "user", "content": error_msg}
-                                        )
-                                        continue
 
                     logger.debug("Success on attempt %d", attempt + 1)
                     return result, usage_total

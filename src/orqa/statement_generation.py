@@ -232,18 +232,18 @@ def _relationship_to_link(spec: dict) -> dict:
     search). Flattening them into one list loses which column belongs to
     which table, and which two columns are actually the same key.
 
-    For ``union`` links, ``left_cols``/``right_cols`` are the LLM-proposed
-    query-side columns vs. whatever the schema matcher found ANYTHING for on
-    the candidate side (see ``query_candidates._make_union_match``) — they're
-    only a real correspondence when ``column_scores`` is populated (schema
-    match cleared the confidence threshold), in which case they're already
-    filtered, ranked, and positionally aligned by that function and are
-    zipped into pairs here, WITH the confidence score attached (union
-    evidence is a schema/name-similarity signal, not a value-overlap
+    For ``union`` links, ``left_cols``/``right_cols`` are only a real
+    correspondence when ``column_scores`` is populated (see
+    ``query_candidates._make_union_match``): either the aligned pairs the LLM
+    selected for the pair (semantic pipeline) or the schema matches that
+    cleared the confidence threshold (classical pipeline). They are
+    positionally aligned by that function and are zipped into pairs here,
+    WITH the confidence score attached when the matcher scored the pair
+    (union evidence is a schema/name-similarity signal, not a value-overlap
     guarantee like a join key, so the score matters). When ``column_scores``
-    is empty, no pair was confident enough — each column is listed
-    separately, still tagged with its own table, without claiming a
-    cross-table correspondence that isn't actually known.
+    is empty there is no correspondence — each column is listed separately,
+    still tagged with its own table, without claiming a cross-table
+    correspondence that isn't actually known.
     """
     left, right = spec.get("left", ""), spec.get("right", "")
     mtype = spec.get("type", "")
@@ -253,7 +253,7 @@ def _relationship_to_link(spec: dict) -> dict:
         scores = spec.get("column_scores") or []
         if scores and len(scores) == len(left_cols) == len(right_cols):
             columns = [
-                {left: lc, right: rc, "score": f"{s:.2f}"}
+                {left: lc, right: rc, **({"score": f"{s:.2f}"} if s is not None else {})}
                 for lc, rc, s in zip(left_cols, right_cols, scores)
             ]
         else:

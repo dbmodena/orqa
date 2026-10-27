@@ -19,9 +19,12 @@ This repository implements the OrQA workflow for generating benchmark datasets f
   - `crawl`
   - `clean`
   - `normalize-metadata`
-  - `index`
+  - `index` (only with `tasks.candidates_discovery.method: blend`)
   - `candidates-discovery`
+  - `embed-search-metadata`
+  - `generate-query-candidates`
   - `generate-statements`
+  - `solve-benchmark`
 - Targets are fixed in `src/main.py` and include `canada`, `uk`, `italy/modena`, `italy/bologna`, `spain/madrid`, `spain/valencia`, `france/paris`, and `usa/nyc`.
 
 ## Runtime setup

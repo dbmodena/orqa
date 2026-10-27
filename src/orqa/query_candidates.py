@@ -28,14 +28,20 @@ from .utils.pipeline_logger import PipelineLogger
 GROUP_TABLE_NROWS = 100
 
 
-def load_tasks(tasks_file: Path) -> dict:
-    """Load tasks_results.json and index by (Q, R, task)."""
-    tasks = {}
+def load_tasks(tasks_file: Path) -> dict[tuple, list[dict]]:
+    """Load tasks_results.json and index by (Q, R, task).
+
+    A pair can carry several tasks of the same type — discovery proposes up to
+    three per type, each on different columns — so every key maps to the LIST
+    of its specs, in file order.
+    """
+    tasks: dict[tuple, list[dict]] = {}
     with open(tasks_file) as f:
         for line in f:
             if line.strip():
                 spec = json.loads(line)
-                tasks[(spec["Q"], spec["R"], spec["task"])] = spec
+                key = (spec["Q"], spec["R"], spec["task"])
+                tasks.setdefault(key, []).append(spec)
     return tasks
 
 
@@ -73,43 +79,71 @@ def _resolve_case_insensitive(
     )
 
 
-def _make_union_match(task_spec, df_q, df_r, alias_q, alias_r):
-    """
-    ``q_columns``/``r_columns`` on a union task are NOT a correspondence —
-    ``q_columns`` is the LLM-proposed subset of the query table's schema, while
-    ``r_columns`` (see ``matches_graph.process_edge``) is every candidate-table
-    column that showed up *anywhere* in an unfiltered, un-scored COMA
-    schema-matcher pass over the two FULL schemas. The two lists have
-    different provenance and routinely differ wildly in length (a handful of
-    curated columns vs. nearly the candidate's entire schema).
+def _has_aligned_union_columns(task_spec: dict) -> bool:
+    """True when a union task's ``q_columns``/``r_columns`` are a positional
+    correspondence selected on the concrete (Q, R) pair.
 
-    The matcher's actual per-pair output (``task_spec["matches"]``, a list of
-    ``[q_col, r_col, score]`` triples) DOES carry a real, if noisy, cross-table
-    correspondence — filtered here to pairs at/above ``SCHEMA_MATCH_THRESHOLD``
-    (the same cutoff already used elsewhere in the codebase to decide whether
-    a schema match is trustworthy) and ranked by confidence. When nothing
-    clears that bar, fall back to the disjoint originals rather than
-    fabricate a pairing that isn't actually supported.
+    Only the semantic pipeline's pair task selection emits one (see
+    ``structured_outputs.PairUnionTask``: same length, ``q_columns[i]`` pairs
+    with ``r_columns[i]``). It is recognised by the pair's metadata cosine
+    similarity, which only that pipeline records in ``metrics``.
     """
-    raw_matches = task_spec.get("matches") or []
-    confident = sorted(
-        (
-            (c1, c2, float(score))
-            for c1, c2, score in raw_matches
-            if float(score) >= SCHEMA_MATCH_THRESHOLD
-        ),
-        key=lambda triple: triple[2],
-        reverse=True,
+    q_columns = task_spec.get("q_columns") or []
+    r_columns = task_spec.get("r_columns") or []
+    return (
+        "cosine_sim" in (task_spec.get("metrics") or {})
+        and len(q_columns) == len(r_columns) > 0
     )
 
-    if confident:
-        q_columns      = [c1 for c1, _, _ in confident]
-        r_columns      = [c2 for _, c2, _ in confident]
-        column_scores  = [s for _, _, s in confident]
+
+def _make_union_match(task_spec, df_q, df_r, alias_q, alias_r):
+    """
+    Semantic pipeline: ``q_columns``/``r_columns`` are the aligned column pairs
+    the LLM selected for this pair (see ``_has_aligned_union_columns``) and are
+    kept as they are, each pair annotated with the schema matcher's score for
+    it (``None`` when the matcher did not score that pair).
+
+    Classical (BLEND) pipeline: ``q_columns``/``r_columns`` are NOT a
+    correspondence — ``q_columns`` is the LLM-proposed subset of the query
+    table's schema, while ``r_columns`` (see ``matches_graph.process_edge``) is
+    every candidate-table column that showed up *anywhere* in an unfiltered,
+    un-scored COMA schema-matcher pass over the two FULL schemas. The two lists
+    have different provenance and routinely differ wildly in length (a handful
+    of curated columns vs. nearly the candidate's entire schema).
+
+    There, the matcher's actual per-pair output (``task_spec["matches"]``, a
+    list of ``[q_col, r_col, score]`` triples) DOES carry a real, if noisy,
+    cross-table correspondence — filtered here to pairs at/above
+    ``SCHEMA_MATCH_THRESHOLD`` (the same cutoff already used elsewhere in the
+    codebase to decide whether a schema match is trustworthy) and ranked by
+    confidence. When nothing clears that bar, fall back to the disjoint
+    originals rather than fabricate a pairing that isn't actually supported.
+    """
+    raw_matches = task_spec.get("matches") or []
+
+    if _has_aligned_union_columns(task_spec):
+        scores = {(c1, c2): float(score) for c1, c2, score in raw_matches}
+        q_columns      = list(task_spec["q_columns"])
+        r_columns      = list(task_spec["r_columns"])
+        column_scores  = [scores.get(pair) for pair in zip(q_columns, r_columns)]
     else:
-        q_columns      = task_spec.get("q_columns", [])
-        r_columns      = task_spec.get("r_columns", [])
-        column_scores  = []
+        confident = sorted(
+            (
+                (c1, c2, float(score))
+                for c1, c2, score in raw_matches
+                if float(score) >= SCHEMA_MATCH_THRESHOLD
+            ),
+            key=lambda triple: triple[2],
+            reverse=True,
+        )
+        if confident:
+            q_columns      = [c1 for c1, _, _ in confident]
+            r_columns      = [c2 for _, c2, _ in confident]
+            column_scores  = [s for _, _, s in confident]
+        else:
+            q_columns      = task_spec.get("q_columns", [])
+            r_columns      = task_spec.get("r_columns", [])
+            column_scores  = []
 
     col_str = f"{q_columns} / {r_columns}" if q_columns or r_columns else "All columns"
     return {
@@ -120,9 +154,10 @@ def _make_union_match(task_spec, df_q, df_r, alias_q, alias_r):
             "left_cols": q_columns,
             "right_cols": r_columns,
             # Schema-match confidence per (left_cols[i], right_cols[i]) pair,
-            # same length/order as left_cols/right_cols. Empty when no pair
-            # cleared SCHEMA_MATCH_THRESHOLD — left_cols/right_cols are then
-            # each side's independently relevant columns, NOT a correspondence.
+            # same length/order as left_cols/right_cols; an entry is None for
+            # an LLM-aligned pair the matcher did not score. Empty when there
+            # is no correspondence at all — left_cols/right_cols are then each
+            # side's independently relevant columns.
             "column_scores": column_scores,
             "description": f"UNION: {alias_q} ∪ {alias_r} ON {col_str}",
         },
@@ -307,7 +342,8 @@ def process_group(
 
             for op in operations:
                 # Prefer the forward orientation; fall back to the reversed
-                # one — a pair contributes at most once per operation type.
+                # one — a pair contributes from ONE orientation per operation
+                # type, every distinct task of it once.
                 lookups = (
                     ((ds_i, ds_j, op), alias_i, alias_j),
                     ((ds_j, ds_i, op), alias_j, alias_i),
@@ -315,18 +351,19 @@ def process_group(
                 for key, alias_q, alias_r in lookups:
                     if key not in tasks:
                         continue
-                    result = make_match(
-                        tasks[key], dfs[alias_q], dfs[alias_r], alias_q, alias_r
-                    )
-                    if not result:
-                        break
-                    relationship = result["relationship"]
-                    fingerprint = _relationship_fingerprint(relationship)
-                    if fingerprint not in seen:
-                        seen.add(fingerprint)
-                        relationships.append(relationship)
-                        for alias, cols in result["columns"].items():
-                            all_columns[alias].update(cols)
+                    for task_spec in tasks[key]:
+                        result = make_match(
+                            task_spec, dfs[alias_q], dfs[alias_r], alias_q, alias_r
+                        )
+                        if not result:
+                            continue
+                        relationship = result["relationship"]
+                        fingerprint = _relationship_fingerprint(relationship)
+                        if fingerprint not in seen:
+                            seen.add(fingerprint)
+                            relationships.append(relationship)
+                            for alias, cols in result["columns"].items():
+                                all_columns[alias].update(cols)
                     break
 
     if not relationships:
