@@ -29,7 +29,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
+import pandas as pd
 from pandas.api import types as ptypes
+
+from ...benchmark.index import tokenize
 
 from ..llm_client.LLMClientStructured import LLMClientStructured
 from ..prompting.prompts import TableAnalyzerBatchPrompt
@@ -200,6 +203,159 @@ def render_table_facts(df: Any) -> str:
             "Breakdowns (columns with few values; the table covers all of them):",
             *(breakdowns or ["- none"]),
         ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Table identity: what tells one table from its siblings. On a family of
+# monthly/quarterly files of one publisher the analyses, the columns and the
+# scope facts are all alike; what differs is the PERIOD the rows cover and a
+# word or two of the file name. The question writer needs both to name each
+# table's period in the question (topic linkage) and to make every table
+# necessary (its period must be in the question's scope); the question judge
+# tests exactly that. Measured in experiments/structured_stability round 2
+# (2026-11-03): topic-linkage and table-necessity rejections (50 of 121) were
+# mostly a period the writer got wrong or left out.
+_YEAR_COLUMN_HINTS = ("year", "anno", "año", "annee", "année", "jahr", "fiscal", "ejercicio")
+_DATE_SAMPLE = 400
+_DATE_PARSE_RATIO = 0.9
+_PLAIN_NUMBER_RE = r"\s*-?\d+(\.\d+)?\s*"
+
+
+def _parse_dates(values: Any) -> Any:
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return pd.to_datetime(values, errors="coerce", format="mixed", dayfirst=True)
+
+
+def table_period(df: Any) -> Optional[dict]:
+    """The span of dates the table's rows cover, or ``None``.
+
+    ``{"column", "start", "end", "kind"}`` — ``kind`` ``"date"`` from the
+    text/datetime column whose values parse best as dates (detected on a
+    sample, measured over every row), else ``"year"`` from an integer column
+    whose name says year and whose values are years.
+    """
+    if df is None or len(getattr(df, "columns", [])) == 0:
+        return None
+    best: Optional[tuple] = None
+    for column in df.columns:
+        series = df[column]
+        try:
+            if ptypes.is_datetime64_any_dtype(series):
+                values = series.dropna()
+                if values.empty:
+                    continue
+                candidate = (1.0, column, values.min(), values.max())
+            elif ptypes.is_object_dtype(series) or ptypes.is_string_dtype(series):
+                values = series.dropna().astype(str)
+                if values.empty:
+                    continue
+                sample = values.sample(n=min(_DATE_SAMPLE, len(values)), random_state=0)
+                if sample.str.fullmatch(_PLAIN_NUMBER_RE).mean() > 0.5:
+                    continue
+                parsed = _parse_dates(sample)
+                ratio = float(parsed.notna().mean())
+                if ratio < _DATE_PARSE_RATIO:
+                    continue
+                full = _parse_dates(values).dropna()
+                if full.empty:
+                    continue
+                candidate = (ratio, column, full.min(), full.max())
+            else:
+                continue
+        except Exception:  # noqa: BLE001 — a column that cannot be parsed is simply not the date column
+            continue
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+    if best is not None:
+        _, column, start, end = best
+        return {"column": str(column), "start": start.date().isoformat(), "end": end.date().isoformat(), "kind": "date"}
+    for column in df.columns:
+        name = str(column).lower()
+        if not any(hint in name for hint in _YEAR_COLUMN_HINTS):
+            continue
+        series = df[column]
+        if not ptypes.is_numeric_dtype(series) or ptypes.is_bool_dtype(series):
+            continue
+        values = series.dropna()
+        if values.empty or values.between(1900, 2100).mean() < 0.95:
+            continue
+        return {"column": str(column), "start": str(int(values.min())), "end": str(int(values.max())), "kind": "year"}
+    return None
+
+
+def table_identity(alias: str, df: Any, metadata: Optional[dict], siblings: Any = ()) -> dict:
+    """What tells ``alias`` apart: the period its rows cover, its file name and
+    publisher, and the title/file-name words no other table of the group has.
+
+    ``metadata`` is the table's portal metadata (``portal_metadata``);
+    ``siblings`` the other tables' metadata dicts.
+    """
+    md = dict(metadata or {})
+    name_text = f"{md.get('title') or ''} {md.get('resource_name') or ''}"
+    own_tokens = tokenize(name_text)
+    other_tokens: set = set()
+    for sib in siblings or ():
+        sib = sib or {}
+        other_tokens |= set(tokenize(f"{sib.get('title') or ''} {sib.get('resource_name') or ''}"))
+    distinct = list(dict.fromkeys(t for t in own_tokens if t not in other_tokens))
+    return {
+        "alias": alias,
+        "period": table_period(df),
+        "temporal_coverage": md.get("temporal_coverage") or None,
+        "resource_name": md.get("resource_name") or None,
+        "title": md.get("title") or None,
+        "publisher": md.get("publisher") or md.get("responsible_entity") or None,
+        "distinct_words": distinct[:8],
+    }
+
+
+def table_identities(aliases: Any, dfs: Any, table_metadata: Optional[dict]) -> List[dict]:
+    """``table_identity`` for every alias of a group, siblings included."""
+    alias_list = list(aliases)
+    metadata = table_metadata or {}
+    frames = list(dfs or [])
+    out: List[dict] = []
+    for idx, alias in enumerate(alias_list):
+        df = frames[idx] if idx < len(frames) else None
+        siblings = [metadata.get(other) or {} for other in alias_list if other != alias]
+        out.append(table_identity(alias, df, metadata.get(alias) or {}, siblings))
+    return out
+
+
+def render_identity_line(identity: dict, group_size: int = 1) -> str:
+    parts: List[str] = []
+    period = identity.get("period")
+    if period and period.get("kind") == "date":
+        parts.append(f"rows dated {period['start']} to {period['end']} (column {period['column']})")
+    elif period:
+        parts.append(f"years {period['start']} to {period['end']} (column {period['column']})")
+    elif identity.get("temporal_coverage"):
+        parts.append(f"declared coverage {identity['temporal_coverage']}")
+    else:
+        parts.append("no dated rows found — a fixed period only if the file name states one")
+    if identity.get("resource_name"):
+        parts.append(f"file \"{identity['resource_name']}\"")
+    if identity.get("publisher"):
+        parts.append(f"publisher {identity['publisher']}")
+    words = identity.get("distinct_words") or []
+    if words:
+        parts.append("words only this table's title/file name has: " + ", ".join(words))
+    elif group_size > 1:
+        parts.append("its title/file name shares every word with another table of the group")
+    return "; ".join(parts)
+
+
+def render_table_identities(identities: Any) -> str:
+    """The "### TABLE IDENTITY" block: one line per table."""
+    identities = list(identities or [])
+    if not identities:
+        return "(none)"
+    return "\n".join(
+        f"- {i['alias']}: {render_identity_line(i, len(identities))}" for i in identities
     )
 
 

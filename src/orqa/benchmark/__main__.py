@@ -1,6 +1,5 @@
 """
-Quick command-line access to the dataset reverse index, without going
-through an MCP client:
+Quick command-line access to the dataset reverse index:
 
     python -m orqa.benchmark --source socrata/nyc taxi license expiration
     python -m orqa.benchmark --list-sources
@@ -67,7 +66,7 @@ def main() -> None:
     parser.add_argument(
         "--no-llm",
         action="store_true",
-        help="Skip the llm_keywords retriever (no BenchmarkSolverAgent call "
+        help="Skip the llm_keywords retriever (no SearchKeywordsAgent call "
         "per question) for a free run.",
     )
     parser.add_argument(
@@ -120,7 +119,7 @@ def _iter_report_questions(queries_path: Path):
     """Yield ``(kind, table_count, question_text, gold_resource_ids)`` for
     every generated question in ``queries_path``.
     """
-    from orqa.benchmark.questions import iter_questions
+    from orqa.utils.questions import iter_questions
     from orqa.utils import dataset_id_to_resource_id, load_json
 
     payload = load_json(queries_path)
@@ -141,7 +140,7 @@ def _run_retrievability_report(args) -> None:
 
     search_index = load_index(cfg)
     if search_index is None:
-        print("No reverse index available for this portal (check tasks.mcp_search).")
+        print("No reverse index available for this portal (check tasks.search).")
         return
 
     # The SAME panel the retrievability gate votes with — same retrievers,

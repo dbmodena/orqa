@@ -3,7 +3,9 @@ from typing import List, Dict, Tuple, Any
 import difflib
 import logging
 import math
+import os
 import pickle
+import time
 import queue as queue_module
 import re
 import multiprocessing as mp
@@ -23,6 +25,16 @@ import pandas as pd
 _BENIGN_NUMPY_STATS_WARNING = r"(invalid value encountered|divide by zero encountered|Degrees of freedom)"
 
 from orqa.utils import prepare_dataframe
+from ..utility.undecodable_names import escaped_literal, is_undecodable, resolve_undecodable_name
+
+
+def _spellings(column: str) -> tuple:
+    """How generated code can write a column name inside quotes: as it is,
+    and for a header holding U+FFFD also with the ASCII escape \\ufffd the
+    prompts teach."""
+    if is_undecodable(column):
+        return column, escaped_literal(column)[1:-1]
+    return (column,)
 
 TECHNICAL_TERMS = [
     'dataframe', 'dataframes', 'dataset', 'datasets',
@@ -96,8 +108,27 @@ logger = logging.getLogger(__name__)
 _SANDBOX_ERROR_MAX_CHARS = 2000
 
 
+def _default_memory_limit_mb() -> int:
+    """Half the machine's RAM. The judge-time executor runs the same code
+    with no limit at all, so a validator limit far below the machine (the
+    former 512 MB) rejected correct queries over 64M-row tables: a COUNT
+    DISTINCT in DuckDB, a plain left merge in pandas."""
+    try:
+        total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        return max(2048, int(total / 2 / (1024 ** 2)))
+    except (ValueError, OSError, AttributeError):
+        return 4096
+
+
 def _sandbox_error_text(e: BaseException) -> str:
-    msg = str(e) or type(e).__name__
+    if isinstance(e, KeyError) and len(e.args) == 1 and isinstance(e.args[0], str):
+        # str(KeyError(msg)) is repr(msg): every KeyError hint crossed back
+        # quoted, with its line breaks as "\n" and every backslash doubled —
+        # `df["Total �"]` reached the model as `df["Total \\ufffd"]`,
+        # which is another name. The in-process path reads args[0] already.
+        msg = e.args[0] or type(e).__name__
+    else:
+        msg = str(e) or type(e).__name__
     if len(msg) > _SANDBOX_ERROR_MAX_CHARS:
         msg = msg[:_SANDBOX_ERROR_MAX_CHARS] + " … [truncated]"
     return msg
@@ -120,13 +151,19 @@ def _sandbox_worker(queue: mp.Queue, fn, args: tuple) -> None:
                 "ignore", category=RuntimeWarning, message=_BENIGN_NUMPY_STATS_WARNING
             )
             result = fn(*args)
-    except MemoryError:
+    except MemoryError as e:
+        # The validators raise MemoryError with a specific diagnosis (which
+        # join exploded, how large the result is); only a bare interpreter
+        # MemoryError (empty message) gets the generic text.
         queue.put((
             "error",
             "MemoryError",
-            "Query ran out of memory. "
-            "Likely cause: large intermediate result or cartesian product.\n"
-            "Fix: pre-filter rows, select only needed columns, or add stricter join conditions."
+            _sandbox_error_text(e) if str(e).strip() else (
+                "The code ran out of memory. "
+                "Likely cause: a huge intermediate result (a join on a non-unique key, a cartesian product, "
+                "a sort or distinct over the whole raw table).\n"
+                "Fix: filter and aggregate before joining, select only the needed columns, join on the full key."
+            )
         ))
         return
     except BaseException as e:
@@ -164,20 +201,21 @@ def _sandbox_worker(queue: mp.Queue, fn, args: tuple) -> None:
 class QueryValidator(ABC):
 
     DEFAULT_TIMEOUT   = 300
-    DEFAULT_MEM_LIMIT = 512
+    # None: half the machine's RAM (see _default_memory_limit_mb).
+    DEFAULT_MEM_LIMIT = None
 
     def __init__(
         self,
         dataframes:   List,
         table_names:  List[str],
         lookup_dict:  dict,
-        mem_limit_mb: int = DEFAULT_MEM_LIMIT,
+        mem_limit_mb: "int | None" = DEFAULT_MEM_LIMIT,
         timeout:      int = DEFAULT_TIMEOUT,
     ):
         self.dataframes   = dataframes
         self.table_names  = table_names
         self.lookup_dict  = lookup_dict
-        self.mem_limit_mb = mem_limit_mb
+        self.mem_limit_mb = mem_limit_mb or _default_memory_limit_mb()
         self.timeout      = timeout
 
         self.validation_errors: list = []
@@ -303,24 +341,42 @@ class QueryValidator(ABC):
             daemon=True,
         )
         p.start()
-        p.join(timeout=self.timeout)
-
+        # Read the queue WHILE the worker runs. mp.Queue feeds its payload
+        # through a pipe from a background thread, and the child cannot exit
+        # until the parent has drained it: joining first (what this used to
+        # do) deadlocked on any result above the pipe buffer (~64 KB, a few
+        # thousand rows) until the timeout, which was then reported as a
+        # cartesian product.
+        deadline = time.monotonic() + self.timeout
+        message = None
+        while message is None:
+            try:
+                message = result_queue.get(timeout=0.5)
+            except queue_module.Empty:
+                if not p.is_alive():
+                    # Dead without a message: one last short read, the feeder
+                    # thread may have flushed just before exit.
+                    try:
+                        message = result_queue.get(timeout=2)
+                    except queue_module.Empty:
+                        break
+                elif time.monotonic() > deadline:
+                    p.kill()
+                    p.join()
+                    raise TimeoutError(
+                        f"The code ran for more than {self.timeout}s and was stopped.\n"
+                        "Likely causes: a join on a non-unique or missing key (a cartesian product), "
+                        "a row-by-row loop or apply over a large table, a sort/distinct over the whole "
+                        "raw table, or a regex over millions of rows.\n"
+                        "Fix: join on the full key the plan declares, filter and aggregate before joining, "
+                        "and use vectorised column operations instead of loops or apply."
+                    )
+        p.join(timeout=10)
         if p.is_alive():
             p.kill()
             p.join()
-            raise TimeoutError(
-                f"Query exceeded {self.timeout}s timeout limit.\n"
-                "Likely causes: cartesian product from missing/incorrect join keys, "
-                "overly relaxed filter producing too many rows, or expensive aggregation.\n"
-                "Fix: add explicit join keys (on=), tighten WHERE/filter conditions, "
-                "or pre-aggregate before joining."
-            )
 
-        # Never trust queue.empty() right after join(): the feeder thread may
-        # still be flushing the worker's item. Block briefly on get() instead.
-        try:
-            message = result_queue.get(timeout=5)
-        except queue_module.Empty:
+        if message is None:
             exit_code = p.exitcode
             hint = (
                 " Exit code -9 usually means the OS killed it (out of memory)."
@@ -329,7 +385,7 @@ class QueryValidator(ABC):
             raise RuntimeError(
                 f"Sandbox process exited unexpectedly without returning a result "
                 f"(exit code: {exit_code}).{hint}\n"
-                "The query may have crashed the interpreter or been killed by the OS.\n"
+                "The code may have crashed the interpreter or been killed by the OS.\n"
                 "Fix: reduce the data processed — pre-filter rows, select fewer "
                 "columns, or aggregate earlier."
             )
@@ -356,18 +412,42 @@ class QueryValidator(ABC):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _describe_result_shape(result: Any) -> str:
+    def _total_rows(result: Any) -> int:
+        """The row count of the full result: the sandbox ships only the
+        head of a large frame and notes the true count on it."""
+        try:
+            return int(result.attrs.get("orqa_total_rows", len(result)))
+        except Exception:
+            return len(result)
+
+    @staticmethod
+    def _all_null_columns(result: Any) -> list:
+        """Columns of a non-empty result that hold no value in any row
+        (a Series counts as one column named by it)."""
+        try:
+            if isinstance(result, pd.DataFrame):
+                if result.empty:
+                    return []
+                return [str(c) for c in result.columns if result[c].isna().all()]
+            if isinstance(result, pd.Series):
+                return [str(result.name) if result.name is not None else "the result"] if len(result) and result.isna().all() else []
+        except Exception:
+            return []
+        return []
+
+    @classmethod
+    def _describe_result_shape(cls, result: Any) -> str:
         """Human-readable one-liner of what the executed result actually is,
         for the mismatch feedback message."""
         try:
             if isinstance(result, pd.DataFrame):
                 return (
-                    f"a DataFrame with {result.shape[0]} row(s) and "
+                    f"a DataFrame with {cls._total_rows(result)} row(s) and "
                     f"{result.shape[1]} column(s) ({', '.join(map(str, result.columns[:6]))}"
                     f"{', …' if result.shape[1] > 6 else ''})"
                 )
             if isinstance(result, pd.Series):
-                return f"a Series of {len(result)} value(s) (dtype {result.dtype})"
+                return f"a Series of {cls._total_rows(result)} value(s) (dtype {result.dtype})"
             if isinstance(result, bool):
                 return f"a boolean ({result})"
             if isinstance(result, numbers.Number):
@@ -530,6 +610,80 @@ class QueryValidator(ABC):
             "way and the PLAN needs a different final computation."
         )
 
+    def _check_result_not_all_null(self, result: Any, ordered_names: list) -> None:
+        """Reject a result whose column(s) hold no value at all.
+
+        A cast with the wrong recipe (`pd.to_numeric` on decimal-comma text,
+        a date parse with the wrong format, `TRY_CAST` on number text) yields
+        NaN/NULL everywhere and the query then "succeeds" with an answer
+        nobody can use. Single-table: any all-null column fires. Multi-table:
+        only when EVERY column is null (a left join whose right side never
+        matched on sample data leaves its columns null legitimately)."""
+        if not isinstance(result, (pd.DataFrame, pd.Series)) or self._is_empty_result(result):
+            return
+        try:
+            null_columns = list(result.attrs.get("orqa_null_columns", self._all_null_columns(result)))
+        except Exception:
+            null_columns = self._all_null_columns(result)
+        # A column that is all null in the SOURCE table projects to an all-null
+        # result column legitimately (the block says `all null` for it).
+        null_columns = [c for c in null_columns if not self._null_in_source(c)]
+        if not null_columns:
+            return
+        if len(ordered_names) > 1:
+            width = result.shape[1] if isinstance(result, pd.DataFrame) else 1
+            if len(null_columns) < width:
+                return
+        shown = ", ".join(f'"{c}"' for c in null_columns[:6])
+        raise ValueError(
+            f"RESULT IS ALL NULL — column(s) {shown} hold no value in any result row "
+            f"({self._total_rows(result)} rows).\n"
+            "A cast or parse produced nothing: the number-text or date-text recipe did not match "
+            "how the values are stored (e.g. pd.to_numeric / TRY_CAST on text with a decimal "
+            "comma or a thousands separator, a date format that is not the one shown). Re-read "
+            "the column's `number text` / `date text` fact in Column Statistics and apply exactly "
+            "that recipe; if the join or filter kept only rows whose value is null, exclude them "
+            "before aggregating. A result that answers nothing is not a valid answer."
+        )
+
+    def _null_in_source(self, column: str) -> bool:
+        for df in self.dataframes:
+            try:
+                if column in df.columns and df[column].isna().all():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _check_result_no_infinity(self, result: Any) -> None:
+        """Reject a table/series result holding +/-inf: a division by zero
+        (DuckDB's `/ 0` and pandas' `/ 0` give inf, not an error)."""
+        try:
+            frame = result.to_frame() if isinstance(result, pd.Series) else result
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return
+            numeric = frame.select_dtypes(include=[np.number])
+            if numeric.empty:
+                return
+            infinite = [str(c) for c in numeric.columns if np.isinf(numeric[c].to_numpy(dtype=float, na_value=np.nan)).any()]
+        except Exception:
+            return
+        if not infinite:
+            return
+        raise ValueError(
+            f"UNDEFINED VALUES — column(s) {', '.join(repr(c) for c in infinite[:6])} hold inf: a division "
+            "by zero (a ratio whose denominator is 0 for some rows, a rate per zero count). Guard the "
+            "denominator — SQL `x / NULLIF(d, 0)`, pandas `x / d.replace(0, np.nan)` — or exclude those "
+            "rows; an infinite value is never a valid business answer."
+        )
+
+    def _build_none_result_feedback(self) -> str:
+        return (
+            "The code produced no value (None). Its last statement must be the result — a "
+            "DataFrame, Series or scalar — as a bare expression or an assignment; a method called "
+            "with inplace=True, a print(...), or a variable never assigned leaves None."
+        )
+
     # ------------------------------------------------------------------
     # Main validation loop
     # ------------------------------------------------------------------
@@ -562,7 +716,9 @@ class QueryValidator(ABC):
                 sanitized_ordered = [sanitize_lookup[n] for n in ordered_names]
                 result_data = self._execute_query(query_code, dataframes, sanitized_ordered)
 
-                # FIX: empty-result rejection is now gated through _empty_result_is_error(),
+                if result_data is None:
+                    raise ValueError(self._build_none_result_feedback())
+                # Empty-result rejection is gated through _empty_result_is_error(),
                 # which subclasses can override. For multi-table queries, sample data may
                 # have no overlapping keys, so a logically correct merge will return 0 rows —
                 # rejecting it here generates spurious correction cycles and token waste.
@@ -574,6 +730,8 @@ class QueryValidator(ABC):
                 # specific feedback rather than a shape complaint.
                 self._check_expected_result_type(actual_query, result_data)
                 self._check_result_finite(result_data)
+                self._check_result_no_infinity(result_data)
+                self._check_result_not_all_null(result_data, ordered_names)
                 if not self._check_table_usage(query_code, sanitized_names):
                     raise ValueError(self._build_unused_tables_feedback())
                 if not self._check_tables_field_coverage(actual_query):
@@ -690,6 +848,17 @@ class QueryValidator(ABC):
             dataframe = prepare_dataframe(dataframe, alias=name, logger=_logger)
             cols = table.get("columns_involved") or []
             if cols:
+                # `columns_involved` is a label list, not code: "Total £" written
+                # for the header "Total �" (U+FFFD where the source file's
+                # byte could not be decoded) is resolved to it when that is the
+                # only header it can spell — see utility.undecodable_names.
+                resolved = [
+                    c if c in dataframe.columns or c in derived_columns
+                    else (resolve_undecodable_name(c, dataframe.columns) or c)
+                    for c in cols
+                ]
+                if resolved != list(cols):
+                    table["columns_involved"] = cols = resolved
                 missing = [c for c in cols if c not in dataframe.columns]
                 if missing:
                     # A `derive`/`aggregate` step's own OUTPUT column
@@ -752,7 +921,9 @@ class QueryValidator(ABC):
                     # correctly referenced it in quotes.
                     undeclared = [
                         c for c in dataframe.columns
-                        if c not in cols and (f"'{c}'" in code or f'"{c}"' in code)
+                        if c not in cols and any(
+                            f"'{s}'" in code or f'"{s}"' in code for s in _spellings(c)
+                        )
                     ]
                     if undeclared:
                         table["columns_involved"] = list(cols) + undeclared
@@ -900,14 +1071,20 @@ class QueryValidator(ABC):
         if result is None:
             return
         row_count = None
-        if hasattr(result, 'shape'):
-            row_count = result.shape[0]
+        shape = getattr(result, 'shape', None)
+        if isinstance(shape, tuple):
+            # A numpy scalar (what `.sum()`, `.count()`, `.mean()` return) or a
+            # 0-d array has shape (): one value, no rows to count. Indexing it
+            # raised IndexError, reported to the model as its own mistake.
+            row_count = shape[0] if shape else None
         elif hasattr(result, '__len__'):
             row_count = len(result)
         if row_count is not None and row_count > self.MAX_RESULT_ROWS:
             raise MemoryError(
-                f"Query result has {row_count:,} rows, exceeding the {self.MAX_RESULT_ROWS:,} row limit.\n"
-                "Fix: add WHERE/filter conditions, use LIMIT, or aggregate before returning."
+                f"The result has {row_count:,} rows, over the {self.MAX_RESULT_ROWS:,}-row limit: it "
+                "returns raw rows where a benchmark answer is an aggregate, a ranking or a short list.\n"
+                "Fix: aggregate (group, count, sum), rank and keep the top rows, or filter to the "
+                "subset the question asks about."
             )
 
     @staticmethod

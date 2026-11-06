@@ -14,6 +14,21 @@ earlier step declared, whose own sources transitively root in raw columns.
 The only thing that can now fail is a name no step declared and no table
 contains — which is the definition of a hallucinated column.
 
+Two scope rules keep the check from contradicting itself (both seen live,
+2026-11-03, on a plan that unioned five monthly files and then aggregated
+them — the feedback demanded ``Table_0.column`` for a column present in all
+five tables, then rejected that exact form in the step's ``columns`` as
+unknown, and the planner alternated between the two until its re-requests
+were spent):
+
+* a qualified reference ``Alias.column`` is accepted wherever a column is
+  named — in a ``produces`` source AND in a step's ``columns``/``params`` —
+  as long as the alias is known and owns the column;
+* a column present in several tables is NOT ambiguous when the step's own
+  ``tables`` leave a single owner in scope, or when an earlier ``union``
+  step merged every owner in scope: the union result has that column once,
+  rooted in all of them.
+
 Two public entry points:
 
 * :func:`resolve_plan_columns` — walks the steps in order and returns every
@@ -27,6 +42,8 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from .undecodable_names import escaped_literal, is_undecodable
 
 __all__ = [
     "SOURCE_FREE_OPERATIONS",
@@ -137,7 +154,12 @@ _KINDS: Dict[str, _Kind] = {
     ),
     "ambiguous_source": _Kind(
         heading="AMBIGUOUS SOURCES — the same column name is in several tables",
-        fixes=("qualify it with the table it comes from, e.g. Table_0.column.",),
+        fixes=(
+            "qualify it with the table it comes from, e.g. Table_0.column "
+            "(accepted in `sources` and in `columns`); if the step reads the "
+            "result of an earlier `union` of those tables, list all of them in "
+            "that union step's `tables` — the column is then one column.",
+        ),
     ),
     "missing_sources": _Kind(
         heading="MISSING SOURCES — a declared column says nothing about where "
@@ -310,11 +332,25 @@ def resolve_plan_columns(
     dropped_at: Dict[str, int] = {}
 
     ordered = sorted(steps, key=lambda s: getattr(s, "order", 0))
+    # Table sets merged by `union` steps walked so far: a column every table
+    # of such a set owns is ONE column of the union result from then on.
+    # Merged TRANSITIVELY: a plan that follows the group's verified pairwise
+    # relationships literally — union(T0, T1), union(T0, T2), union(T0, T3)
+    # — has merged T0..T3 into one scope (seen live 2026-11-04 on a
+    # six-file group, where the per-pair reading kept calling the aggregate's
+    # sources ambiguous and lost the plan).
+    unions: List[Set[str]] = []
 
     for step in ordered:
         order = getattr(step, "order", 0)
         op = getattr(step, "op", "") or ""
         step_tables = list(getattr(step, "tables", None) or [])
+        if op == "union" and len(step_tables) >= 2:
+            merged = set(step_tables)
+            for group in [g for g in unions if g & merged]:
+                merged |= group
+                unions.remove(group)
+            unions.append(merged)
 
         # Raw columns this step may read. A step naming no tables acts on the
         # accumulated pipeline result, so every raw column is in scope for it.
@@ -354,7 +390,8 @@ def resolve_plan_columns(
                 ))
             for source in sources:
                 resolved, problem = _resolve_source(
-                    source, aliases, raw, derived_by_name
+                    source, aliases, raw, derived_by_name,
+                    step_tables=step_tables, unions=unions,
                 )
                 if problem is not None:
                     problem.step_order, problem.step_op = order, op
@@ -409,6 +446,19 @@ def resolve_plan_columns(
             if not column or column in allowed or column in seen_here:
                 continue
             seen_here.add(column)
+            # `Alias.column` is accepted here exactly as in a `produces`
+            # source — the ambiguity feedback asks for that form, so the
+            # reference check must not reject it.
+            alias, bare = _split_source(column, aliases)
+            if alias is not None:
+                if bare in raw.get(alias, set()) or bare in allowed:
+                    continue
+                violations.append(Violation(
+                    kind="unknown_column", step_order=order, step_op=op,
+                    column=column, detail=f"{bare!r} is not in {alias}",
+                    suggestions=_suggest(bare, raw.get(alias, set())),
+                ))
+                continue
             violations.append(
                 _reference_violation(
                     column, order, op, raw_in_scope, declared_at, dropped_at
@@ -449,8 +499,15 @@ def _resolve_source(
     aliases: Set[str],
     raw: Dict[str, Set[str]],
     derived_by_name: Dict[str, Set[Root]],
+    step_tables: Optional[Sequence[str]] = None,
+    unions: Sequence[Set[str]] = (),
 ) -> Tuple[Set[Root], Optional[Violation]]:
     """Resolve one ``produces`` source to the raw roots it reads from.
+
+    ``step_tables`` (the step's own ``tables``) and ``unions`` (the table
+    sets merged by EARLIER ``union`` steps) disambiguate an unqualified
+    source that several tables own: a single owner in the step's scope wins;
+    owners an earlier union merged are one column rooted in all of them.
 
     Resolution is NAME-FIRST: a source naming an already-declared derived
     column resolves as derived and any alias prefix is discarded unread —
@@ -484,6 +541,11 @@ def _resolve_source(
     if len(owners) == 1:
         return {(owners[0], column)}, None
     if len(owners) > 1:
+        in_scope = [a for a in owners if a in set(step_tables or ())] or owners
+        if len(in_scope) == 1:
+            return {(in_scope[0], column)}, None
+        if any(set(in_scope) <= group for group in unions):
+            return {(a, column) for a in in_scope}, None
         return set(), Violation(
             kind="ambiguous_source", step_order=0, step_op="", column=source,
             detail=f"{column!r} is in {' and '.join(owners)}",
@@ -645,7 +707,12 @@ def _entry_line(violation: Violation, extra_steps: int) -> str:
     if violation.detail:
         parts.append(violation.detail)
     if violation.suggestions:
-        parts.append("did you mean: " + ", ".join(violation.suggestions))
+        # A header holding U+FFFD is shown with the ASCII escape the plan's
+        # JSON accepts: shown raw, the model retypes the symbol it thinks was
+        # lost ("Total £" for "Total �") on every re-request.
+        parts.append("did you mean: " + ", ".join(
+            escaped_literal(s) if is_undecodable(s) else s for s in violation.suggestions
+        ))
     line = " — ".join(parts)
     if extra_steps:
         line += f"  (+{extra_steps} more step{'s' if extra_steps != 1 else ''})"

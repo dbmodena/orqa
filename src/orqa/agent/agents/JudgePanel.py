@@ -16,10 +16,12 @@ generation model (a judge from the generator's own family tends to approve its
 own reasoning style), and majority voting only helps when the judges' errors
 are decorrelated — so profiles should mix model families, not sizes of one.
 
-Each ``judge_profiles.<panel>`` entry is a LiteLLM model string (or a mapping
-with a ``model`` key plus per-judge litellm overrides); provider params are
-fetched from ``provider_params`` by the model's provider prefix, exactly like
-the primary/fallback models. A panel with no configured profiles reports
+Each ``judge_profiles.<panel>`` entry is a model reference exactly like the
+primary/fallback models (``LLMClient._resolve_model_spec``): a LiteLLM model
+string, the name of a ``deployments`` entry (e.g. a dedicated OCI endpoint),
+or a mapping with a ``model`` key plus per-judge litellm overrides; provider
+params are fetched from ``provider_params`` by the resolved model's provider
+prefix. A panel with no configured profiles reports
 ``is_configured == False`` and the caller falls back to the legacy
 single-judge path, so older YAMLs keep working unchanged.
 """
@@ -34,14 +36,29 @@ from typing import Any, List, Optional
 from litellm import Router
 from pydantic import ValidationError
 
-from ..llm_client.LLMClientStructured import LLMClientStructured
+from ..llm_client.LLMClientStructured import (
+    LLMClientStructured,
+    _looks_like_format_rejection,
+    _needed_structural_repair,
+    _usage_of,
+    budget_exhausted,
+    degenerate_repetition,
+)
 from ..utility.message_builder import JudgeMessageBuilder, sanitize_messages
+from ..utility.structured_coercion import errors_brief, validate_leniently
 
 logger = logging.getLogger(__name__)
 
 
 class JudgePanel(LLMClientStructured):
     """N-model majority-vote judge panel over one response schema.
+
+    Each vote runs the same budget-aware loop as every structured call
+    (see ``LLMClientStructured``): an explicit output budget (the caller's
+    ``max_tokens``, ``JUDGE_MAX_TOKENS`` in agent.py) raised when a verdict is
+    cut by the judge's own reasoning, native JSON-schema decoding (verdicts
+    are short, where it is safe), shape coercion of ``"yes"`` votes and the
+    like, one short repair call, and the repetition guard.
 
     The panel reuses the shared JSON-repair / Pydantic validation pipeline of
     :class:`LLMClientStructured`, but routes each vote to its own judge model
@@ -81,6 +98,10 @@ class JudgePanel(LLMClientStructured):
         super().__init__(config_path, response_model)
         self.panel = panel
         self._root_key = root_key
+        # Native JSON-schema decoding is per judge ENTRY (router_name): a
+        # provider that rejects the parameter turns it off for that judge
+        # only — two judges may share a model name on different endpoints.
+        self._native_ok_by_judge: dict[str, bool] = {}
         # Layered voting (see _aggregate): when set, each named boolean field
         # is majority-voted independently across the judges, and the panel
         # approves only if EVERY layer's majority approves. When None (code
@@ -112,8 +133,13 @@ class JudgePanel(LLMClientStructured):
     def _normalize_profiles(self, raw_profiles: Any) -> List[dict]:
         """Coerce ``judge_profiles.<panel>`` entries into judge descriptors.
 
-        Accepts a plain model string or a mapping carrying ``model`` plus
-        per-judge litellm overrides. Invalid entries are skipped with a log.
+        Accepts a plain model string, a deployment name, or a mapping
+        carrying ``model`` plus per-judge litellm overrides. Each descriptor
+        carries ``model`` (the label the votes and logs name the judge by —
+        the deployment name when one was used), ``litellm_model`` (what the
+        Router calls), ``params`` (provider params + deployment params +
+        overrides) and ``max_output_tokens`` (the deployment's cap, if any).
+        Invalid entries are skipped with a log.
         """
         judges: List[dict] = []
         if not isinstance(raw_profiles, (list, tuple)):
@@ -123,24 +149,26 @@ class JudgePanel(LLMClientStructured):
             )
             return judges
         for idx, entry in enumerate(raw_profiles):
-            if isinstance(entry, str) and entry.strip():
-                model, overrides = entry.strip(), {}
-            elif isinstance(entry, dict) and str(entry.get("model", "")).strip():
-                entry = dict(entry)
-                model = str(entry.pop("model")).strip()
-                overrides = entry
-            else:
+            try:
+                spec = self._resolve_model_spec(entry)
+            except ValueError as exc:
                 logger.warning(
-                    "Skipping invalid judge_profiles.%s entry #%d: %r",
-                    self.panel, idx, entry,
+                    "Skipping invalid judge_profiles.%s entry #%d: %r (%s)",
+                    self.panel, idx, entry, exc,
                 )
                 continue
+            self._register_router_entry(f"{self.panel}_judge_{idx}", spec)
             judges.append(
                 {
                     "index": idx,
-                    "model": model,
+                    "model": spec["label"],
+                    "litellm_model": spec["model"],
                     "router_name": f"{self.panel}_judge_{idx}",
-                    "overrides": overrides,
+                    "params": spec["params"],
+                    # Alias kept for subclasses written against the former
+                    # descriptor (experiments/structured_stability).
+                    "overrides": spec["params"],
+                    "max_output_tokens": spec["max_output_tokens"],
                 }
             )
         return judges
@@ -153,15 +181,11 @@ class JudgePanel(LLMClientStructured):
         """
         model_list = []
         for judge in self.judges:
-            provider_params = self._get_provider_specific_params(judge["model"])
             model_list.append(
                 {
                     "model_name": judge["router_name"],
-                    "litellm_params": {
-                        "model": judge["model"],
-                        **provider_params,
-                        **judge["overrides"],
-                    },
+                    "litellm_params": {"model": judge["litellm_model"], **judge["params"]},
+                    "model_info": {"id": judge["router_name"]},
                 }
             )
         return Router(
@@ -222,68 +246,205 @@ class JudgePanel(LLMClientStructured):
         votes.sort(key=lambda v: v["index"])
         return self._aggregate(votes), usage_total
 
+    native_schema: bool = True
+
+    def _judge_response_format(self) -> dict:
+        return self.response_format()
+
+    def _judge_call(self, judge: dict, messages: list[dict], **kwargs) -> tuple[Any, bool]:
+        """One vote's router call on the panel router (no fallback chain,
+        throttle backoff shared with every other client). Returns
+        ``(response, native_used)``."""
+        native = self.native_schema and self._native_ok_by_judge.get(judge["router_name"], True)
+        args = {
+            "model": judge["router_name"],
+            "messages": sanitize_messages(messages),
+            **self._default_temperature_kwargs(judge["litellm_model"], judge["params"]),
+            **kwargs,
+        }
+        if native:
+            try:
+                return self._completion_with_backoff(
+                    {**args, "response_format": self._judge_response_format()}, router=self.panel_router
+                ), True
+            except Exception as exc:  # noqa: BLE001
+                if not _looks_like_format_rejection(exc):
+                    raise
+                logger.warning("Panel %s judge %s rejected response_format (%s); native schema off for it.",
+                               self.panel, judge["model"], str(exc)[:160])
+                self._native_ok_by_judge[judge["router_name"]] = False
+        return self._completion_with_backoff(args, router=self.panel_router), False
+
+    def _validate_vote(self, json_data: Any, record: dict) -> Optional[dict]:
+        """Strict, then coerced; unwraps ``root_key`` to the judge's verdict."""
+        model = self.response_model
+        try:
+            result = model.model_validate(json_data).model_dump()
+            record["outcome"] = "strict"
+        except ValidationError as exc:
+            record["strict_errors"] = errors_brief(exc.errors(include_url=False))
+            inst, _, fixes, remaining = validate_leniently(json_data, model)
+            record["fixes"] = fixes
+            if inst is None:
+                record["coerce_errors"] = errors_brief(remaining)
+                return None
+            record["outcome"] = "coerced"
+            logger.info("Panel %s: verdict validated after shape coercion (%s)", self.panel, "; ".join(fixes[:6]))
+            result = inst.model_dump()
+        if self._root_key:
+            items = result.get(self._root_key) or []
+            if not items:
+                record["coerce_errors"] = [f"$.{self._root_key}: no verdict in the list"]
+                return None
+            return items[0]
+        return result
+
     def _judge_once(
         self, judge: dict, system_prompt: str, payload: str, **kwargs
     ) -> tuple[dict, dict]:
-        """One judge's vote: fixed 2-block messages, retry-with-error-feedback.
+        """One judge's vote: fixed 2-block messages, budget-aware retry.
 
-        Mirrors ``LLMStatementJudge.complete`` — the system message never
-        changes across retries; parse errors only rebuild the user payload.
-        Returns ``({}, usage)`` when this judge exhausts its retries.
+        The system message never changes across retries; parse errors only
+        rebuild the user payload. A verdict cut by the output budget (a
+        reasoning judge thinking through a 6-table payload) is retried with
+        a bigger budget, not the same call again. Returns ``({}, usage)``
+        when this judge exhausts its retries.
         """
         usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         user_payload = payload
         last_error: Optional[Exception] = None
+        call_kwargs = dict(kwargs)
+        cap = judge.get("max_output_tokens")
+        self._initial_budget(call_kwargs, cap)
 
         for attempt in range(self.max_retries):
+            record: dict = {"client": self._label, "kind": "call", "judge": judge["model"],
+                            "attempt": attempt + 1, "max_tokens": call_kwargs.get("max_tokens")}
+            t0 = time.perf_counter()
             try:
-                messages = sanitize_messages(
-                    self._message_builder.build(system_prompt, user_payload)
-                )
-                response = self.panel_router.completion(
-                    model=judge["router_name"],
-                    messages=messages,
-                    **self._default_temperature_kwargs(judge["model"], judge["overrides"]),
-                    **kwargs,
-                )
-                usage = response["usage"]
-                usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
-                usage_total["completion_tokens"] += usage.get("completion_tokens", 0)
-                usage_total["total_tokens"] += usage.get("total_tokens", 0)
-
-                content = response["choices"][0]["message"]["content"]
-                if content is None or not str(content).strip():
+                messages = self._message_builder.build(system_prompt, user_payload)
+                record["prompt"] = user_payload
+                response, native_used = self._judge_call(judge, messages, **call_kwargs)
+                record["native_schema"] = native_used
+                record["model"] = response.get("model")
+                usage = _usage_of(response)
+                for key in usage_total:
+                    usage_total[key] += usage.get(key, 0)
+                choice = response["choices"][0]
+                content = choice["message"]["content"]
+                content = "" if content is None else str(content)
+                record.update(finish_reason=choice.get("finish_reason"), usage=usage, raw=content,
+                              elapsed_s=round(time.perf_counter() - t0, 2), raw_chars=len(content))
+                truncated = budget_exhausted(choice.get("finish_reason"), usage, call_kwargs.get("max_tokens"), content)
+                record["truncated"] = truncated
+                if truncated and (not content.strip()
+                                  or _needed_structural_repair(self._clean_json_response(content))):
+                    record["outcome"] = "truncated_empty" if not content.strip() else "truncated_repaired"
+                    last_error = ValueError("verdict cut at the output budget")
+                    logger.warning("Panel %s judge %s: verdict cut at %s tokens; raising the budget",
+                                   self.panel, judge["model"], call_kwargs.get("max_tokens"))
+                    self._truncation_feedback(call_kwargs, cap)  # raises the budget in place
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.retry_delay)
+                    continue
+                if not content.strip():
                     raise ValueError("Judge returned empty content.")
+                loop = degenerate_repetition(content)
+                if loop:
+                    record["outcome"] = "degenerate_loop"
+                    record["loop_unit"] = loop
+                    last_error = ValueError(f"degenerate repetition: {loop!r}")
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.retry_delay)
+                    continue
 
                 cleaned = self._clean_json_response(content)
                 try:
                     json_data = self._repair_json(cleaned)
-                    json_data = self._normalize_response(json_data, root_key=self._root_key)
-                    result = self.response_model.model_validate(json_data).model_dump()
-                    if self._root_key:
-                        items = result.get(self._root_key) or []
-                        return (items[0] if items else {}), usage_total
-                    return result, usage_total
                 except json.JSONDecodeError as e:
+                    record["outcome"] = "json_error"
+                    record["json_error"] = str(e)[:200]
                     last_error = e
                     if attempt < self.max_retries - 1:
                         user_payload = f"{payload}\n\n{self._format_json_error(cleaned, e)}"
                         time.sleep(self.retry_delay)
-                except ValidationError as e:
-                    last_error = e
-                    if attempt < self.max_retries - 1:
-                        user_payload = f"{payload}\n\n{self._format_validation_error(e)}"
-                        time.sleep(self.retry_delay)
-            except Exception as e:
+                    continue
+                json_data = self._normalize_response(json_data, root_key=self._root_key)
+                result = self._validate_vote(json_data, record)
+                if result is not None:
+                    return result, usage_total
+                record["outcome"] = "invalid"
+                errors = record.get("coerce_errors") or record.get("strict_errors") or []
+                last_error = ValueError("; ".join(errors[:5]))
+                if self.repair_call:
+                    repaired, r_usage, r_record = self._repair_vote(
+                        judge, system_prompt, json_data, errors, **call_kwargs
+                    )
+                    for key in usage_total:
+                        usage_total[key] += r_usage.get(key, 0)
+                    self._observe({**r_record, "attempt": attempt + 1})
+                    if repaired is not None:
+                        record["outcome"] = "invalid->repaired"
+                        return repaired, usage_total
+                if attempt < self.max_retries - 1:
+                    user_payload = (
+                        f"{payload}\n\nSCHEMA VALIDATION ERROR — your JSON did not match the required "
+                        "schema on these fields:\n" + "\n".join(f"  - {e}" for e in errors[:40])
+                        + "\nFix exactly these fields and return the full JSON object again."
+                    )
+                    time.sleep(self.retry_delay)
+            except Exception as e:  # noqa: BLE001
+                record["outcome"] = "error"
+                record["error"] = f"{type(e).__name__}: {str(e)[:300]}"
                 last_error = e
                 if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay)
+                    delay = (
+                        max(self.retry_delay, self.throttle_max_delay)
+                        if self.is_throttled(e) else self.retry_delay
+                    )
+                    time.sleep(delay)
+            finally:
+                self._observe(record)
 
         logger.warning(
             "Panel %s judge %s produced no valid verdict after %d attempts: %s",
             self.panel, judge["model"], self.max_retries, last_error,
         )
         return {}, usage_total
+
+    def _repair_vote(self, judge: dict, system_prompt: str, json_data: Any, errors: List[str],
+                     **kwargs) -> tuple[Optional[dict], dict, dict]:
+        """One short correction call over the judge's own JSON verdict."""
+        record: dict = {"client": self._label, "kind": "repair", "judge": judge["model"]}
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        user = (
+            "The JSON verdict below does not satisfy the required schema. Validation errors:\n"
+            + "\n".join(f"- {e}" for e in errors[:40])
+            + "\n\nReturn the complete corrected JSON object only, keeping every value that is already "
+            "valid and changing only what the errors require.\n\n```json\n"
+            + json.dumps(json_data, ensure_ascii=False, default=str) + "\n```"
+        )
+        record["prompt"] = user
+        t0 = time.perf_counter()
+        try:
+            response, native_used = self._judge_call(judge, self._message_builder.build(system_prompt, user), **kwargs)
+            record["model"] = response.get("model")
+            usage = _usage_of(response)
+            choice = response["choices"][0]
+            content = choice["message"]["content"] or ""
+            record.update(native_schema=native_used, finish_reason=choice.get("finish_reason"), usage=usage,
+                          raw=content, elapsed_s=round(time.perf_counter() - t0, 2))
+            data = self._normalize_response(self._repair_json(self._clean_json_response(content)),
+                                            root_key=self._root_key)
+            result = self._validate_vote(data, record)
+            if result is not None:
+                record["outcome"] = "repaired:" + record["outcome"]
+                return result, usage, record
+            record["outcome"] = "repair_failed"
+        except Exception as exc:  # noqa: BLE001
+            record["outcome"] = "repair_error"
+            record["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+        return None, usage, record
 
     # ------------------------------------------------------------------
     # Aggregation

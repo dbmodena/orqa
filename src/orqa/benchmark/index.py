@@ -9,8 +9,8 @@ textual fields and ranks datasets with BM25, so that given a bunch of
 keywords extrapolated from a question we can find the CSV files needed
 to answer it.
 
-The index is materialized under <data_path>/index/ so that the MCP
-server starts from a ready-to-use artifact; it is transparently rebuilt
+The index is materialized under <data_path>/index/ so that callers
+start from a ready-to-use artifact; it is transparently rebuilt
 whenever the normalized metadata file changes. No external search
 infrastructure is required.
 """
@@ -20,13 +20,14 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 import re
 import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
+
+from orqa.utils import dataset_id_to_resource_id
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,21 @@ def _record_field_texts(record: dict) -> dict[str, str]:
     }
 
 
+def local_dataset_files(datasets_path: Path, datasets_format: str) -> dict[str, Path]:
+    """``{resource_id: file}`` for every ``<stem>.<datasets_format>`` file in
+    ``datasets_path``, the stem mapped through ``dataset_id_to_resource_id``.
+
+    A file is not always named after its resource: CKAN downloads are
+    ``<dataset_id>___<resource_id>.<fmt>``, so ``<resource_id>.<fmt>`` exists
+    for 0 of 27,390 uk records and 0 of 164 valencia ones. Plain stems (nyc,
+    bologna, paris) map to themselves. A missing directory maps nothing.
+    """
+    return {
+        dataset_id_to_resource_id(path.stem): path
+        for path in Path(datasets_path).glob(f"*.{datasets_format}")
+    }
+
+
 @dataclass
 class SearchResult:
     resource_id: str
@@ -139,8 +155,8 @@ class DatasetIndex:
     BM25 inverted index over the normalized metadata of a single source.
 
     Documents are metadata records keyed by resource_id; the on-disk
-    dataset for a record is <datasets_path>/<resource_id>.<fmt>, the
-    same convention used by the rest of the pipeline.
+    dataset for a record is the file in <datasets_path> whose stem maps to
+    that resource_id (see ``local_dataset_files``).
     """
 
     # portal_view: search() accepts match="all" and a field subset.
@@ -166,6 +182,8 @@ class DatasetIndex:
         # (resource_id, fields) -> distinct tokens of that record's text in
         # those fields; filled lazily by ``searchable_terms``.
         self._terms_cache: dict[tuple, frozenset[str]] = {}
+        # resource_id -> local file; listed once, by ``dataset_filepath``.
+        self._local_files: Optional[dict[str, Path]] = None
 
         self._build(records)
 
@@ -231,6 +249,7 @@ class DatasetIndex:
         index._doc_len = payload["doc_len"]
         index._avg_doc_len = payload["avg_doc_len"]
         index._terms_cache = {}
+        index._local_files = None
         return index
 
     @classmethod
@@ -304,7 +323,12 @@ class DatasetIndex:
         return math.log(1 + (n - df + 0.5) / (df + 0.5))
 
     def dataset_filepath(self, resource_id: str) -> Path:
-        return self.datasets_path / f"{resource_id}.{self.datasets_format}"
+        """The record's local file, else where a plain-stem file would be
+        (a path that does not exist, so ``csv_exists`` is False)."""
+        if self._local_files is None:
+            self._local_files = local_dataset_files(self.datasets_path, self.datasets_format)
+        found = self._local_files.get(resource_id)
+        return found if found is not None else self.datasets_path / f"{resource_id}.{self.datasets_format}"
 
     def get(self, resource_id: str) -> Optional[dict]:
         record = self._records.get(resource_id)
@@ -344,6 +368,32 @@ class DatasetIndex:
         result = frozenset(tokens)
         self._terms_cache[key] = result
         return result
+
+    def terms_matching(
+        self,
+        resource_id: str,
+        terms: Iterable[str],
+        fields: Optional[Iterable[str]] = None,
+        match: str = "any",
+    ) -> frozenset[str]:
+        """Which of ``terms``, each searched ALONE with ``match`` over
+        ``fields``, would return ``resource_id`` — the terms as given, so a
+        caller can pass a question's own (accented) words. Empty for an
+        unknown record.
+
+        The same contract as the Solr index, which asks the core: there a
+        term's analysis (stemming, folding) is Solr's, here it is
+        ``tokenize``, so a term matches when its tokens are in the record's
+        ``searchable_terms`` (every token under ``match="all"``, any under
+        ``"any"``)."""
+        vocabulary = self.searchable_terms(resource_id, fields)
+        if vocabulary is None:
+            return frozenset()
+        test = all if match == "all" else any
+        return frozenset(
+            term for term in terms
+            if (tokens := tokenize(term)) and test(token in vocabulary for token in tokens)
+        )
 
     def _score(
         self,
@@ -467,9 +517,8 @@ class DatasetIndex:
 
 
 class PortalIndexView:
-    """A lexical view of a reverse index — the built-in :class:`DatasetIndex`
-    or ``orqa.benchmark.es_index.ESDatasetIndex``, anything that sets
-    ``supports_match`` — that answers the way the portal's own search does:
+    """A lexical view of the built-in :class:`DatasetIndex` (anything that sets
+    ``supports_match``) that answers the way the portal's own search does:
     every keyword must match (Solr ``q.op=AND``), and only in the record
     fields that portal actually searches.
 
@@ -478,13 +527,13 @@ class PortalIndexView:
     keyword the gold table lacks merely adds nothing there, but under AND it
     removes the table. Judging retrievability through this view makes "found"
     mean what it means to the portal. The underlying index is not modified,
-    so consumers that want additive matching (the benchmark solver) are
-    unaffected.
+    so consumers that want additive matching (the retrieval panel's
+    ``lexical_question`` retriever) are unaffected.
 
-    This is an IMITATION, for when no Solr is reachable: it does not know the
-    core's document universe, its field names or its ``qf``, only what the
-    caller tells it in ``fields``. Prefer ``orqa.benchmark.solr_index.
-    SolrDatasetIndex``, which asks the real core.
+    This is an IMITATION, for the portals with no Solr core: it does not know
+    a core's document universe, its analysis or its ``qf``, only what the
+    caller tells it in ``fields``. A portal with a core uses
+    ``orqa.benchmark.solr_index.SolrDatasetIndex``, which asks the real core.
     """
 
     # keyword_suggestion: candidate terms must be ones this view can match.
@@ -510,15 +559,6 @@ class PortalIndexView:
                 f"valid fields: {sorted(FIELD_WEIGHTS)}"
             )
 
-    def _search_options(self) -> dict:
-        options: dict = {"match": self.match, "fields": self.searchable_fields}
-        if getattr(self._index, "supports_highlight", False):
-            # The gate runs hundreds of searches per table group and never
-            # reads matched_terms; highlighting is the slow part of an
-            # Elasticsearch search.
-            options["highlight"] = False
-        return options
-
     def search(
         self,
         keywords: str | Iterable[str],
@@ -526,27 +566,21 @@ class PortalIndexView:
         only_available: bool = False,
     ) -> list[SearchResult]:
         return self._index.search(
-            keywords, top_k=top_k, only_available=only_available, **self._search_options()
+            keywords, top_k=top_k, only_available=only_available,
+            match=self.match, fields=self.searchable_fields,
         )
-
-    def search_many(
-        self,
-        queries: list[str | Iterable[str]],
-        top_k: int = 10,
-        only_available: bool = False,
-    ) -> list[list[SearchResult]]:
-        """``search`` for each query, in order — batched by the underlying
-        index when it can (Elasticsearch ``_msearch``), else one by one."""
-        batched = getattr(self._index, "search_many", None)
-        if callable(batched):
-            options = {"match": self.match, "fields": self.searchable_fields}
-            return batched(queries, top_k=top_k, only_available=only_available, **options)
-        return [self.search(q, top_k, only_available) for q in queries]
 
     def searchable_terms(self, resource_id: str) -> Optional[frozenset[str]]:
         """What this view can match on ``resource_id`` (see
         ``DatasetIndex.searchable_terms``)."""
         return self._index.searchable_terms(resource_id, self.searchable_fields)
+
+    def terms_matching(self, resource_id: str, terms: Iterable[str]) -> frozenset[str]:
+        """Which of ``terms``, each searched alone through this view, would
+        return ``resource_id`` (see ``DatasetIndex.terms_matching``)."""
+        return self._index.terms_matching(
+            resource_id, terms, fields=self.searchable_fields, match=self.match
+        )
 
     def get(self, resource_id: str) -> Optional[dict]:
         return self._index.get(resource_id)
@@ -572,10 +606,10 @@ def portal_view(
     Returns a :class:`PortalIndexView` over the lexical index (the
     lexical half of a hybrid index) when ``match`` is ``"all"`` or ``fields``
     restricts the searched fields. Works over any index that ``supports_match``
-    — the built-in one and the Elasticsearch one. Returns ``index`` untouched
-    when the defaults are requested, and — with a warning — when the index
-    cannot match that way, so a run degrades to the additive behavior it had
-    before rather than failing.
+    (the built-in one). Returns ``index`` untouched when the defaults are
+    requested, and — with a warning — when the index cannot match that way,
+    so a run degrades to the additive behavior it had before rather than
+    failing.
     """
     fields = tuple(fields or ())
     if match == "any" and not fields:
@@ -584,7 +618,7 @@ def portal_view(
     if not getattr(lexical, "supports_match", False):
         logger.warning(
             "Portal-faithful matching (match=%r, fields=%s) needs an index that "
-            "supports it (builtin or elasticsearch); %s does not — falling back "
+            "supports it (the builtin one); %s does not — falling back "
             "to additive matching.",
             match, list(fields), type(index).__name__,
         )
@@ -593,50 +627,48 @@ def portal_view(
 
 
 def load_index(cfg) -> Optional[Any]:
-    """Build/load the reverse index for the backend ``cfg.mcp_search.backend``
-    selects, creating it from the normalized metadata when missing or stale.
+    """The reverse index ``cfg.search.backend`` selects.
 
-    Shared by the MCP retrieval-benchmark server and any other caller (e.g.
-    the plan judge's keyword-searchability check) that needs the SAME index
-    a portal's ``mcp_search`` config points at. Returns ``None`` instead of
-    raising when the index can't be built (metadata not yet produced,
-    Elasticsearch unreachable, ...) — callers should treat that as "no
-    index available" rather than a fatal error.
+    Shared by generate-statements (the anchor search and the retrievability
+    gate), the retrievability report and the web app — every caller that
+    needs the SAME index a portal's ``search`` config points at.
+
+    ``solr``: the portal's live core (``orqa.benchmark.solr_index``), checked
+    before it is handed out: it must answer, and a KNN query with one of its
+    own stored vectors must return hits (a KNN query the core misreads
+    returns 0 hits and no error, which would make every dense vote fail
+    without a word). Anything wrong RAISES — there is no fallback, because
+    the in-process imitation matched Solr's AND result set for only ~10% of
+    queries.
+
+    ``builtin``: built/loaded from the normalized metadata (rebuilt when
+    stale), fused with the local metadata embeddings when
+    ``hybrid_search_enabled``. Returns ``None`` instead of raising when it
+    can't be built (metadata not yet produced, ...) — callers treat that as
+    "no index available".
     """
+    if cfg.search.backend == "solr":
+        # Imported here: solr_index builds on this module.
+        from orqa.benchmark.solr_index import SolrDatasetIndex
+
+        index = SolrDatasetIndex.from_config(cfg)
+        documents = index.ping()
+        index.check_knn()
+        print(
+            f"[index] Solr core {cfg.search.solr.core!r} ({documents} documents, "
+            f"KNN on {cfg.search.solr.vector_field}) — index ready.", flush=True,
+        )
+        return index
+
     try:
-        if cfg.mcp_search.backend == "elasticsearch":
-            from orqa.benchmark import es_index
-
-            es_url = (
-                os.environ.get("ELASTICSEARCH_URL", "").strip()
-                or cfg.mcp_search.elasticsearch_url
-            )
-            # tasks.mcp_search.elasticsearch_managed: start (installing first,
-            # once) a LOCAL Elasticsearch for this run instead of expecting one.
-            managed = getattr(cfg.mcp_search, "elasticsearch_managed", None)
-            if managed is not None and managed.enabled:
-                from orqa.benchmark import es_local
-
-                es_local.ensure_running(cfg, es_url)
-            es = es_index.connect(es_url)
-            index, rebuilt = es_index.ESDatasetIndex.build_or_load(
-                es,
-                cfg.mcp_search.es_index_name,
-                cfg.normalized_metadata_filepath,
-                cfg.datasets_path,
-                cfg.datasets_format,
-                source=cfg.source,
-            )
-            location = f"Elasticsearch index {cfg.mcp_search.es_index_name!r} at {es_url}"
-        else:
-            index, rebuilt = DatasetIndex.build_or_load(
-                cfg.normalized_metadata_filepath,
-                cfg.mcp_search.index_filepath,
-                cfg.datasets_path,
-                cfg.datasets_format,
-                source=cfg.source,
-            )
-            location = str(cfg.mcp_search.index_filepath)
+        index, rebuilt = DatasetIndex.build_or_load(
+            cfg.normalized_metadata_filepath,
+            cfg.search.index_filepath,
+            cfg.datasets_path,
+            cfg.datasets_format,
+            source=cfg.source,
+        )
+        location = str(cfg.search.index_filepath)
     except Exception:
         logger.warning("Could not build/load the reverse index for %r.", cfg.source, exc_info=True)
         return None
@@ -647,7 +679,7 @@ def load_index(cfg) -> Optional[Any]:
     # one says the index is up and which one it is.
     print(f"[index] {action} {location} ({len(index)} datasets) — index ready.", flush=True)
 
-    if cfg.mcp_search.hybrid_search_enabled:
+    if cfg.search.hybrid_search_enabled:
         try:
             from orqa.agent.llm_client.EmbeddingClient import EmbeddingClient
             from orqa.benchmark.hybrid_index import HybridDatasetIndex
@@ -673,12 +705,12 @@ def load_index(cfg) -> Optional[Any]:
                 index,
                 cache_path,
                 embedding_client,
-                lexical_weight=cfg.mcp_search.lexical_weight,
-                semantic_weight=cfg.mcp_search.semantic_weight,
-                query_input_type=cfg.mcp_search.query_embedding_input_type,
-                query_cache_size=cfg.mcp_search.query_embedding_cache_size,
-                fusion_method=cfg.mcp_search.fusion_method,
-                rrf_k=cfg.mcp_search.rrf_k,
+                lexical_weight=cfg.search.lexical_weight,
+                semantic_weight=cfg.search.semantic_weight,
+                query_input_type=cfg.search.query_embedding_input_type,
+                query_cache_size=cfg.search.query_embedding_cache_size,
+                fusion_method=cfg.search.fusion_method,
+                rrf_k=cfg.search.rrf_k,
             )
             coverage = len(index._embedding_ids) / len(index) if len(index) else 0.0
             logger.info(
@@ -732,7 +764,7 @@ class Catalog:
     _indexes: dict[str, DatasetIndex] = field(init=False, default_factory=dict)
 
     def __post_init__(self):
-        # Resolve so that the csv_path values returned to MCP clients
+        # Resolve so that the csv_path values returned to callers
         # remain valid regardless of their working directory.
         self.data_dir = Path(self.data_dir).resolve()
         pattern = "*/*/*/metadata/normalized_metadata.json"

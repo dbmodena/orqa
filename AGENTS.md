@@ -24,14 +24,16 @@ This repository implements the OrQA workflow for generating benchmark datasets f
   - `embed-search-metadata`
   - `generate-query-candidates`
   - `generate-statements`
-  - `solve-benchmark`
 - Targets are fixed in `src/main.py` and include `canada`, `uk`, `italy/modena`, `italy/bologna`, `spain/madrid`, `spain/valencia`, `france/paris`, and `usa/nyc`.
 
 ## Runtime setup
 
 - `DATADIR` must be set to the repository's data base path before running the workflow.
+- Every `src/main.py` run appends what it prints and logs to `<write_path>/log/orqa.log` (e.g. `data/bologna/log/orqa.log`): 3 files of 25 MB in rotation, the oldest overwritten when all are full, set by the workflow yaml's top-level `logging` block (`src/orqa/utils/run_log.py`).
+- `generate-statements` also writes a per-run trace to `<write_path>/log/generation/<run>/` (`latest/` points to the newest): `events.jsonl`, `groups.jsonl`, and `llm/<group>.txt` with every LLM call as sent and received (user message, parameters, reasoning, raw answer, errors; each system prompt once in `llm/system/`), set by `tasks.query_generation.trace.llm_io` (`all`/`failed`/`off`, `src/orqa/utils/generation_trace.py`).
 - `src/main.py` also loads `.env` from the repository root via `dotenv`.
 - Apache Solr is expected for search/indexing; `src/solr/solr.py` uses `SOLR_URL`, `SOLR_HOME`, `SOLR_PATH`, `SOLR_BIN`, and related environment variables.
+- Retrieval for uk, nyc, bologna, paris and valencia (`tasks.search.backend: solr`) queries LakeGen's live Solr cores at `SOLR_URL` (`uk`, `nyc`, `bologna_v2`, `paris_v2`, `valencia_v2`) through `src/solr/client.py`, READ-ONLY. That Solr instance is shared with LakeGen: never update, delete, reload, commit or post to any core, and never run `src/solr/solr.py` `create`/`delete`/`post`/`reload`/`refresh` against it, since its domain names are LakeGen's core names.
 
 ## Build / test commands
 
@@ -66,4 +68,9 @@ Preferred commands for local development:
 - Workflow CLI: `src/main.py`
 - Agent code: `src/orqa/agent/`
 - Solr integration: `src/solr/`
+- Benchmark retrieval (LakeGen's Solr cores, read-only; builtin index; gate retrievers): `docs/benchmark-retrieval.md`
+- Retired Elasticsearch backend and how to reintegrate it: `legacy/elasticsearch/README.md`
+- Structured LLM output (budgets, truncation retry, coercion, loop bounds): `docs/structured-output.md`
+- Question stage inputs (speakable anchors, table identity, shared rubric): `docs/question-stage-inputs.md`
+- LLM models and named deployments (dedicated OCI endpoints, per-endpoint output caps): the `deployments` section of `conf/llm/litellm.yaml`, resolved by `LLMClient._resolve_model_spec` in `src/orqa/agent/llm_client/LLMClient.py`
 - Tests: `tests/test_main_cli.py`

@@ -251,6 +251,156 @@ class CandidatesDiscovery:
 
 
 
+# Default trace folder, relative to write_path: beside the cleaning and
+# indexing logs (OrQAConfig.logging_path = <write_path>/log).
+DEFAULT_TRACE_DIR = "log/generation"
+_TRACE_KEYS = ("enabled", "dir", "llm_io")
+_TRACE_LLM_IO = ("all", "failed", "off")
+
+
+@dataclass
+class GenerationTraceConfig:
+    """Where the generate-statements step records its trace (see
+    ``orqa.utils.generation_trace``): one folder per run holding every
+    question attempt with its gate and judge verdicts, every plan and
+    plan-judge round, the generated code and its verdicts, every LLM call's
+    outcome (the raw answer when it failed), Python logging warnings and
+    errors, and the console output.
+
+    From ``tasks.query_generation.trace``: ``enabled`` (default true) and
+    ``dir`` — relative to ``write_path`` (default ``log/generation``) or
+    absolute. ``path`` is that folder, resolved by ``load_config``; the trace
+    writes a ``.gitignore`` into it, so it is never committed. ``llm_io``
+    (default ``all``) picks the LLM calls written in full — system prompt,
+    user message, parameters, reasoning, raw answer — to ``llm/<group>.txt``:
+    ``all``, ``failed`` (the attempts that gave no usable answer) or ``off``.
+    """
+
+    enabled: bool = True
+    path: Optional[Path] = None
+    llm_io: str = "all"
+
+
+def _load_trace_config(raw, write_path: Path) -> GenerationTraceConfig:
+    """``tasks.query_generation.trace`` -> :class:`GenerationTraceConfig`."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError(
+            "tasks.query_generation.trace must be a mapping with "
+            f"{', '.join(_TRACE_KEYS)}, got {type(raw).__name__}"
+        )
+    unknown = sorted(set(raw) - set(_TRACE_KEYS))
+    if unknown:
+        raise ValueError(
+            f"tasks.query_generation.trace: unknown key(s) {unknown}; "
+            f"expected {list(_TRACE_KEYS)}"
+        )
+    directory = Path(str(raw.get("dir") or DEFAULT_TRACE_DIR)).expanduser()
+    if not directory.is_absolute():
+        directory = write_path / directory
+    llm_io = str(raw.get("llm_io") or "all").strip().lower()
+    if llm_io not in _TRACE_LLM_IO:
+        raise ValueError(
+            f"tasks.query_generation.trace.llm_io must be one of {list(_TRACE_LLM_IO)}, "
+            f"got {raw.get('llm_io')!r}"
+        )
+    return GenerationTraceConfig(
+        enabled=_coerce_bool(raw.get("enabled", True), "tasks.query_generation.trace.enabled"),
+        path=directory,
+        llm_io=llm_io,
+    )
+
+
+# Run log defaults: <write_path>/log/orqa.log, 3 files of 25 MB in rotation.
+DEFAULT_RUN_LOG_DIR = "log"
+DEFAULT_RUN_LOG_FILE = "orqa.log"
+DEFAULT_RUN_LOG_MAX_SIZE = "25MB"
+DEFAULT_RUN_LOG_FILES = 3
+_RUN_LOG_KEYS = ("enabled", "dir", "file", "max_size", "files", "level")
+_RUN_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+
+
+@dataclass
+class RunLogConfig:
+    """The run log every ``src/main.py`` run appends to (see
+    ``orqa.utils.run_log``): what the run printed plus its logging records,
+    timestamped, in ``files`` files of at most ``max_bytes`` each, the oldest
+    overwritten once they are all full.
+
+    From the top-level ``logging`` block of a workflow yaml: ``enabled``
+    (default true), ``dir`` — relative to ``write_path`` (default ``log``) or
+    absolute — ``file`` (default ``orqa.log``), ``max_size`` per file
+    (default ``25MB``), ``files`` in rotation (default 3) and ``level`` of
+    OrQA's own logging records (default ``INFO``; libraries' records are
+    kept from WARNING up). ``path`` is the live file, resolved by
+    ``load_config``.
+    """
+
+    enabled: bool = True
+    path: Optional[Path] = None
+    max_bytes: int = 25 * 2**20
+    files: int = DEFAULT_RUN_LOG_FILES
+    level: str = "INFO"
+
+
+def _load_run_log_config(raw, write_path: Path) -> RunLogConfig:
+    """Top-level ``logging`` -> :class:`RunLogConfig`."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"logging must be a mapping with {', '.join(_RUN_LOG_KEYS)}, "
+            f"got {type(raw).__name__}"
+        )
+    unknown = sorted(set(raw) - set(_RUN_LOG_KEYS))
+    if unknown:
+        raise ValueError(
+            f"logging: unknown key(s) {unknown}; expected {list(_RUN_LOG_KEYS)}"
+        )
+
+    directory = Path(str(raw.get("dir") or DEFAULT_RUN_LOG_DIR)).expanduser()
+    if not directory.is_absolute():
+        directory = write_path / directory
+    name = str(raw.get("file") or DEFAULT_RUN_LOG_FILE)
+    if Path(name).name != name:
+        raise ValueError(
+            f"logging.file must be a file name, got {name!r}; put the folder in logging.dir"
+        )
+
+    size = raw.get("max_size", DEFAULT_RUN_LOG_MAX_SIZE)
+    if isinstance(size, int) and not isinstance(size, bool):
+        max_bytes = size
+    else:
+        text = str(size).strip().upper().replace(" ", "")
+        if not re.fullmatch(r"\d+(K|M|G)B", text):
+            raise ValueError(
+                f"logging.max_size must be a size like 25MB (KB, MB or GB) or a "
+                f"number of bytes, got {size!r}"
+            )
+        max_bytes = to_bytes(text)
+    if max_bytes <= 0:
+        raise ValueError(f"logging.max_size must be positive, got {size!r}")
+
+    files = raw.get("files", DEFAULT_RUN_LOG_FILES)
+    if isinstance(files, bool) or not isinstance(files, int) or files < 1:
+        raise ValueError(f"logging.files must be a whole number >= 1, got {files!r}")
+
+    level = str(raw.get("level") or "INFO").strip().upper()
+    if level not in _RUN_LOG_LEVELS:
+        raise ValueError(
+            f"logging.level must be one of {list(_RUN_LOG_LEVELS)}, got {raw.get('level')!r}"
+        )
+
+    return RunLogConfig(
+        enabled=_coerce_bool(raw.get("enabled", True), "logging.enabled"),
+        path=directory / name,
+        max_bytes=max_bytes,
+        files=files,
+        level=level,
+    )
+
+
 @dataclass
 class StatementGeneration:
     """
@@ -271,9 +421,10 @@ class StatementGeneration:
 
     # Per-portal missing-value sentinel literals (e.g. "n/a", "not available",
     # "(null)") derived from blend.clean_args.bad_tokens. No longer applied
-    # automatically at load time — used only to compute per-column bad-token
-    # counts (see ColumnStatistics.compute) shown to the query planner, which
-    # decides for itself whether/how to clean a column via a `clean` plan step.
+    # automatically at load time — used only to report the `missing tokens`
+    # each column holds (see ColumnStatistics.compute) to the query planner,
+    # which decides for itself whether/how to clean a column via a `clean`
+    # plan step (a token can be a real category, e.g. a "-" sign flag).
     bad_tokens: list
 
     # max number of tokens per natural languange response
@@ -306,8 +457,13 @@ class StatementGeneration:
     # panel -> question judges) approves it BEFORE any plan exists; the
     # planner then plans the frozen, approved question (see
     # orqa.agent.agents.QuestionStage). `max_question_corrections` is how many
-    # times a rejected question is rewritten before its slot is dropped.
-    max_question_corrections: int = 3
+    # times a rejected question is rewritten before its slot is dropped
+    # (default 5, see QuestionStage.MAX_QUESTION_CORRECTIONS).
+    max_question_corrections: int = 5
+
+    # The run's generation trace (tasks.query_generation.trace) — see
+    # GenerationTraceConfig.
+    trace: GenerationTraceConfig = field(default_factory=GenerationTraceConfig)
 
     @property
     def target_language(self) -> str:
@@ -369,53 +525,18 @@ class StatementGeneration:
                 )
 
 
-@dataclass
-class ManagedElasticsearchConfig:
-    """Let OrQa run a LOCAL Elasticsearch itself (no Docker, no service to
-    start): ``load_index`` starts it before connecting and stops it at exit.
-    See ``orqa.benchmark.es_local``. Only meaningful with ``backend:
-    elasticsearch`` and a localhost ``elasticsearch_url``.
-    """
+# Where the yaml keys of the retired Elasticsearch backend (and the old
+# keyword_backend/solr_core detour that silently fell back to it) are explained,
+# with the steps to bring that backend back.
+LEGACY_ELASTICSEARCH_README = "legacy/elasticsearch/README.md"
 
-    enabled: bool = False
-    # An unpacked Elasticsearch distribution (the directory holding bin/,
-    # jdk/, lib/). Empty: $ES_HOME, else
-    # <data_path>/index/elasticsearch/elasticsearch-<version>.
-    home: str = ""
-    # Where the index and logs live (path.data = <dir>/data, path.logs =
-    # <dir>/logs). Empty: <data_path>/index/elasticsearch.
-    data_dir: str = ""
-    # JVM heap (-Xms = -Xmx). The UK index is ~27k records; 2g is plenty.
-    heap: str = "2g"
-    # Seconds to wait for the server to answer after starting it.
-    startup_timeout: float = 180.0
-    # True: leave the server running when the run ends (needed when two runs
-    # share it — the run that started it would otherwise stop it under the other).
-    keep_running: bool = False
-    # Download and unpack `version` on first use when nothing is installed at
-    # the DEFAULT location. An explicit `home`/$ES_HOME is never installed into.
-    auto_install: bool = True
-    version: str = "8.17.0"
-
-    def __post_init__(self):
-        self.enabled = _coerce_bool(self.enabled, "elasticsearch_managed.enabled")
-        self.keep_running = _coerce_bool(self.keep_running, "elasticsearch_managed.keep_running")
-        self.auto_install = _coerce_bool(self.auto_install, "elasticsearch_managed.auto_install")
-        self.home = str(self.home or "").strip()
-        self.data_dir = str(self.data_dir or "").strip()
-        self.heap = str(self.heap).strip()
-        if not re.fullmatch(r"[1-9][0-9]*[mMgG]", self.heap):
-            raise ValueError(
-                f"elasticsearch_managed.heap must look like '2g' or '512m', got {self.heap!r}"
-            )
-        self.startup_timeout = float(self.startup_timeout)
-        if self.startup_timeout <= 0:
-            raise ValueError("elasticsearch_managed.startup_timeout must be > 0")
-        self.version = str(self.version).strip()
-        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", self.version):
-            raise ValueError(
-                f"elasticsearch_managed.version must look like '8.17.0', got {self.version!r}"
-            )
+# LakeGen's KNN filter queries: only the documents embedded from its
+# metadata-v1 representation with cohere.embed-v4.0 are vector candidates
+# (every document of the vector cores carries both fields).
+LAKEGEN_KNN_FILTERS: tuple[str, ...] = (
+    'representation_version:"metadata-v1"',
+    'embedding_model:"cohere.embed-v4.0"',
+)
 
 
 @dataclass
@@ -427,10 +548,11 @@ class RetrievalContractConfig:
     """
 
     enabled: bool = True
-    # Which retrievers vote. "dense_question" is silently skipped
-    # when hybrid retrieval isn't enabled; "llm_keywords" is silently
-    # skipped when no LLM config is available to the caller building the
-    # panel — either way min_agreement degrades to "all available".
+    # Which retrievers vote. "dense_question" is silently skipped when the
+    # index has no dense retriever (builtin without hybrid_search_enabled; a
+    # Solr core always has its KNN); "llm_keywords" is silently skipped when
+    # no LLM config is available to the caller building the panel — either
+    # way min_agreement degrades to "all available".
     retrievers: tuple[str, ...] = ("lexical_question", "dense_question", "llm_keywords")
     min_agreement: int = 2
     top_k_per_table: int = 10
@@ -445,32 +567,22 @@ class RetrievalContractConfig:
     # plans are unaffected — they always use the top_k_per_table/max_top_k
     # window above.
     single_table_top_k: int = 1
-    # Portal-faithful matching for the gate and the keyword-anchor search (see
-    # orqa.benchmark.index.PortalIndexView). "any" (default): additive BM25 —
-    # a keyword the table lacks just adds nothing. "all": every keyword must
-    # match, like the portal's Solr edismax `q.op=AND`, where one such keyword
-    # removes the table. Builtin backend only.
+    # How the gate and the keyword-anchor search match keywords. "all": every
+    # keyword must match — Solr ``q.op=AND``, what LakeGen sends; on the
+    # builtin index the PortalIndexView imitation of it. "any" (default):
+    # ``q.op=OR`` on Solr, additive BM25 on the builtin index, where a
+    # keyword the table lacks just adds nothing.
     keyword_match: str = "any"
-    # Where the gate's KEYWORD search runs. "index" (default): the reverse
-    # index of tasks.mcp_search.backend — builtin or elasticsearch — searched
-    # per keyword_match/search_fields (with "all", an Elasticsearch
-    # cross_fields AND: every keyword in some field, like the portal).
-    # "solr": the portal's own Solr core (`solr_core`), queried directly with
-    # q.op=AND through solr.client.LocalSolrClient (orqa.benchmark.solr_index).
-    # Solr is reachable at `solr_url`, else $SOLR_URL, else localhost:8983; if
-    # it cannot be reached the run warns and falls back to "index".
-    keyword_backend: str = "index"
-    solr_core: str = ""
-    solr_url: str = ""
-    # The normalized-record fields the portal actually searches (any of
-    # title, resource_name, tags, columns, publisher, description). Empty =
-    # every field. A Solr core whose `qf` lists no column fields (UK, Canada)
-    # cannot find a table by a column name — leave "columns" out there.
+    # Builtin backend only: the normalized-record fields the portal actually
+    # searches (any of title, resource_name, tags, columns, publisher,
+    # description), for the PortalIndexView imitation. Empty = every field.
+    # Must stay empty under backend solr, where the core's own ``qf`` decides.
     search_fields: tuple[str, ...] = ()
     # `hybrid_rrf` (add it to `retrievers`): RRF constant and how many results
-    # each side contributes before fusing — LakeGen: k=60, top 20.
+    # each side contributes before fusing — LakeGen: k=60, and each branch
+    # fetches top_k 20 x candidate_multiplier 5 = 100.
     hybrid_rrf_k: int = 60
-    hybrid_rrf_depth: int = 20
+    hybrid_rrf_depth: int = 100
 
     def __post_init__(self):
         from orqa.benchmark.index import FIELD_WEIGHTS
@@ -491,14 +603,6 @@ class RetrievalContractConfig:
                 f"retrieval_contract.retrievers has unknown name(s) {sorted(unknown)}; "
                 f"valid: {list(RETRIEVER_NAMES)}"
             )
-        if self.keyword_backend not in ("index", "solr"):
-            raise ValueError(
-                f"retrieval_contract.keyword_backend must be 'index' or 'solr', got {self.keyword_backend!r}"
-            )
-        if self.keyword_backend == "solr" and not str(self.solr_core).strip():
-            raise ValueError("retrieval_contract.keyword_backend 'solr' needs solr_core (the core's name)")
-        self.solr_core = str(self.solr_core or "").strip()
-        self.solr_url = str(self.solr_url or "").strip()
         if self.keyword_match not in ("any", "all"):
             raise ValueError(
                 f"retrieval_contract.keyword_match must be 'any' or 'all', got {self.keyword_match!r}"
@@ -528,26 +632,78 @@ class RetrievalContractConfig:
 
 
 @dataclass
-class MCPSearch:
+class SolrConfig:
+    """The portal's live Solr core (``tasks.search.solr``, backend ``solr``
+    only) — the core LakeGen queries, searched READ-ONLY by
+    ``orqa.benchmark.solr_index.SolrDatasetIndex``. The core is shared with
+    LakeGen: nothing in OrQA writes to it.
     """
-    Configuration for the reverse-index backend shared by the plan judge's
-    retrievability check (orqa.agent.utility.keyword_suggestion/
-    retrievability_gate) and the benchmark solver (orqa.benchmark.solve).
 
-    With the "elasticsearch" backend the reverse index lives in an
-    Elasticsearch index (created when missing); with the "builtin" backend
-    it is materialized under <data_path>/index/, no external service
-    required.
+    # The core's name — LakeGen's: uk, nyc, bologna_v2, paris_v2, valencia_v2.
+    core: str = ""
+    # None: $SOLR_URL, else http://localhost:8983/solr.
+    url: Optional[str] = None
+    # The DenseVectorField LakeGen stores its 1024-d table embeddings in.
+    vector_field: str = "table_embedding"
+    # Filter queries of every KNN query, as LakeGen sends them.
+    knn_filters: tuple[str, ...] = LAKEGEN_KNN_FILTERS
+    # The stored vectors' size: the question must be embedded at the same
+    # size (cohere.embed-v4.0 output_dimensions) — OrQA's local 1536-d
+    # embedding caches cannot query this field.
+    embedding_dimensions: int = 1024
+    # Seconds per request, and attempts on a connection error or a 5xx.
+    timeout: float = 30.0
+    retries: int = 3
+
+    def __post_init__(self):
+        self.core = str(self.core or "").strip()
+        self.url = str(self.url or "").strip() or None
+        self.vector_field = str(self.vector_field or "").strip()
+        # The field name is interpolated into the {!knn f=...} local params.
+        if not self.vector_field.replace("_", "").isalnum():
+            raise ValueError(
+                f"search.solr.vector_field must be a plain Solr field name, got {self.vector_field!r}"
+            )
+        if isinstance(self.knn_filters, str):
+            self.knn_filters = (self.knn_filters,)
+        else:
+            self.knn_filters = tuple(str(f) for f in (self.knn_filters or ()))
+        self.embedding_dimensions = int(self.embedding_dimensions)
+        self.timeout = float(self.timeout)
+        self.retries = int(self.retries)
+        if self.embedding_dimensions < 1:
+            raise ValueError("search.solr.embedding_dimensions must be >= 1")
+        if self.timeout <= 0:
+            raise ValueError("search.solr.timeout must be > 0")
+        if self.retries < 1:
+            raise ValueError("search.solr.retries must be >= 1")
+
+
+@dataclass
+class SearchConfig:
+    """
+    The reverse index shared by the pre-planning keyword-anchor search
+    (orqa.agent.utility.keyword_suggestion), the retrievability gate
+    (orqa.agent.utility.retrievability_gate) and the question stage's
+    retrieval panel.
+
+    "solr": the portal's live Solr core (``solr`` below), the retriever
+    LakeGen queries — edismax keyword search and KNN on the core's own
+    vectors (orqa.benchmark.solr_index). It must answer when the run starts,
+    or the run stops: there is no fallback. "builtin" (the default, for the
+    portals with no Solr core): a BM25 index materialized under
+    <data_path>/index/, no external service required.
     """
 
     # Which reverse index implementation to use.
-    backend: Literal["elasticsearch", "builtin"]
+    backend: Literal["solr", "builtin"] = "builtin"
 
-    # Elasticsearch endpoint (elasticsearch backend only). The
-    # ELASTICSEARCH_URL env variable, when set, takes precedence.
-    elasticsearch_url: str
+    # The Solr core (backend solr only).
+    solr: SolrConfig = field(default_factory=SolrConfig)
 
-    # Optional backend-neutral fusion over the configured lexical index.
+    # Builtin backend only: fusion of the BM25 index with the local metadata
+    # embeddings (orqa.benchmark.hybrid_index.HybridDatasetIndex). A Solr
+    # core's dense retriever is its own KNN, so it is rejected there.
     # BM25 is normalized by the best positive score in the eligible corpus;
     # metadata cosine is mapped from [-1, 1] to [0, 1] before weighting —
     # ONLY when fusion_method is "weighted_score" (see below); "rrf" fuses
@@ -558,13 +714,13 @@ class MCPSearch:
     # How orqa.benchmark.hybrid_index.HybridDatasetIndex combines the
     # lexical and semantic rankings — see that module's docstring for the
     # full comparison. "weighted_score" (the default) is the original
-    # behavior, unchanged; "rrf" matches LakeGen's own Solr fusion
-    # (Reciprocal Rank Fusion) instead of a weighted average of the two
-    # sides' scores.
+    # behavior, unchanged; "rrf" fuses on rank (Reciprocal Rank Fusion)
+    # instead of a weighted average of the two sides' scores.
     fusion_method: Literal["weighted_score", "rrf"] = "weighted_score"
     # RRF's own constant (LakeGen uses 60) — irrelevant when fusion_method
     # is "weighted_score".
     rrf_k: int = 60
+    # The dense retriever's question embedding (both backends).
     query_embedding_input_type: Optional[str] = "search_query"
     query_embedding_cache_size: int = 2048
 
@@ -613,23 +769,38 @@ class MCPSearch:
         default_factory=RetrievalContractConfig
     )
 
-    # OrQa-managed local Elasticsearch (no Docker) — see
-    # ManagedElasticsearchConfig / orqa.benchmark.es_local.
-    elasticsearch_managed: ManagedElasticsearchConfig = field(
-        default_factory=ManagedElasticsearchConfig
-    )
-
-    # Name of the per-city Elasticsearch index, derived from the data path
-    es_index_name: str = field(init=False)
-
     # Where the materialized index is stored (builtin backend only)
     index_path: Path = field(init=False)
     index_filepath: Path = field(init=False)
 
     def __post_init__(self):
+        if self.backend == "elasticsearch":
+            raise ValueError(
+                "tasks.search.backend 'elasticsearch' was removed: retrieval runs on the "
+                "portal's Solr core (backend: solr) or the builtin index. To bring "
+                f"Elasticsearch back, see {LEGACY_ELASTICSEARCH_README}."
+            )
+        if self.backend not in ("solr", "builtin"):
+            raise ValueError(
+                f"tasks.search.backend must be 'solr' or 'builtin', got {self.backend!r}"
+            )
         self.hybrid_search_enabled = _coerce_bool(
             self.hybrid_search_enabled, "hybrid_search_enabled"
         )
+        if self.backend == "solr":
+            if not self.solr.core:
+                raise ValueError("tasks.search.backend 'solr' needs search.solr.core (the core's name)")
+            if self.retrieval_contract.search_fields:
+                raise ValueError(
+                    "tasks.search.retrieval_contract.search_fields must be empty under "
+                    "backend solr: the core's own qf decides which fields a keyword can match"
+                )
+            if self.hybrid_search_enabled:
+                raise ValueError(
+                    "tasks.search.hybrid_search_enabled fuses the builtin index with the local "
+                    "metadata embeddings; under backend solr the dense retriever is the core's "
+                    "own KNN — remove the key (or set it false)"
+                )
         self.gate_unretrievable_groups = _coerce_bool(
             self.gate_unretrievable_groups, "gate_unretrievable_groups"
         )
@@ -654,34 +825,6 @@ class MCPSearch:
             raise ValueError("query_embedding_cache_size must be >= 1")
         if self.query_embedding_input_type is not None:
             self.query_embedding_input_type = str(self.query_embedding_input_type).strip() or None
-
-
-@dataclass
-class BenchmarkSolver:
-    """
-    Configuration for the round-trip benchmark solver (orqa.benchmark.solve):
-    given only a question, retrieve candidate tables, relate them via
-    Valentine matching, and independently answer it for comparison against
-    the hidden ground truth (see orqa.agent.agents.BenchmarkSolver).
-    """
-
-    # How many candidate tables the reverse-index search retrieves per
-    # question — the pool Phase 2 (table selection) chooses from and the
-    # scope of the pairwise Valentine relationship pass.
-    top_k_tables: int = 10
-
-    # Valentine matcher for the pairwise relationship pass among candidates
-    # — schema-only and fast by default (same choice search_datasets used):
-    # up to C(top_k_tables, 2) pairs get matched per question, so an
-    # instance-based matcher here would scale badly.
-    matcher: str = "similarity_flooding"
-
-    def __post_init__(self):
-        self.top_k_tables = int(self.top_k_tables)
-        if self.top_k_tables < 1:
-            raise ValueError(
-                f"tasks.benchmark_solver.top_k_tables must be >= 1, got {self.top_k_tables}"
-            )
 
 
 # How many judges each panel mode resolves to — the only two values a
@@ -725,8 +868,7 @@ class OrQAConfig:
     crawling: Crawling
     candidates_discovery: CandidatesDiscovery
     statement_generation: StatementGeneration
-    mcp_search: MCPSearch
-    benchmark_solver: BenchmarkSolver
+    search: SearchConfig
     judges: Judges
 
     # Classical (BLEND) pipeline configuration; None when the workflow yaml
@@ -745,7 +887,7 @@ class OrQAConfig:
 
     # Where everything this run WRITES lives instead: normalized metadata,
     # the blend/embeddings index, candidates-discovery artifacts, logs,
-    # benchmark results, and the search index (statistics_path stays on
+    # and the search index (statistics_path stays on
     # data_path — see __post_init__, it's produced by `clean`, not later
     # stages). Defaults to data_path (today's single-shared-root behavior)
     # when a workflow yaml doesn't set `write_path`; only needs to differ
@@ -787,7 +929,7 @@ class OrQAConfig:
     datasets_format: str
 
     # Name of the folder under data_path holding the tables every stage
-    # after `clean` reads (indexing, discovery, generation, benchmark) —
+    # after `clean` reads (indexing, discovery, generation) —
     # the format subfolder is still appended, so "datasets" resolves to
     # <data_path>/datasets/<download_format>. Overridable per workflow yaml
     # (top-level `table_dir:`) when the tables to run on live in a
@@ -804,6 +946,10 @@ class OrQAConfig:
     # pipe) without requiring every workflow yaml to opt in explicitly.
     try_separators: tuple[str, ...] = (",", ";", "\t", "|")
 
+    # The run log (top-level `logging` block, see RunLogConfig): one rotating
+    # file under logging_path by default, written by every main.py run.
+    run_log: RunLogConfig = field(default_factory=RunLogConfig)
+
     # The clean step's per-dataset column statistics — read-side, stays on
     # data_path (see write_statistics_path below for the write-side one).
     statistics_path: Path = field(init=False)
@@ -812,14 +958,6 @@ class OrQAConfig:
     # — a write-time artifact of the discovery run itself, not the clean
     # step's output, so it belongs on write_path despite the similar name.
     write_statistics_path: Path = field(init=False)
-
-    # Benchmark folder, adjacent to candidates_discovery/ and metadata/.
-    # Every artifact of a benchmark run (questions todo list, per-question
-    # results) lives in the subfolder named after the programming language
-    # kind selected in the workflow yaml (benchmark/pandas, benchmark/sql).
-    benchmark_path: Path = field(init=False)
-    benchmark_results_path: Path = field(init=False)
-    questions_todo_filepath: Path = field(init=False)
 
     def __post_init__(self):
         self.downloaded_datasets_path = (
@@ -844,23 +982,9 @@ class OrQAConfig:
         )
         self.write_statistics_path = self.write_path / "statistics"
 
-        self.mcp_search.index_path = self.write_path / "index"
-        self.mcp_search.index_filepath = (
-            self.mcp_search.index_path / "metadata_index.json"
-        )
-        # e.g. data/orqa/socrata/nyc -> "orqa-socrata-nyc" — always derived
-        # from data_path (the target's identity), regardless of where
-        # write_path points.
-        self.mcp_search.es_index_name = "orqa-{}-{}".format(
-            self.data_path.parent.name, self.data_path.name
-        ).lower()
-
-        self.benchmark_path = self.write_path / "benchmark"
-        self.benchmark_results_path = (
-            self.benchmark_path / self.statement_generation.kind.lower()
-        )
-        self.questions_todo_filepath = (
-            self.benchmark_results_path / "questions_todo.json"
+        self.search.index_path = self.write_path / "index"
+        self.search.index_filepath = (
+            self.search.index_path / "metadata_index.json"
         )
 
         self.logging_path = self.write_path / "log"
@@ -888,6 +1012,42 @@ def to_bytes(b: str) -> int:
             raise ValueError(f"Invalid value: {b}")
 
 
+# Search keys that no longer exist, and where their job went. Each raises
+# rather than being ignored: a yaml still setting one expects a behaviour the
+# run would silently not have.
+_RETIRED_SEARCH_KEYS = {
+    "elasticsearch_url": "the Elasticsearch backend was removed",
+    "elasticsearch_managed": "the Elasticsearch backend was removed",
+}
+_RETIRED_CONTRACT_KEYS = {
+    # keyword_backend: solr fell back silently to the Elasticsearch imitation
+    # whenever the backend was elasticsearch — which every Solr portal's was.
+    "keyword_backend": "the gate searches the index tasks.search.backend selects — set backend: solr",
+    "solr_core": "the core is tasks.search.solr.core",
+    "solr_url": "the Solr URL is tasks.search.solr.url",
+}
+
+
+def _reject_retired_search_keys(search_task: dict) -> None:
+    """Raise on a ``tasks.search`` key of the retired Elasticsearch backend or
+    of the old ``retrieval_contract`` Solr detour, naming where it went."""
+    contract = search_task.get("retrieval_contract") or {}
+    retired = [
+        f"tasks.search.{key} ({why})"
+        for key, why in _RETIRED_SEARCH_KEYS.items() if key in search_task
+    ] + [
+        f"tasks.search.retrieval_contract.{key} ({why})"
+        for key, why in _RETIRED_CONTRACT_KEYS.items() if key in contract
+    ]
+    if retired:
+        raise ValueError(
+            f"Removed search key(s): {'; '.join(retired)}. Retrieval runs on the "
+            "portal's Solr core (backend: solr, search.solr) or the builtin index; "
+            f"see {LEGACY_ELASTICSEARCH_README} for what was retired and how to bring "
+            "Elasticsearch back."
+        )
+
+
 def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     with open(yaml_path, "r") as file:
         parsed = yaml.safe_load(file)
@@ -896,7 +1056,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
 
     # Optional top-level `write_path` — where this run's outputs (normalized
     # metadata, blend/embeddings index, candidates-discovery, logs,
-    # benchmark results, search index) get written, instead of data_path.
+    # search index) get written, instead of data_path.
     # Defaults to data_path (today's single-shared-root behavior) when
     # absent — only needed when DATADIR is a read-only mount of
     # already-crawled-and-cleaned data (see OrQAConfig.write_path).
@@ -1044,7 +1204,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
             "stage is always on — delete the key"
         )
     max_question_corrections = parsed["tasks"]["query_generation"].get(
-        "max_question_corrections", 3
+        "max_question_corrections", 5
     )
     statement_generation = StatementGeneration(
         kind=kind,
@@ -1058,59 +1218,43 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         multi_table_query_count=multi_table_query_count,
         max_groups_per_family=max_groups_per_family,
         max_question_corrections=max_question_corrections,
+        trace=_load_trace_config(query_generation_task.get("trace"), write_path),
     )
 
     # reverse-index backend config (defaults keep older yamls working)
-    mcp_search_task = parsed["tasks"].get("mcp_search") or {}
-    backend = mcp_search_task.get("backend", "elasticsearch")
-    if backend not in ("elasticsearch", "builtin"):
-        raise ValueError(
-            f"tasks.mcp_search.backend must be 'elasticsearch' or "
-            f"'builtin', got {backend!r}"
-        )
-    mcp_search = MCPSearch(
-        backend=backend,
-        elasticsearch_url=str(
-            mcp_search_task.get("elasticsearch_url", "http://localhost:9200")
-        ),
-        hybrid_search_enabled=mcp_search_task.get("hybrid_search_enabled", False),
-        lexical_weight=float(mcp_search_task.get("lexical_weight", 0.5)),
-        semantic_weight=float(mcp_search_task.get("semantic_weight", 0.5)),
-        fusion_method=mcp_search_task.get("fusion_method", "weighted_score"),
-        rrf_k=int(mcp_search_task.get("rrf_k", 60)),
-        query_embedding_input_type=mcp_search_task.get(
+    search_task = parsed["tasks"].get("search") or {}
+    _reject_retired_search_keys(search_task)
+    search = SearchConfig(
+        backend=search_task.get("backend", "builtin"),
+        solr=SolrConfig(**(search_task.get("solr") or {})),
+        hybrid_search_enabled=search_task.get("hybrid_search_enabled", False),
+        lexical_weight=float(search_task.get("lexical_weight", 0.5)),
+        semantic_weight=float(search_task.get("semantic_weight", 0.5)),
+        fusion_method=search_task.get("fusion_method", "weighted_score"),
+        rrf_k=int(search_task.get("rrf_k", 60)),
+        query_embedding_input_type=search_task.get(
             "query_embedding_input_type", "search_query"
         ),
         query_embedding_cache_size=int(
-            mcp_search_task.get("query_embedding_cache_size", 2048)
+            search_task.get("query_embedding_cache_size", 2048)
         ),
         keyword_search_top_k_coefficient=float(
-            mcp_search_task.get("keyword_search_top_k_coefficient", 5.0)
+            search_task.get("keyword_search_top_k_coefficient", 5.0)
         ),
-        gate_unretrievable_groups=mcp_search_task.get(
+        gate_unretrievable_groups=search_task.get(
             "gate_unretrievable_groups", False
         ),
-        retrieval_gate_enabled=mcp_search_task.get(
+        retrieval_gate_enabled=search_task.get(
             "retrieval_gate_enabled", True
-        ),
-        elasticsearch_managed=ManagedElasticsearchConfig(
-            **(mcp_search_task.get("elasticsearch_managed") or {})
         ),
         retrieval_contract=RetrievalContractConfig(
             **{
                 key: value
-                for key, value in (mcp_search_task.get("retrieval_contract") or {}).items()
+                for key, value in (search_task.get("retrieval_contract") or {}).items()
                 # retired with the sibling checks — older yamls may still set it
                 if key != "max_residual_siblings"
             }
         ),
-    )
-
-    # benchmark solver config (see orqa.benchmark.solve)
-    benchmark_solver_task = parsed["tasks"].get("benchmark_solver") or {}
-    benchmark_solver = BenchmarkSolver(
-        top_k_tables=benchmark_solver_task.get("top_k_tables", 10),
-        matcher=str(benchmark_solver_task.get("matcher", "similarity_flooding")),
     )
 
     # How many judges vote on each plan/code panel (see JudgePanel) — the
@@ -1161,8 +1305,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         blend_opts=blend_opts,
         candidates_discovery=candidates_discovery,
         statement_generation=statement_generation,
-        mcp_search=mcp_search,
-        benchmark_solver=benchmark_solver,
+        search=search,
         judges=judges,
         filter_filenames_patterns=filter_filenames_patterns,
         filter_column_patterns=filter_column_patterns,
@@ -1171,6 +1314,7 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         write_path=write_path,
         datasets_format=crawling.download_format,
         table_dir=table_dir,
+        run_log=_load_run_log_config(parsed.get("logging"), write_path),
     )
 
     for engine in ["pandas", "polars"]:

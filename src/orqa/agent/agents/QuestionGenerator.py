@@ -21,6 +21,13 @@ from ..prompting import QuestionGeneratorPrompt
 
 
 class _QuestionDraftClient(LLMClientStructured):
+    # Questions are a short output: native JSON-schema decoding is safe here
+    # (it looped only on long outputs — plans, code — in the experiments), and
+    # a draft set with one unreadable slot keeps its valid slots: the stage
+    # re-asks the missing ones on the next round.
+    native_schema = True
+    salvage_items = True
+
     def __init__(self, config_path: Path):
         super().__init__(config_path, response_model="question_generator")
 
@@ -75,9 +82,17 @@ class QuestionGeneratorAgent:
         for slot in slots:
             lines = [f"Slot {slot['slot']} — ambition: {slot.get('tier', 'medium')}"]
             anchors = slot.get("anchors") or {}
+            codes = slot.get("code_terms") or {}
             for alias in sorted(anchors):
-                if anchors[alias]:
-                    lines.append(f"  {alias} ANCHOR TERMS: {', '.join(anchors[alias])}")
+                code_like = [t for t in anchors[alias] if t in set(codes.get(alias) or [])]
+                plain = [t for t in anchors[alias] if t not in code_like]
+                if plain:
+                    lines.append(f"  {alias} ANCHOR TERMS: {', '.join(plain)}")
+                if code_like:
+                    lines.append(
+                        f"  {alias} CODE-LIKE TERMS (the search needs them; never paste them — say what "
+                        f"they mean in words, see TABLE IDENTITY): {', '.join(code_like)}"
+                    )
             if not any(anchors.values()):
                 lines.append("  (no anchor terms for this slot — see the retrieval-anchor rules)")
             if slot.get("previous_question"):

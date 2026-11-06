@@ -33,7 +33,7 @@ load_dotenv()
 
 from conf import load_config
 from orqa.benchmark.index import load_index
-from orqa.benchmark.questions import META_KEY, iter_questions, match_plan_feedback
+from orqa.utils.questions import META_KEY, iter_questions, match_plan_feedback
 from orqa.embedding_discovery.clustering import compute_cluster_projection, save_cluster_projection
 from orqa.queries.query_execution import QueryExecutor
 from orqa.utils import load_json
@@ -119,7 +119,7 @@ def _get_source_or_404(source: str) -> SourceEntry:
 
 # Built lazily (first keyword-search request per source), not at startup like
 # _SOURCES: an index needs the metadata already crawled/indexed and, for the
-# elasticsearch backend, a reachable cluster — neither should block the app
+# solr backend, a reachable core — neither should block the app
 # from serving everything else when they're not there yet.
 _INDEX_CACHE: dict[str, Any] = {}
 
@@ -576,7 +576,7 @@ def keyword_search(
     num_tables: int = 1,
 ) -> dict:
     """Reverse-index search for the "Search Index" play button on a query's
-    detail view: same ``DatasetIndex``/``ESDatasetIndex`` the plan judge's
+    detail view: same ``DatasetIndex``/``SolrDatasetIndex`` the plan judge's
     retrievability check runs against (see
     ``orqa.agent.utility.retrievability_gate``), exposed here so a human
     can re-run a manual keyword search by hand for one query's
@@ -589,13 +589,13 @@ def keyword_search(
     differently — ``min(max_top_k, top_k_per_table * n)`` — so this manual
     re-run is indicative, not an exact replay of what the plan judge saw).
 
-    Sync ``def`` (threadpool): the elasticsearch backend does network I/O.
+    Sync ``def`` (threadpool): the solr backend does network I/O.
     """
     entry = _get_source_or_404(source)
     index = _get_index(source, entry.cfg)
     top_k = max(
         1,
-        round(max(1, num_tables) * entry.cfg.mcp_search.keyword_search_top_k_coefficient),
+        round(max(1, num_tables) * entry.cfg.search.keyword_search_top_k_coefficient),
     )
     if index is None:
         return {"available": False, "results": [], "top_k": top_k}

@@ -36,13 +36,19 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from ...benchmark.index import tokenize
+from ...utils.generation_trace import trace_event
+from .table_analyzer import render_identity_line, render_table_facts, table_identities
 from ..utility.question_gate import covered_terms, gate_question
 from ..utility.retrievability_gate import RetrievalContract, describe_votes
 
 logger = logging.getLogger(__name__)
 
-# 1 first attempt + this many correction rounds per slot.
-MAX_QUESTION_CORRECTIONS = 3
+# 1 first attempt + this many correction rounds per slot. The workflow yaml's
+# tasks.query_generation.max_question_corrections overrides it. 5 (was 3):
+# on the 6-table group of experiments/structured_stability the two approved
+# slots passed the question judge on their 5th and 6th attempt; 4 rounds
+# ended with none, twice.
+MAX_QUESTION_CORRECTIONS = 5
 
 # How many times a question the planner could not turn into an approved plan
 # is rewritten and planned again before it is dropped.
@@ -76,6 +82,10 @@ class _Slot:
     tier: str
     # The anchor this slot is written against.
     anchors: dict[str, list[str]] = field(default_factory=dict)
+    # Anchor terms a person would never type as written (a file-name token,
+    # a column code): the search needs them, the writer must say what they
+    # mean instead of pasting them (keyword_suggestion.is_speakable_term).
+    code_terms: dict[str, list[str]] = field(default_factory=dict)
     previous_question: Optional[str] = None
     feedback: Optional[str] = None
     last_failure: Optional[str] = None
@@ -90,6 +100,44 @@ def _zero_usage() -> dict:
 def _add_usage(total: dict, part: Optional[dict]) -> None:
     for key in total:
         total[key] += (part or {}).get(key, 0)
+
+
+def build_question_tables_context(
+    aliases: Any,
+    analyses: list,
+    table_metadata: Optional[dict],
+    stats: list,
+    dfs: Optional[list],
+    identities: Optional[list] = None,
+) -> dict:
+    """The compact table context the question judge is shown (and the stage
+    records): alias NAMES only (the values of ``aliases`` are the portal's
+    ids — no information for a judge), the analyses, the portal metadata, the
+    columns with dtypes, the scope facts, and each table's identity line (the
+    dated span of its rows, its file name and publisher, the words only its
+    title/file name has — see ``table_analyzer.table_identity``)."""
+    alias_list = list(aliases)
+    metadata = table_metadata or {}
+    frames = list(dfs or [])
+    if identities is None:
+        identities = table_identities(alias_list, frames, metadata)
+    return {
+        "aliases": alias_list,
+        "analyses": list(analyses),
+        "metadata": metadata,
+        "columns": {
+            table.alias: [f"{c.column} ({c.dtype})" for c in table.columns]
+            for table in stats
+        },
+        "facts": {
+            alias: render_table_facts(df).splitlines()
+            for alias, df in zip(alias_list, frames)
+        },
+        "identity": {
+            identity["alias"]: render_identity_line(identity, len(identities))
+            for identity in identities
+        },
+    }
 
 
 def build_question_judge_payload(
@@ -190,20 +238,26 @@ class QuestionStage:
         tables_context: dict,
         anchors: dict[str, list[str]],
         contract: Optional[RetrievalContract],
+        code_terms: Optional[dict[str, list[str]]] = None,
     ) -> QuestionStageResult:
         """Produce up to ``len(tiers)`` approved questions.
 
         ``anchors``: ``{alias: [...]}`` — the verified vocabulary the
         questions are built from (per table for a multi-table group).
-        ``contract`` gates retrieval (``None`` skips it). ``context`` / ``tables_context``: see
+        ``code_terms``: ``{alias: [...]}`` — the subset of each anchor a
+        person would never type as written (the writer is told to say what
+        they mean, never to paste them). ``contract`` gates retrieval
+        (``None`` skips it). ``context`` / ``tables_context``: see
         ``QuestionGeneratorAgent.generate`` and
         ``build_question_judge_payload``.
         """
+        codes = {a: list(t) for a, t in (code_terms or {}).items() if t}
         slots = [
-            _Slot(slot=i, tier=tier, anchors={a: list(t) for a, t in anchors.items()})
+            _Slot(slot=i, tier=tier, anchors={a: list(t) for a, t in anchors.items()},
+                  code_terms={a: list(t) for a, t in codes.items() if a in anchors})
             for i, tier in enumerate(tiers, start=1)
         ]
-        return self._loop(slots, context, tables_context, contract)
+        return self._loop(slots, context, tables_context, contract, phase="initial")
 
     def rewrite(
         self,
@@ -227,12 +281,13 @@ class QuestionStage:
                 slot=r["slot"],
                 tier=r.get("tier", "medium"),
                 anchors={a: list(t) for a, t in (r.get("anchors") or {}).items()},
+                code_terms={a: list(t) for a, t in (r.get("code_terms") or {}).items() if t},
                 previous_question=r.get("previous_question"),
                 feedback=r.get("feedback"),
             )
             for r in requests
         ]
-        return self._loop(slots, context, tables_context, contract)
+        return self._loop(slots, context, tables_context, contract, phase="rewrite")
 
     def _loop(
         self,
@@ -240,8 +295,30 @@ class QuestionStage:
         context: dict,
         tables_context: dict,
         contract: Optional[RetrievalContract],
+        phase: str = "initial",
     ) -> QuestionStageResult:
         result = QuestionStageResult()
+        trace_event(
+            "question_stage_start",
+            phase=phase,
+            max_rounds=1 + self.max_corrections,
+            contract=contract.to_dict() if hasattr(contract, "to_dict") else contract,
+            slots=[
+                {
+                    "slot": s.slot,
+                    "tier": s.tier,
+                    "anchors": s.anchors,
+                    "code_terms": s.code_terms,
+                    "previous_question": s.previous_question,
+                    "feedback": s.feedback,
+                }
+                for s in slots
+            ],
+            # What the writer and the judges are shown — identical for a
+            # rewrite of the same group, so recorded with the first run only.
+            writer_context=context if phase == "initial" else None,
+            judge_context=tables_context if phase == "initial" else None,
+        )
 
         for round_idx in range(1 + self.max_corrections):
             pending = [s for s in slots if s.approved is None]
@@ -258,6 +335,7 @@ class QuestionStage:
                         "slot": s.slot,
                         "tier": s.tier,
                         "anchors": s.anchors,
+                        "code_terms": s.code_terms,
                         "previous_question": s.previous_question,
                         "feedback": s.feedback,
                     }
@@ -269,7 +347,7 @@ class QuestionStage:
             for s in pending:
                 self._settle(
                     s, drafts.get(s.slot), round_idx + 1,
-                    contract, tables_context, result.usage,
+                    contract, tables_context, result.usage, phase=phase,
                 )
 
         for s in slots:
@@ -291,6 +369,26 @@ class QuestionStage:
                 "Question stage produced no approved question "
                 f"(status {result.abort_status})."
             )
+        trace_event(
+            "question_stage_end",
+            phase=phase,
+            abort_status=result.abort_status,
+            usage=result.usage,
+            approved=[
+                {k: q.get(k) for k in ("slot", "tier", "question", "question_keywords")}
+                for q in result.approved
+            ],
+            slots=[
+                {
+                    "slot": s.slot,
+                    "tier": s.tier,
+                    "approved": s.approved is not None,
+                    "attempts": len(s.attempts),
+                    "last_failure": s.last_failure,
+                }
+                for s in slots
+            ],
+        )
         return result
 
     # ------------------------------------------------------------------
@@ -303,8 +401,50 @@ class QuestionStage:
         contract: Optional[RetrievalContract],
         tables_context: dict,
         usage: dict,
+        phase: str = "initial",
     ) -> None:
-        """Gate (then judge) one slot's draft; approve it or record why not."""
+        """Gate (then judge) one slot's draft; approve it or record why not —
+        and record the attempt in the generation trace either way."""
+        try:
+            self._settle_draft(s, draft, attempt_no, contract, tables_context, usage)
+        except Exception as exc:
+            self._trace_attempt(s, attempt_no, phase, error=exc)
+            raise
+        self._trace_attempt(s, attempt_no, phase)
+
+    @staticmethod
+    def _trace_attempt(
+        s: _Slot, attempt_no: int, phase: str, error: Optional[Exception] = None
+    ) -> None:
+        """One ``question_attempt`` event: the attempt as recorded in the
+        slot's feedback (question, gate verdict and votes, judge panel), its
+        outcome, and the feedback the writer gets for its next round."""
+        attempt = s.attempts[-1] if s.attempts else {"attempt": attempt_no}
+        if error is not None:
+            outcome = "error"
+        elif s.approved is not None:
+            outcome = "approved"
+        else:
+            outcome = s.last_failure or "rejected"
+        trace_event("question_attempt", **{
+            "phase": phase,
+            "slot": s.slot,
+            "tier": s.tier,
+            "outcome": outcome,
+            **attempt,
+            "feedback_to_writer": None if s.approved is not None else s.feedback,
+            "error": f"{type(error).__name__}: {error}" if error is not None else None,
+        })
+
+    def _settle_draft(
+        self,
+        s: _Slot,
+        draft: Optional[dict],
+        attempt_no: int,
+        contract: Optional[RetrievalContract],
+        tables_context: dict,
+        usage: dict,
+    ) -> None:
         anchors = s.anchors
         attempt: dict = {"attempt": attempt_no}
         s.attempts.append(attempt)
@@ -399,6 +539,7 @@ class QuestionStage:
             # the anchor this question was written against — a later rewrite
             # starts from it
             "anchors": {a: list(t) for a, t in anchors.items()},
+            "code_terms": {a: list(t) for a, t in s.code_terms.items()},
         }
         s.last_failure = None
         self._info(f"Slot {s.slot} approved on attempt {attempt_no}: {question}")
@@ -414,6 +555,7 @@ class QuestionStageSession:
     tables_context: dict
     anchors: dict[str, list[str]]
     contract: Optional[RetrievalContract]
+    code_terms: dict = field(default_factory=dict)
 
     def run(self, tiers: list[str]) -> QuestionStageResult:
         return self.stage.run(
@@ -422,6 +564,7 @@ class QuestionStageSession:
             tables_context=self.tables_context,
             anchors=self.anchors,
             contract=self.contract,
+            code_terms=self.code_terms,
         )
 
     def rewrite(self, requests: list[dict]) -> QuestionStageResult:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from orqa.benchmark.families import FamilyIndex
+from orqa.utils.families import FamilyIndex
 from orqa.normalize_metadata import _identifying_resource_name
 
 

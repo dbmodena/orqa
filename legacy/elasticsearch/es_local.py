@@ -1,10 +1,14 @@
+# RETIRED (2026-11-04): Elasticsearch is no longer an OrQA backend; the five
+# Solr portals query LakeGen's live Solr cores (orqa.benchmark.solr_index).
+# Kept unchanged from src/orqa/benchmark/es_local.py; it does not import or run from
+# here. legacy/elasticsearch/README.md says how to reintegrate it.
 """Run a LOCAL Elasticsearch for a workflow run — no Docker, no service to start.
 
 Elasticsearch is a JVM server; it cannot be embedded in the Python process.
 What can be done is what ``src/solr/solr.py`` does for Solr: let OrQa start the
 server itself when a step needs it, and stop it when the run ends. With
-``tasks.mcp_search.elasticsearch_managed.enabled: true``, ``load_index`` (so
-``generate-statements``, ``solve-benchmark`` and the retrievability report)
+``tasks.search.elasticsearch_managed.enabled: true``, ``load_index`` (so
+``generate-statements`` and the retrievability report)
 calls :func:`ensure_running` before it connects.
 
 Everything lives next to the portal's other index files, under
@@ -82,7 +86,7 @@ def download_url(version: str = DEFAULT_VERSION, system: Optional[str] = None,
     if system not in ("linux", "darwin") or arch is None:
         raise RuntimeError(
             f"No Elasticsearch tarball for {system}/{machine}. Unpack a distribution "
-            "yourself and set tasks.mcp_search.elasticsearch_managed.home."
+            "yourself and set tasks.search.elasticsearch_managed.home."
         )
     return f"{_DOWNLOAD_ROOT}/elasticsearch-{version}-{system}-{arch}.tar.gz"
 
@@ -132,7 +136,7 @@ def install(
         raise RuntimeError(
             f"Only {free / 2**30:.1f} GB free at {dest}; unpacking Elasticsearch needs about "
             f"{min_free_bytes / 2**30:.0f} GB. Free some space, or set "
-            "tasks.mcp_search.elasticsearch_managed.home to an install elsewhere."
+            "tasks.search.elasticsearch_managed.home to an install elsewhere."
         )
 
     url = url or download_url(version)
@@ -285,7 +289,7 @@ class ManagedElasticsearch:
             raise FileNotFoundError(
                 f"No Elasticsearch at {self.home} (missing bin/elasticsearch). Install it with "
                 "`python -m orqa.benchmark.es_local install`, or set "
-                "tasks.mcp_search.elasticsearch_managed.home."
+                "tasks.search.elasticsearch_managed.home."
             )
         (self.data_dir / "data").mkdir(parents=True, exist_ok=True)
         (self.data_dir / "logs").mkdir(parents=True, exist_ok=True)
@@ -370,8 +374,8 @@ def resolve_paths(cfg: Any) -> tuple[Path, Path, bool]:
     """``(home, data_dir, home_is_default)`` — everything under
     ``<data_path>/index/elasticsearch`` unless the config or ``$ES_HOME``
     says otherwise."""
-    managed = cfg.mcp_search.elasticsearch_managed
-    base = Path(cfg.mcp_search.index_filepath).parent / "elasticsearch"
+    managed = cfg.search.elasticsearch_managed
+    base = Path(cfg.search.index_filepath).parent / "elasticsearch"
     explicit = managed.home or os.environ.get("ES_HOME", "").strip()
     home = Path(explicit) if explicit else base / f"elasticsearch-{managed.version}"
     data_dir = Path(managed.data_dir) if managed.data_dir else base
@@ -382,13 +386,13 @@ def ensure_running(cfg: Any, es_url: str) -> Optional[ManagedElasticsearch]:
     """Start (and, if needed, first install) the local Elasticsearch a
     workflow's config asks for. A no-op when ``elasticsearch_managed`` is off.
     """
-    managed = cfg.mcp_search.elasticsearch_managed
+    managed = cfg.search.elasticsearch_managed
     if not managed.enabled:
         return None
     host = (urlparse(es_url).hostname or "").lower()
     if host not in _LOCAL_HOSTS:
         raise ValueError(
-            f"tasks.mcp_search.elasticsearch_managed only manages a LOCAL Elasticsearch, but the "
+            f"tasks.search.elasticsearch_managed only manages a LOCAL Elasticsearch, but the "
             f"URL is {es_url!r}. Turn it off to use a remote cluster."
         )
     if es_url in _started and _started[es_url].running():
@@ -403,7 +407,7 @@ def ensure_running(cfg: Any, es_url: str) -> Optional[ManagedElasticsearch]:
         if not (managed.auto_install and home_is_default):
             raise FileNotFoundError(
                 f"No Elasticsearch at {home}. Run `python -m orqa.benchmark.es_local install "
-                f"--dest {home.parent}` or fix tasks.mcp_search.elasticsearch_managed.home."
+                f"--dest {home.parent}` or fix tasks.search.elasticsearch_managed.home."
             )
         install(home.parent, managed.version, log=announce)
     server.ensure_running()

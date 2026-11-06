@@ -14,6 +14,8 @@ degradation convention as the pre-planning keyword search
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
@@ -224,6 +226,25 @@ QUESTION_TERMS = "question_terms"
 _REPLACED_BY_LEXICAL_GATE = "llm_keywords"
 
 
+def _question_words(question: str) -> list[str]:
+    """The question's words AS WRITTEN, in order: case and accents kept, the
+    punctuation around a word dropped, one-character words and
+    case-insensitive repeats dropped. Not ``tokenize``: a Solr core analyzes
+    a word itself, and folding it first changes what it matches (paris_v2:
+    'écoles élémentaires' finds 4 tables, 'ecoles elementaires' 3)."""
+    words: list[str] = []
+    seen: set[str] = set()
+    for raw in question.split():
+        word = _EDGE_PUNCTUATION.sub("", raw)
+        if len(word) > 1 and word.casefold() not in seen:
+            seen.add(word.casefold())
+            words.append(word)
+    return words
+
+
+_EDGE_PUNCTUATION = re.compile(r"^[\W_]+|[\W_]+$")
+
+
 def _question_terms_for(question: str, resource_id: str, index) -> list[str]:
     """The question's OWN words that ``resource_id``'s record can match, in
     question order — the keywords a searcher could take from the question to
@@ -236,9 +257,18 @@ def _question_terms_for(question: str, resource_id: str, index) -> list[str]:
     none does. Under additive BM25 (``keyword_match: any``) a missing term
     costs nothing, and it is still the natural query — exactly the words that
     can score the table — but not provably the strongest: a word the record
-    shares with many others lifts them too. An index that cannot say what a
-    record matches on (``searchable_terms``) gets every question word instead.
+    shares with many others lifts them too.
+
+    Which words match is the index's answer (``terms_matching``): on a Solr
+    core Solr's own analysis decides (stemming, word splits, title n-grams —
+    'tree' matches 119 nyc tables, 'trees' 48), on the builtin index the
+    record's tokens. An index that cannot say gets every question word.
     """
+    matcher = getattr(index, "terms_matching", None)
+    if callable(matcher):
+        words = _question_words(question)
+        matched = matcher(resource_id, words)
+        return [w for w in words if w in matched]
     tokens = list(dict.fromkeys(t for t in tokenize(question) if len(t) > 1))
     lookup = getattr(index, "searchable_terms", None)
     vocabulary = lookup(resource_id) if callable(lookup) else None

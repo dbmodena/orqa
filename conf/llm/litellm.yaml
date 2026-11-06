@@ -1,9 +1,23 @@
 # LLM Configuration File
-# Primary model (will be tried first)
-model: "oci/openai.gpt-oss-120b"
-# Fallback models (tried in order if primary fails)
-fallback_models:
-  - "groq/llama-3.3-70b-versatile"
+# Primary model (will be tried first): a `deployments` name (below) or a
+# LiteLLM model string. On the dedicated cluster:
+#   oci-dedicated/gpt-oss-20b-1   gpt-oss-20b, ~95 tok/s, reasons briefly
+#   oci-dedicated/qwen3           Qwen3 with thinking OFF, 45 tok/s
+#   oci-dedicated/qwen3-thinking  Qwen3 with thinking ON: 5-15k hidden tokens
+#                                 per answer at 45 tok/s, so planner-sized
+#                                 answers hit the route's 300 s cut
+# On demand: "oci/openai.gpt-oss-120b" (dynamic throttling).
+model: "oci-dedicated/qwen3"
+# Fallback models (tried in order if primary fails). NONE for structured
+# calls on purpose: the Router falls back on ANY exception from the primary —
+# OCI's 429 throttle included — before the client's own throttle backoff sees
+# it, so a valid fallback would answer throttled structured calls with a
+# different, weaker model without anything in the pipeline saying so (the
+# client logs `served by fallback model` if that ever happens). The Groq key
+# in .env was also rejected as invalid, so the former entry only added a
+# dead call. Throttles are handled by the backoff below instead.
+fallback_models: []
+# - "groq/llama-3.3-70b-versatile"
 # - "ollama_chat/llama3.1:8b"
 #    - "groq/llama-3.3-70b-versatile"
 #   - "groq/llama-3.1-8b-instant"
@@ -13,8 +27,77 @@ fallback_models:
 # Must be multilingual: the portals include Italian, Spanish and French datasets.
 embedding_model: "oci/cohere.embed-v4.0"
 
+# Named deployments. A name below can be used anywhere a model is referenced
+# (model, fallback_models, judge_profiles.*): it expands to a LiteLLM model
+# string plus the litellm params that pin the call to one serving endpoint,
+# merged over the provider_params of the model's prefix
+# (LLMClient._resolve_model_spec). `${NAME}` inside the model string is read
+# from the environment (.env); every other value may use LiteLLM's own
+# `os.environ/NAME` form, resolved when the Router is built.
+#
+# The dedicated OCI AI cluster is reached through OCI's OpenAI-compatible
+# route (DEDICATE_OCI_BASE_URL, ending in /20231130/actions/v1) with the
+# Generative AI API key (DEDICATED_API_KEY, bearer auth — no request
+# signing, no compartment): LiteLLM's `openai/` provider, the model being
+# the endpoint OCID. Verified live 2026-11-03 on all three endpoints: chat,
+# json_schema response_format, and max_tokens up to 131072 all accepted, so
+# the structured loop's budgets need no per-endpoint cap here
+# (DEDICATE_OCI_MAX_TOKENS=16000 in .env is NOT a limit of the endpoints;
+# `max_output_tokens: <n>` on a deployment would clamp the loop to it).
+# The response's `model` is the endpoint OCID, not the model name.
+# The signed native route (`oci/<vendor.model>` + `oci_serving_mode:
+# DEDICATED` + `oci_endpoint_id`) is supported by the same mechanism but
+# answered 404 for this user's policy, so it is not used.
+deployments:
+  # DEDICATE_OCI_MODEL — gpt-oss-20b, cluster endpoint 1 (the generator).
+  oci-dedicated/gpt-oss-20b-1:
+    model: "openai/${DEDICATE_OCI_MODEL}"
+    api_base: os.environ/DEDICATE_OCI_BASE_URL
+    api_key: os.environ/DEDICATED_API_KEY
+  # DEDICATE_OCI_MODEL_2 — gpt-oss-20b, cluster endpoint 2: a judge on its
+  # own capacity. Same family as the generator (self-bias), so the panel
+  # pairs it with the Qwen endpoint and an on-demand Gemini.
+  oci-dedicated/gpt-oss-20b-2:
+    model: "openai/${DEDICATE_OCI_MODEL_2}"
+    api_base: os.environ/DEDICATE_OCI_BASE_URL
+    api_key: os.environ/DEDICATED_API_KEY
+  # DEDICATE_OCI_MODEL_3 — Qwen3. The endpoint only says "Qwen, undisclosed";
+  # rename once the variant is known.
+  #
+  # Thinking is switched OFF here (extra_body is forwarded verbatim by
+  # LiteLLM's openai provider; `reasoning_effort: none` works too but the
+  # provider refuses it for an uncatalogued model unless
+  # allowed_openai_params lists it). Measured 2026-11-04 on the real judge
+  # payloads (135 votes): with thinking on, a vote carried 5.7k hidden
+  # reasoning tokens on average (up to 14k) and this endpoint generates a
+  # steady 45 tokens/s (vs ~95 for the gpt-oss-20b endpoints, unaffected by
+  # concurrency, first token in 0.2 s), so votes took a median 104 s and 18
+  # hit the route's 300 s server-side cut ("Model request timed out"), each
+  # retried from scratch. With thinking off the same vote takes 2-4 s. The
+  # route also cuts the PLANNER at 300 s (gpt-oss-20b-1, ~23k-token plans):
+  # that one is a budget, not a thinking, question. Streaming does not
+  # escape the cut (a streamed answer was terminated at exactly 300 s).
+  oci-dedicated/qwen3:
+    model: "openai/${DEDICATE_OCI_MODEL_3}"
+    api_base: os.environ/DEDICATE_OCI_BASE_URL
+    api_key: os.environ/DEDICATED_API_KEY
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
+  # The same endpoint with its thinking phase on — for roles where the
+  # extra reasoning is worth the time, and only where a whole answer fits
+  # in 300 s (~13k tokens at 45 tok/s, thinking included).
+  oci-dedicated/qwen3-thinking:
+    model: "openai/${DEDICATE_OCI_MODEL_3}"
+    api_base: os.environ/DEDICATE_OCI_BASE_URL
+    api_key: os.environ/DEDICATED_API_KEY
+
 # Provider-specific parameters
 provider_params:
+  # `openai/<endpoint OCID>` — the dedicated OCI endpoints above (OpenAI-
+  # compatible route). Same long tail as the oci timeout below.
+  openai:
+    timeout: 600
   ollama_chat:
     api_base: "http://localhost:11434"
     keep_alive: "24h"
@@ -41,7 +124,10 @@ provider_params:
     oci_key_file: os.environ/OCI_KEY_FILE
     oci_compartment_id: os.environ/OCI_COMPARTMENT_ID
     #max_tokens: 4096
-    timeout: 300
+    # Structured calls carry explicit output budgets of 32000-65536 tokens and
+    # escalate to 131072 on a cut answer; a 16k-token correction took over a
+    # minute, so the request timeout leaves room for the long tail.
+    timeout: 600
     # NOTE: no temperature override here on purpose. It's tempting to
     # assume OCI's reasoning models (openai.gpt-oss-120b/-20b,
     # google.gemini-2.5-flash) need a fixed temperature=1 while thinking,
@@ -57,7 +143,11 @@ provider_params:
 
 # Common parameters (applied to all models)
 
-max_retries: 3
+# Attempts per structured call (LLMClientStructured.complete, JudgePanel
+# votes). 6 (was 3), validity over tokens: a cut answer is retried with a
+# bigger budget, a shape slip with a short repair call, and the recoveries
+# measured in experiments/structured_stability happened up to the 4th try.
+max_retries: 6
 temperature: 0.1
 retry_delay: 10.0
 enable_json_mode: true
@@ -78,25 +168,31 @@ throttle_max_delay: 120.0
 
 # Judge panels: each panel is a list of small models that judge the same
 # artifact independently; approval is decided by majority vote. Each entry is
-# a LiteLLM model string (or a mapping with a "model" key plus per-judge
-# overrides); its provider params are fetched from provider_params above by
-# the model's provider prefix, exactly like the primary/fallback models.
+# a LiteLLM model string, a name from `deployments` above (a dedicated OCI
+# endpoint), or a mapping with a "model" key plus per-judge overrides; its
+# provider params are fetched from provider_params above by the resolved
+# model's provider prefix, exactly like the primary/fallback models.
 # Prefer models from DIFFERENT families (votes only help when errors are
 # decorrelated) and different from the generation model (self-bias).
 # Remove/empty a panel to fall back to the single primary-model judge.
 judge_profiles:
-  # Judges the structured query plans (before code generation).
+  # Judges the structured query plans (before code generation). Dedicated
+  # endpoints first (mono mode takes the first entry), the on-demand Gemini
+  # third for a second family. The former on-demand panel:
+  #   - "oci/openai.gpt-oss-120b"
+  #   - "oci/openai.gpt-oss-20b"
+  #   - "oci/google.gemini-2.5-flash"
   plan:
-    - "oci/openai.gpt-oss-120b"
-    - "oci/openai.gpt-oss-20b"
-    - "oci/google.gemini-2.5-flash"
-    
+    - "oci-dedicated/qwen3"
+    #- "oci-dedicated/gpt-oss-20b-2"
+    #- "oci/google.gemini-2.5-flash"
+
   # Judges the generated (question, code, result) triples.
   code:
-    - "oci/openai.gpt-oss-120b"
-    - "oci/openai.gpt-oss-20b"
-    - "oci/google.gemini-2.5-flash"
-    
+    - "oci-dedicated/qwen3"
+    #- "oci-dedicated/gpt-oss-20b-2"
+    #- "oci/google.gemini-2.5-flash"
+
 
 # Response model configuration
 response_model:
@@ -134,19 +230,11 @@ plan_judge:
   module: "utility.structured_outputs"
   class: "PlanJudgment"
 
-# Benchmark solver (orqa.agent.agents.BenchmarkSolver) — three single-shot
-# phases of the round-trip benchmark loop (orqa.benchmark.solve).
+# Search keywords (orqa.agent.agents.SearchKeywords) — the retrievability
+# gate's llm_keywords retriever (orqa.benchmark.retrieval_panel).
 benchmark_search_keywords:
   module: "utility.structured_outputs"
   class: "SearchKeywords"
-
-benchmark_table_selection:
-  module: "utility.structured_outputs"
-  class: "TableSelection"
-
-benchmark_solver_code:
-  module: "utility.structured_outputs"
-  class: "SolverCode"
 
 # Question stage (orqa.agent.agents.QuestionGenerator / QuestionStage): the
 # generator writes anchor-built questions BEFORE any plan exists; the judge

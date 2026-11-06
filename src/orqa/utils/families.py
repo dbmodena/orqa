@@ -14,7 +14,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Iterable, Optional
 
-from ..utils import dataset_id_to_resource_id
+from . import dataset_id_to_resource_id
 
 
 class FamilyIndex:

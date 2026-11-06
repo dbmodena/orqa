@@ -496,53 +496,6 @@ def _is_usable_column_label(col) -> bool:
     return str(col).strip() != ""
 
 
-def _strip_numeric_formatting(series: "pd.Series") -> "pd.Series":
-    """Strip thousands separators, '%' and '$' from a string series, as a
-    prelude to a numeric-parseability check — the exact cleaning
-    ``clean_columns`` used to auto-coerce object columns with, factored out
-    so every read-only "would this parse as a number" check in this module
-    (``_numeric_parse_ratio``, ``ColumnStatistics``'s ``minority_value_groups``)
-    agrees on what counts as numeric-in-disguise. Never applied to real data.
-    """
-    return (
-        series.astype(str)
-        .str.strip()
-        .str.replace(",", "", regex=False)
-        .str.rstrip("%")
-        .str.lstrip("$")
-    )
-
-
-def _numeric_parse_ratio(series: "pd.Series") -> Optional[float]:
-    """Fraction of ``series``'s non-null values that would parse as a number
-    after stripping thousands separators, '%' and '$' — kept here as a
-    READ-ONLY statistic (see ``ColumnStatistics.compute``) so the planner can
-    see which columns are numeric-in-disguise ("1,314", "34.10%", "$500")
-    and decide for itself whether to add a ``clean`` step casting them —
-    never applied automatically.
-
-    Returns ``None`` for an all-null series (no values to judge).
-    """
-    non_null = series.dropna()
-    if non_null.empty:
-        return None
-    parsed = pd.to_numeric(_strip_numeric_formatting(non_null), errors="coerce")
-    return float(parsed.notna().mean())
-
-
-def _generalize_value_shape(value) -> str:
-    """Collapse a value to a cheap structural signature by replacing every
-    run of digits with ``#`` — e.g. ``"<18"`` -> ``"<#"``, ``"90+"`` ->
-    ``"#+"``, ``"18-24"`` -> ``"#-#"``, ``"minor"`` -> ``"minor"`` (unchanged,
-    no digits). Used by ``ColumnStatistics.compute`` to GROUP an object
-    column's rare/tail values into a handful of buckets instead of listing
-    every distinct one — keeps ``minority_value_groups`` small regardless of
-    table size, without making any judgment about whether a bucket is noise
-    or signal (that call is left entirely to the query planner).
-    """
-    return re.sub(r"\d+", "#", str(value))
-
-
 # ---------------------------------------------------------------------------
 # Prompt-size shielding for oversized cell values.
 #
@@ -750,8 +703,13 @@ def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     prompt-size concern specific to the analysis view, never safe to apply
     at execution time (see ``QueryExecutor``).
     """
-    df = df.rename(columns={c: str(c) for c in df.columns if not isinstance(c, str)})
+    # Both steps only when they change something: on a 113M-row table each
+    # was a full copy of the frame (rename and column selection copy).
+    if any(not isinstance(c, str) for c in df.columns):
+        df = df.rename(columns={c: str(c) for c in df.columns if not isinstance(c, str)})
     valid_columns = [c for c in df.columns if _is_usable_column_label(c)]
+    if len(valid_columns) == len(df.columns):
+        return df
     return df[valid_columns]
 
 
@@ -780,15 +738,25 @@ def prepare_dataset(
     # of sample rows, but column statistics are computed over every row, and
     # generated code is executed against the full unfiltered table
     # (QueryExecutor.load_tables), so nothing is judged on a truncated slice.
-    if limit_to_n_rows is not None:
+    sliced = limit_to_n_rows is not None and limit_to_n_rows < len(df)
+    if sliced:
         df = df.head(limit_to_n_rows)
 
     df = clean_columns(df)
 
     selected_cols = select_columns(df.columns.tolist(), limit_to_n_columns, involved_cols)
-    df = df[selected_cols].copy()
+    # A copy only when the frame is a slice of the loaded one: the frame
+    # just read is already owned here (the copy cost a second full frame on
+    # the largest tables).
+    if sliced or selected_cols != df.columns.tolist():
+        df = df[selected_cols].copy()
 
-    dataset_info, column_typings = extract_dataset_info(df, sample_size=sample_size, seed=seed)
+    # No per-column null / distinct counts: the statement-generation prompts
+    # take them from the Column Statistics block (the nunique pass alone took
+    # 45 s on a 113M-row table and nothing read it).
+    dataset_info, column_typings = extract_dataset_info(
+        df, sample_size=sample_size, seed=seed, column_details=False
+    )
     dataset_info["dataset_name"] = dataset_path.stem
     dataset_info["id"] = dataset_path.stem
 
@@ -798,20 +766,24 @@ def extract_dataset_info(
     df: pd.DataFrame,
     sample_size: int = 5,
     seed: int = 0,
+    column_details: bool = True,
 ) -> tuple[dict, dict]:
     """
     Extract dataset info from an already-filtered pandas DataFrame.
     Returns a dict ready to be unpacked as kwargs for load_prompt, and column typings.
+    With ``column_details=False`` the ``columns_details`` entry (a full
+    null and distinct count per column) is left out.
     """
     # Build detailed column information string
     column_typings = {}
     coldetails = ""
     for col in df.columns:
-        null_count = df[col].isna().sum()
-        n_unique = df[col].nunique()
-        dtype = df[col].dtype
-        coldetails += f"\n- {col} {dtype}: {null_count} nulls, {n_unique} unique values."
         column_typings[col] = pd.api.types.is_numeric_dtype(df[col])
+        if column_details:
+            null_count = df[col].isna().sum()
+            n_unique = df[col].nunique()
+            dtype = df[col].dtype
+            coldetails += f"\n- {col} {dtype}: {null_count} nulls, {n_unique} unique values."
 
     sample = df.sample(min(sample_size, len(df)), random_state=seed)
     sample_md = shield_dataframe_for_prompt(sample).to_markdown(index=False)
@@ -821,10 +793,11 @@ def extract_dataset_info(
         "dataset_name": "dataframe",
         "num_rows": len(df),
         "num_columns": len(df.columns),
-        "columns_details": coldetails,
         "sample_data": sample_md,
         "columns": df.columns.tolist(),
     }
+    if column_details:
+        info["columns_details"] = coldetails
 
     return info, column_typings
 #def remove_bad_tokens(df,bad_tokens):

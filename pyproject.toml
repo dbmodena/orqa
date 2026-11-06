@@ -15,7 +15,6 @@ dependencies = [
     "inflection>=0.5.1",
     "jsonlines>=4.0.0",
     "litellm>=1.80.10",
-    "mcp>=1.2",
     "elasticsearch>=8,<9",
     "matplotlib>=3.10.8",
     "networkx>=3.6.1",

@@ -3,7 +3,6 @@ from conf import OrQAConfig
 
 import argparse
 import importlib
-#import logging
 import os
 import sys
 import yaml
@@ -23,7 +22,6 @@ STEP_CHOICES = (
     "embed-search-metadata",
     "generate-query-candidates",
     "generate-statements",
-    "solve-benchmark",
 )
 
 
@@ -264,16 +262,16 @@ def _step_callable_path(step: str, spec: TargetSpec, cfg) -> str:
         return cleaning_functions[spec.backend]
 
     # The workflow yaml (tasks.candidates_discovery.method) decides which
-    # discovery pipeline runs and which artifact lineage all steps use.
-    discovery_method = cfg.candidates_discovery.method
-    if step == "index" and discovery_method != "blend":
+    # discovery pipeline runs; only `index` and `candidates-discovery`
+    # depend on it, so only they read it.
+    if step == "index" and cfg.candidates_discovery.method != "blend":
         raise ValueError(
             "The 'index' step builds the BLEND index, but this workflow "
             "sets tasks.candidates_discovery.method: semantic. Set the "
             "method to 'blend' to use the classical pipeline."
         )
     if step == "candidates-discovery":
-        if discovery_method == "semantic":
+        if cfg.candidates_discovery.method == "semantic":
             # embeddings + HNSW + Valentine
             return "orqa.embedding_discovery.pipeline:candidates_discovery"
         # BLEND index + SLOTH/Valentine verification
@@ -285,7 +283,6 @@ def _step_callable_path(step: str, spec: TargetSpec, cfg) -> str:
         "embed-search-metadata": "orqa.embedding_discovery.pipeline:embed_search_metadata",
         "generate-query-candidates": "orqa.query_candidates:generate_query_candidates",
         "generate-statements": "orqa.statement_generation:generate_statements",
-        "solve-benchmark": "orqa.benchmark.solve:solve_benchmark",
     }
     return step_paths[step]
 
@@ -297,8 +294,6 @@ def run_steps(cfg, spec: TargetSpec, steps: Sequence[str]) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    #logging.basicConfig(level=logging.INFO, format="%(message)s")
-
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -307,22 +302,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    out = sys.stdout
-
     try:
-        cfg = load_cfg(spec, out=out)
-
-        print(f" LOADED PATHS ".center(100, "="), file=out)
-        print(f"Discovery method: {cfg.candidates_discovery.method}", file=out)
-        print(f"Root data directory: {cfg.data_path}", file=out)
-        print(f"Prompts folder: {cfg.prompts_path}", file=out)
-        print(f"LLM configurations folder: {cfg.llm_config_path}", file=out)
-        print(f"Crawled datasets folder: {cfg.crawled_datasets_path}", file=out)
-        print(f"Processed datasets folder: {cfg.datasets_path}", file=out)
-
-        run_steps(cfg, spec, args.steps)
+        cfg = load_cfg(spec, out=sys.stdout)
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         parser.exit(status=1, message=f"{exc}\n")
+
+    from orqa.utils.run_log import run_log
+
+    # The run log (workflow yaml `logging`): from here on, what the run prints
+    # and logs is also appended to <write_path>/log/orqa.log, rotated.
+    with run_log(getattr(cfg, "run_log", None), argv=sys.argv[1:] if argv is None else argv) as log:
+        # sys.stdout is read here, not before: the run log copies it.
+        out = sys.stdout
+        try:
+            print(f" LOADED PATHS ".center(100, "="), file=out)
+            print(f"Discovery method: {cfg.candidates_discovery.method}", file=out)
+            print(f"Root data directory: {cfg.data_path}", file=out)
+            print(f"Prompts folder: {cfg.prompts_path}", file=out)
+            print(f"LLM configurations folder: {cfg.llm_config_path}", file=out)
+            print(f"Crawled datasets folder: {cfg.crawled_datasets_path}", file=out)
+            print(f"Processed datasets folder: {cfg.datasets_path}", file=out)
+            if log is not None:
+                print(f"Run log: {log.path}", file=out)
+
+            run_steps(cfg, spec, args.steps)
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            parser.exit(status=1, message=f"{exc}\n")
 
     return 0
 

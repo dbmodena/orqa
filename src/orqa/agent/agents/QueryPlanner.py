@@ -39,6 +39,7 @@ from typing import Any, Iterable, List, Optional, Sequence, Union, get_args
 from pydantic import BaseModel, ValidationError
 
 from ..llm_client.LLMClientStructured import LLMClientStructured
+from ..utility.structured_coercion import coerce_to_model, errors_brief, unwrap_top, validate_leniently
 from ..prompting.models import (
     _DIFFICULTY_LEVELS,
     _RESULT_TYPES,
@@ -50,11 +51,12 @@ from ..prompting.models import (
     SQLQueryPlanSet,
     TableStats,
 )
-from ..prompting.prompts import QueryPlannerPrompt
+from ..prompting.prompts import QueryPlannerPrompt, render_column_statistics
 from ..utility.column_provenance import compose_feedback, resolve_plan_columns
 from ..utility.structured_outputs import QueryLink, Table
+from ..utility.undecodable_names import escaped_literal, resolve_plan_names
 from ...utils import shield_dataframe_for_prompt
-from .table_analyzer import render_table_facts
+from .table_analyzer import render_table_facts, render_table_identities, table_identities
 
 logger = logging.getLogger(__name__)
 
@@ -135,17 +137,24 @@ def _question_copies_column_header(question: str, headers: Iterable[str]) -> Opt
 QueryPlan = Union[SQLQueryPlan, PandasQueryPlan]
 PlanStep = Union[SQLPlanStep, PandasPlanStep]
 
-# Neither request path below set max_tokens at all before this — relying on
-# whatever OCI's own server-side default happens to be for reasoning models
-# (openai.gpt-oss-*, google.gemini-2.5-flash) that burn hidden thinking
-# tokens out of the same budget as the visible response (see the judges'
-# own JUDGE_MAX_TOKENS in agent.py, raised after a real starvation incident
-# there). A live instrumented run never observed truncation with no cap set
-# (usage up to ~4900 tokens, always finish_reason="stop") — so this isn't a
-# fix for an observed failure, just closing the same unmanaged-parameter gap
-# the judges already had closed: an explicit, generous, inspectable ceiling
-# instead of an opaque provider default with no lever to raise it.
-GENERATION_MAX_TOKENS = 8000
+# Output budget of a planner call. A reasoning model's hidden thinking counts
+# against max_tokens and OCI reports finish_reason "stop" even when the budget
+# ran out, so a tight cap shows up as "Pydantic errors" (an empty answer, or a
+# plan whose tail fields are missing). Measured (experiments/structured_stability,
+# 2026-11-03): planner batches for 4-table groups hit the former 8000 cap 2 of 3
+# times, single-plan corrections ran to 16660 tokens on a 6-table group. 65536
+# leaves room for every payload seen; the client escalates further on a cut.
+GENERATION_MAX_TOKENS = 65536
+
+# How many times a structurally invalid plan is re-requested (with the
+# validator's feedback and the model's own failed plan) before the free-text
+# fallback — and the same for a judge-driven revision before the previous
+# plan version is kept. In the experiment every one of 10 structural
+# rejections across four groups was recovered within 4 re-requests
+# (recoveries on the 1st, 2nd, 3rd and 4th all occurred); the former single
+# re-request shipped free-text plans the judges then rejected.
+STRUCTURAL_RETRIES = 4
+REVISE_RETRIES = 3
 
 
 class PlanValidationError(ValueError):
@@ -173,6 +182,11 @@ class QueryPlannerClient(LLMClientStructured):
         self.kind = kind
         self.response_model = SQLQueryPlan if kind == "SQL" else PandasQueryPlan
 
+    # Plans are long: under the provider's constrained decoding two of three
+    # probe calls fell into a repeated-sentence loop that ran to the token
+    # cap, while prompt-only outputs never did — native schema stays off.
+    native_schema = False
+
     def request_plan(self, prompt: str, **kwargs) -> tuple[dict, dict]:
         """Return ``(plan_dict, usage)``; ``plan_dict`` is ``{}`` on failure."""
         return self.complete(prompt, root_key=None, **kwargs)
@@ -192,6 +206,12 @@ class QueryPlanBatchClient(LLMClientStructured):
         super().__init__(config_path, response_model="query_planner")
         self.kind = kind
         self.response_model = SQLQueryPlanSet if kind == "SQL" else PandasQueryPlanSet
+
+    native_schema = False
+    # A batch with one unreadable plan is handed on as raw plans: the planner
+    # validates each plan on its own and re-requests only the broken one,
+    # instead of the whole batch failing on it.
+    passthrough_items = True
 
     def request_plan_batch(self, prompt: str, **kwargs) -> tuple[dict, dict]:
         """Return ``(plan_set_dict, usage)``; ``plan_set_dict`` is ``{}`` on failure."""
@@ -252,8 +272,9 @@ class QueryPlanner:
         Each returned plan preserves the mandatory ``table_links`` from the
         upstream ``match``/``involved_cols`` constraints (never altered), and
         each plan is independently validated: a plan that fails validation is
-        re-requested once on its own (not the whole batch), then falls back to
-        a schema-valid free-text plan if the retry also fails.
+        re-requested on its own (not the whole batch), up to
+        ``STRUCTURAL_RETRIES`` times, then falls back to a schema-valid
+        free-text plan if every re-request also fails.
 
         Args:
             analyses: Per-table analysis dicts (one per alias).
@@ -302,7 +323,10 @@ class QueryPlanner:
             fixed_questions=fixed,
         )
         raw_set, _usage = self._request_plan_batch(prompt)
-        raw_plans = self._extract_raw_plans(raw_set)
+        # Undo a wrapper the schema does not have ({"result": {"plans": ...}},
+        # a bare list, a single flat plan) before reading the plans out.
+        raw_set = unwrap_top(raw_set, self._set_model)
+        raw_plans = self._extract_raw_plans(raw_set if isinstance(raw_set, dict) else {})
 
         if len(raw_plans) != len(fixed):
             logger.warning(
@@ -427,9 +451,11 @@ class QueryPlanner:
         Used by the plan judge panel's correction loop: when the panel rejects
         a plan, its aggregated feedback/suggestions are handed back here so
         the planner can rewrite the steps. The revised plan goes through the
-        same structural validation as any other plan, with one
-        validation-error retry; the mandatory ``table_links`` constraints are
-        preserved unchanged, exactly as in :meth:`plan_batch`.
+        same structural validation as any other plan; a revision the validator
+        rejects is re-requested up to ``REVISE_RETRIES`` times, each time with
+        the validator's feedback and the rejected revision; the mandatory
+        ``table_links`` constraints are preserved unchanged, exactly as in
+        :meth:`plan_batch`.
 
         Returns:
             ``(revised_plan, usage_total)`` — ``revised_plan`` is ``None``
@@ -476,42 +502,43 @@ class QueryPlanner:
             for key in usage_total:
                 usage_total[key] += (usage or {}).get(key, 0)
 
-        raw_plan, usage = self._request_plan(correction_prompt)
-        _accumulate(usage)
-        candidate = self._assemble_plan(raw_plan, constraint_links)
         # The question, its keywords and its difficulty are fixed for a
         # correction round. Force-override whatever the model returned,
-        # mirroring how table_links is already force-preserved above (see
+        # mirroring how table_links is already force-preserved (see
         # _assemble_plan's docstring).
-        candidate = candidate.model_copy(update=self._revision_pins(plan))
-        try:
-            validated = self.validate_plan(candidate, aliases, known_columns)
-            validated = self._pin_table_descriptions(validated, analyses)
-            return validated, usage_total
-        except PlanValidationError as exc:
-            first_error = str(exc)
-            logger.warning(
-                "Revised plan failed structural validation (%s); "
-                "re-requesting once.", first_error,
-            )
-
-        retry_prompt = self._retry_prompt(correction_prompt, first_error)
-        raw_retry, usage_retry = self._request_plan(retry_prompt)
-        _accumulate(usage_retry)
-        retry_candidate = self._assemble_plan(raw_retry, constraint_links)
-        retry_candidate = retry_candidate.model_copy(
-            update=self._revision_pins(plan)
+        pins = self._revision_pins(plan)
+        prompt = correction_prompt
+        for attempt in range(0, REVISE_RETRIES + 1):
+            raw_plan, usage = self._request_plan(prompt)
+            _accumulate(usage)
+            raw_plan = self._resolve_undecodable_names(self._coerce_raw_plan(raw_plan), known_columns)
+            candidate = self._assemble_plan(raw_plan, constraint_links).model_copy(update=pins)
+            try:
+                validated = self._validate_candidate(candidate, raw_plan, aliases, known_columns)
+                validated = self._pin_table_descriptions(validated, analyses)
+                if attempt:
+                    logger.info("Revised plan passed structural validation on re-request %d/%d.",
+                                attempt, REVISE_RETRIES)
+                return validated, usage_total
+            except PlanValidationError as exc:
+                error = str(exc)
+                if attempt == REVISE_RETRIES:
+                    break
+                logger.warning(
+                    "Revised plan failed structural validation (%s); re-requesting (%d/%d).",
+                    error, attempt + 1, REVISE_RETRIES,
+                )
+                prompt = self._retry_prompt(
+                    f"{correction_prompt}\n\n"
+                    f"### YOUR PREVIOUS REVISION (attempt {attempt + 1}, rejected by the structural validator)\n"
+                    f"{json.dumps(raw_plan, indent=2, ensure_ascii=False, default=str)}",
+                    error,
+                )
+        logger.warning(
+            "Revised plan still structurally invalid after %d re-request(s) (%s); "
+            "keeping the previous plan version.", REVISE_RETRIES, error,
         )
-        try:
-            validated_retry = self.validate_plan(retry_candidate, aliases, known_columns)
-            validated_retry = self._pin_table_descriptions(validated_retry, analyses)
-            return validated_retry, usage_total
-        except PlanValidationError as exc_retry:
-            logger.warning(
-                "Revised plan re-request also failed structural validation "
-                "(%s); keeping the previous plan version.", exc_retry,
-            )
-            return None, usage_total
+        return None, usage_total
 
     def _validate_or_retry_one(
         self,
@@ -525,21 +552,29 @@ class QueryPlanner:
         """Validate a single raw plan from a batch, re-requesting just that one.
 
         ``fixed_question`` (see ``plan_batch``'s ``questions``): re-pinned onto
-        the retry's raw plan too, since a re-request is a fresh model output.
+        every re-request's raw plan too, since a re-request is a fresh model
+        output.
 
-        Retries once, then falls back to a free-text plan, scoped to a single
-        plan within the batch so one bad plan never forces a re-request (and
-        re-validation) of the whole set.
+        Re-requests up to ``STRUCTURAL_RETRIES`` times — each time showing the
+        model its LATEST failed plan and the validator's feedback — then falls
+        back to a free-text plan, scoped to a single plan within the batch so
+        one bad plan never forces a re-request (and re-validation) of the
+        whole set.
         """
+        raw_plan = self._resolve_undecodable_names(self._coerce_raw_plan(raw_plan), known_columns)
+        if fixed_question is not None:
+            # pinned again AFTER coercion: a misspelt duplicate key the
+            # coercion renames must never overwrite the frozen question
+            raw_plan = self._pin_question(raw_plan, fixed_question)
         candidate = self._assemble_plan(raw_plan, constraint_links)
         try:
-            return self.validate_plan(candidate, aliases, known_columns)
+            return self._validate_candidate(candidate, raw_plan, aliases, known_columns)
         except PlanValidationError as exc:
-            first_error = str(exc)
+            error = str(exc)
             logger.warning(
                 "Structured plan validation failed in batch (%s); "
-                "re-requesting this plan once.\n  raw plan: %s",
-                first_error,
+                "re-requesting this plan up to %d time(s).\n  raw plan: %s",
+                error, STRUCTURAL_RETRIES,
                 json.dumps(raw_plan, ensure_ascii=False, default=str),
             )
 
@@ -553,33 +588,141 @@ class QueryPlanner:
         # which fails schema validation with "field required" for every
         # top-level field (question, steps, ...) since none of them are at
         # the top level of that wrapped response.
-        retry_prompt = self._retry_prompt(
-            f"{base_prompt}\n\n"
-            "### SINGLE-PLAN CORRECTION OVERRIDE\n"
-            "Disregard the multi-plan instructions above for this request — "
-            "you are correcting exactly ONE plan, shown below. Return a "
-            "SINGLE flat JSON object matching the plan schema directly "
-            "(`question`, `steps`, `table_links`, ...) at the top level. Do "
-            "NOT wrap it in a `plans` list or any other key, and do not "
-            "return a bare list.\n\n"
-            "### PLAN TO CORRECT\n"
-            f"{json.dumps(raw_plan, indent=2, ensure_ascii=False, default=str)}",
-            first_error,
-        )
-        raw_retry, _usage = self._request_plan(retry_prompt)
-        if fixed_question is not None:
-            raw_retry = self._pin_question(raw_retry, fixed_question)
-        retry_candidate = self._assemble_plan(raw_retry, constraint_links)
-        try:
-            return self.validate_plan(retry_candidate, aliases, known_columns)
-        except PlanValidationError as exc_retry:
-            logger.warning(
-                "Structured plan re-request also failed in batch (%s); "
-                "falling back to a free-text plan for this entry.\n  raw plan: %s",
-                exc_retry,
-                json.dumps(raw_retry, ensure_ascii=False, default=str),
+        current_raw = raw_plan
+        for attempt in range(1, STRUCTURAL_RETRIES + 1):
+            retry_prompt = self._retry_prompt(
+                f"{base_prompt}\n\n"
+                "### SINGLE-PLAN CORRECTION OVERRIDE\n"
+                "Disregard the multi-plan instructions above for this request — "
+                "you are correcting exactly ONE plan, shown below. Return a "
+                "SINGLE flat JSON object matching the plan schema directly "
+                "(`question`, `steps`, `table_links`, ...) at the top level. Do "
+                "NOT wrap it in a `plans` list or any other key, and do not "
+                "return a bare list.\n\n"
+                f"### PLAN TO CORRECT (your previous answer, attempt {attempt} of {STRUCTURAL_RETRIES})\n"
+                f"{json.dumps(current_raw, indent=2, ensure_ascii=False, default=str)}",
+                error,
             )
-            return self._free_text_fallback(retry_candidate, aliases, constraint_links)
+            raw_retry, _usage = self._request_plan(retry_prompt)
+            raw_retry = self._resolve_undecodable_names(self._coerce_raw_plan(raw_retry), known_columns)
+            if fixed_question is not None:
+                raw_retry = self._pin_question(raw_retry, fixed_question)
+            candidate = self._assemble_plan(raw_retry, constraint_links)
+            try:
+                plan = self._validate_candidate(candidate, raw_retry, aliases, known_columns)
+                logger.info("Structured plan re-request %d/%d passed validation.", attempt, STRUCTURAL_RETRIES)
+                return plan
+            except PlanValidationError as exc_retry:
+                error = str(exc_retry)
+                current_raw = raw_retry
+                logger.warning(
+                    "Structured plan re-request %d/%d failed in batch (%s).\n  raw plan: %s",
+                    attempt, STRUCTURAL_RETRIES, error,
+                    json.dumps(raw_retry, ensure_ascii=False, default=str),
+                )
+        logger.warning(
+            "Structured plan still invalid after %d re-request(s); falling back "
+            "to a free-text plan for this entry.", STRUCTURAL_RETRIES,
+        )
+        return self._free_text_fallback(candidate, aliases, constraint_links)
+
+    # ------------------------------------------------------------------
+    # Shape coercion before assembly
+    # ------------------------------------------------------------------
+
+    @property
+    def _plan_model(self):
+        return PandasQueryPlan if self._is_pandas else SQLQueryPlan
+
+    @property
+    def _step_model(self):
+        return PandasPlanStep if self._is_pandas else SQLPlanStep
+
+    @property
+    def _set_model(self):
+        return PandasQueryPlanSet if self._is_pandas else SQLQueryPlanSet
+
+    def _coerce_raw_plan(self, raw_plan: Any) -> dict:
+        """Shape coercion of a raw plan before assembly — keys, a list given as
+        one string, an ``op`` synonym such as ``groupby``, a wrapped answer —
+        so that ``_assemble_plan`` reads what the model meant instead of
+        silently dropping a step or a table entry (content is never
+        invented; see ``orqa.agent.utility.structured_coercion``). Each step
+        is validated leniently on its own, so a readable step reaches
+        ``_coerce_steps`` already in strict shape."""
+        log: list[str] = []
+        source = dict(raw_plan) if isinstance(raw_plan, dict) else raw_plan
+        coerced = coerce_to_model(source, self._plan_model, log=log)
+        if not isinstance(coerced, dict):
+            return {}
+        steps = coerced.get("steps")
+        if isinstance(steps, list):
+            fixed_steps: list = []
+            for idx, step in enumerate(steps, start=1):
+                if isinstance(step, dict):
+                    step = dict(step)
+                    step.setdefault("order", idx)
+                    inst, _, step_log, _ = validate_leniently(step, self._step_model)
+                    if inst is not None:
+                        step = inst.model_dump()
+                        log.extend(step_log)
+                fixed_steps.append(step)
+            coerced["steps"] = fixed_steps
+        if log:
+            logger.info("Plan shape coerced before assembly: %s", "; ".join(log[:12]))
+        return coerced
+
+    @staticmethod
+    def _resolve_undecodable_names(raw_plan: dict, known_columns: dict) -> dict:
+        """Resolve a column name written for a header holding U+FFFD.
+
+        Some UK headers hold U+FFFD where the source file's "£" could not be
+        decoded ("Total \\ufffd"). The model writes "Total £", and re-requests
+        with "did you mean: Total �" do not change that. A plan's column names
+        are labels, not code, so a written name that names no real column but
+        matches exactly one damaged header is replaced by it here, before
+        validation. Nothing is guessed: no unique match, no change (see
+        :mod:`orqa.agent.utility.undecodable_names`).
+        """
+        plan, changes = resolve_plan_names(raw_plan, known_columns)
+        if changes:
+            logger.info(
+                "Plan column name(s) resolved to headers holding U+FFFD: %s",
+                ", ".join(f"{w!r} -> {escaped_literal(r)}" for w, r in changes),
+            )
+        return plan
+
+    def _unreadable_steps(self, raw_plan: dict) -> list[str]:
+        """The steps ``_coerce_steps`` would drop, each named with its errors —
+        a dropped step is an operation nobody asked to remove, so it is a
+        structural rejection (re-requested), never a silent edit."""
+        errors: list[str] = []
+        steps = (raw_plan or {}).get("steps")
+        if not isinstance(steps, list):
+            return errors
+        for idx, step in enumerate(steps, start=1):
+            if not isinstance(step, dict):
+                errors.append(f"step {idx}: not an object")
+                continue
+            step = dict(step)
+            step.setdefault("order", idx)
+            inst, _, _, remaining = validate_leniently(step, self._step_model)
+            if inst is None:
+                errors.append(f"step {idx} ({step.get('op')!r}): " + "; ".join(errors_brief(remaining)[:4]))
+        return errors
+
+    def _validate_candidate(
+        self, candidate: QueryPlan, raw_plan: dict, aliases: dict, known_columns: dict
+    ) -> QueryPlan:
+        """``validate_plan`` plus the readability of every raw step."""
+        unreadable = self._unreadable_steps(raw_plan)
+        if unreadable:
+            raise PlanValidationError(
+                "some steps could not be read and would be dropped: " + " | ".join(unreadable)
+                + "\n→ every step needs `op` (exactly one of the listed values), `description`, "
+                "`tables` (a list of aliases) and `columns` (a list of column names)."
+            )
+        return self.validate_plan(candidate, aliases, known_columns)
 
     @staticmethod
     def _extract_raw_plans(raw_set: dict) -> List[dict]:
@@ -932,7 +1075,7 @@ class QueryPlanner:
     ) -> QueryPlan:
         """Build a schema-valid free-text fallback plan (Requirement 5.6).
 
-        When both the initial request and the single re-request fail validation,
+        When the initial request and every re-request fail validation,
         produce a plan that still satisfies the schema and preserves the
         mandatory ``table_links``: a single free-text ``select`` step over the
         available tables with no specific column references (so it can never
@@ -941,8 +1084,8 @@ class QueryPlanner:
         alias_list = list(aliases.keys()) if aliases else []
         description = (
             "Free-text fallback: the structured plan failed validation after "
-            "one re-request. Answer the question directly over the available "
-            "tables without a validated step decomposition."
+            f"{STRUCTURAL_RETRIES} re-requests. Answer the question directly over the "
+            "available tables without a validated step decomposition."
         )
         # Every alias still needs a `tables` entry — validate_plan's coverage
         # check is the invariant the rest of the pipeline relies on (a query's
@@ -957,7 +1100,7 @@ class QueryPlanner:
                 name=alias,
                 reason=(
                     f"{alias} is one of the tables this question requires; the "
-                    "structured plan failed schema validation twice, so its "
+                    "structured plan failed schema validation repeatedly, so its "
                     "specific role was never decomposed into steps. This "
                     "free-text fallback answers the question directly over "
                     "all provided tables without a per-table breakdown."
@@ -1175,7 +1318,7 @@ class QueryPlanner:
                 {"tables": list(analyses)}, indent=2, ensure_ascii=False, default=str
             ),
             table_sample=self._render_table_sample(dfs, aliases),
-            column_statistics=self._render_statistics(stats),
+            column_statistics=render_column_statistics(stats),
             detected_languages=json.dumps(list(languages), ensure_ascii=False),
             table_metadata=self._render_table_metadata(table_metadata, aliases),
         )
@@ -1190,6 +1333,7 @@ class QueryPlanner:
         languages: Optional[Sequence[str]] = None,
         dfs: Optional[Sequence[Any]] = None,
         table_metadata: Optional[dict] = None,
+        identities: Optional[Sequence[dict]] = None,
     ) -> dict:
         """Prompt blocks for the question generator (see
         ``orqa.agent.agents.QuestionGenerator``), rendered with this planner's
@@ -1209,12 +1353,18 @@ class QueryPlanner:
             f"{alias}\n{render_table_facts(df)}"
             for alias, df in zip(aliases, dfs or [])
         ) or "(not available)"
+        if identities is None:
+            identities = table_identities(list(aliases), list(dfs or []), table_metadata)
         tables_block = "\n".join([
             "### TABLE ALIASES",
             json.dumps(list(aliases.keys()), indent=2, ensure_ascii=False),
             "",
             "### TABLE-LEVEL ANALYSIS",
             json.dumps({"tables": list(analyses)}, indent=2, ensure_ascii=False, default=str),
+            "",
+            "### TABLE IDENTITY (what tells each table apart: the dated span of its rows, its file name and publisher, "
+            "the words only its title/file name has — name every table's period in the question from HERE)",
+            render_table_identities(identities),
             "",
             "### TABLE METADATA (from the open-data portal)",
             self._render_table_metadata(table_metadata, aliases),
@@ -1320,43 +1470,6 @@ class QueryPlanner:
             payload.append(entry)
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
-    @staticmethod
-    def _render_statistics(stats: Sequence[TableStats]) -> str:
-        if not stats:
-            return "(no column statistics available)"
-        payload = []
-        for table in stats:
-            payload.append(
-                {
-                    "alias": table.alias,
-                    "num_rows": table.num_rows,
-                    "columns": [
-                        {
-                            "column": c.column,
-                            "dtype": c.dtype,
-                            "cardinality": c.cardinality,
-                            "null_ratio": round(c.null_ratio, 4),
-                            "nan_count": c.nan_count,
-                            "bad_token_counts": c.bad_token_counts,
-                            "numeric_parseable_ratio": (
-                                round(c.numeric_parseable_ratio, 4)
-                                if c.numeric_parseable_ratio is not None
-                                else None
-                            ),
-                            "numeric_min": c.numeric_min,
-                            "numeric_max": c.numeric_max,
-                            "numeric_mean": c.numeric_mean,
-                            "numeric_outliers": c.numeric_outliers,
-                            "numeric_pinned_extreme": c.numeric_pinned_extreme,
-                            "top_values": c.top_values,
-                            "minority_value_groups": c.minority_value_groups,
-                        }
-                        for c in table.columns
-                    ],
-                }
-            )
-        return json.dumps(payload, indent=2, ensure_ascii=False, default=str)
-
     # ------------------------------------------------------------------
     # Client + assembly
     # ------------------------------------------------------------------
@@ -1383,7 +1496,7 @@ class QueryPlanner:
         model's own ``table_links`` output is discarded so the upstream
         relationships are preserved unchanged (Requirement 6.2).
         """
-        raw_plan = raw_plan or {}
+        raw_plan = self._coerce_raw_plan(raw_plan or {})
         metadata = self._extract_metadata_fields(raw_plan)
 
         tables = self._coerce_tables(raw_plan.get("tables", []))

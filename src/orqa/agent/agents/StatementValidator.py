@@ -46,16 +46,13 @@ Tier 2 — prompt errors  (`errors_by_id` local to each cycle):
   forward.  When `pending` is overwritten with corrected queries, all
   association with the old evicted queries and their errors is gone.
 """
-import json
 import logging
-import time
+from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from pydantic import ValidationError
 
 from ..utility.alias_substitution import AliasSubstitution
-from ..utility.message_builder import sanitize_messages
 from ..utility.error_formatter import ErrorFormatter
 from .StatementClient import GENERATION_MAX_TOKENS, LLMClientStructured
 from ..prompting import PandasValidatorCorrectionPrompt, SQLValidatorCorrectionPrompt
@@ -71,7 +68,20 @@ CORRECTION_CONCURRENCY = 6
 
 class LLMStatementValidator(LLMClientStructured):
 
-    MAX_VALIDATION_RETRIES: int = 3
+    # Static-validation cycles (validate -> LLM correction -> validate) before
+    # a still-failing query is dropped. Measured on the code stage
+    # (experiments/structured_stability, 2026-11-03): on a 22-step plan the
+    # query passed static validation on the 4th and the 5th cycle in two
+    # runs — beyond the former 3, which dropped both queries of that group
+    # in one run.
+    MAX_VALIDATION_RETRIES: int = 5
+
+    # The correction prompt already carries the schema (``pydantic_constraint``
+    # in the user message), so the system message does not repeat it; code is
+    # a long output, so native JSON-schema decoding stays off (see
+    # StatementClient).
+    schema_in_prompt = False
+    native_schema = False
 
     def __init__(self, config_path: Path, kind: str):
         super().__init__(config_path, "querying")
@@ -94,9 +104,17 @@ class LLMStatementValidator(LLMClientStructured):
         aliases: dict,
         table_schemas: str,
         judge_feedback: list | None = None,
+        *,
+        column_statistics: str,
     ) -> tuple[list, dict, list]:
         """
         Validate and correct *queries*, retrying up to MAX_VALIDATION_RETRIES times.
+
+        ``column_statistics`` is the run's column-statistics block, rendered
+        once by the caller: every correction prompt carries it byte-identical
+        (a shared cacheable prefix), and it is what tells the corrector how a
+        value that broke a cast or a filter is actually stored. Required, so
+        the empty-block wording lives only in render_column_statistics.
 
         Returns:
             (approved_queries, token_usage, error_strings)
@@ -168,7 +186,7 @@ class LLMStatementValidator(LLMClientStructured):
                         error or "(no judge feedback available)"
                     )
                     prompts.append(self._build_one_correction_prompt(
-                        q, error_text, "Judge Feedback", table_schemas,
+                        q, error_text, "Judge Feedback", table_schemas, column_statistics,
                     ))
 
                 corrected, tokens, errors = self._correct_queries_concurrently(
@@ -235,6 +253,7 @@ class LLMStatementValidator(LLMClientStructured):
                     errors_by_id.get(str(q.get("id")), "(no error)"),
                     "Static validation error",
                     table_schemas,
+                    column_statistics,
                 )
                 for q in failing
             ]
@@ -339,127 +358,68 @@ class LLMStatementValidator(LLMClientStructured):
         return the corrected query — or the original, unchanged, if every
         retry fails.
 
-        On Pydantic/JSON parse failure: retry following the parent pattern
-        (append [assistant, user(error_message)] to the message list).
+        The call is the shared budget-aware structured loop
+        (``LLMClientStructured.complete``: explicit budget with escalation on
+        a cut answer, shape coercion, one repair call, the repetition guard).
+        ``user_content`` already carries the schema via ``pydantic_constraint``,
+        so the system message is the bare preamble (``schema_in_prompt``).
 
         Returns:
             (corrected_query, usage_dict, error_strings)
         """
-        system_content = "You are a helpful assistant."
 
-        # Stateless base — rebuilt fresh for every correction call AND for
-        # every retry within it (see the parse-error branch below), so the
-        # message array is always exactly [system, user]. `user_content`
-        # already carries the schema via `pydantic_constraint`, so a retry
-        # never needs to restate it.
-        def build_messages(user: str) -> list[dict]:
-            return [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": user},
-            ]
+        def backfill(json_data: Any) -> Any:
+            # The merge below only consumes `code` and the question bundle;
+            # every other schema-required field (difficulty, tables, ...) is
+            # discarded in favour of the source query anyway. Backfill
+            # missing fields from the source BEFORE validation so a lean
+            # correction (just the fixed code) never fails the full QuerySet
+            # schema over a field nobody reads — demanding the model
+            # regenerate unchanged fields is pure retry overhead.
+            items = json_data.get("queries") if isinstance(json_data, dict) else None
+            if items and isinstance(items[0], dict):
+                for field, value in source_query.items():
+                    if field not in ("id", "client_id"):
+                        items[0].setdefault(field, value)
+            return json_data
 
-        messages = build_messages(user_content)
-
-        usage = _empty_usage()
-        errors: list[str] = []
-        last_content = ""
-
-        for attempt in range(self.max_retries):
-            try:
-                response = self.router.completion(
-                    model=self.config["model"],
-                    messages=sanitize_messages(messages),
-                    max_tokens=GENERATION_MAX_TOKENS,
-                    **self._default_temperature_kwargs(self.config["model"]),
-                )
-                _accumulate_usage(usage, response["usage"])
-
-                content = response["choices"][0]["message"]["content"]
-                if content is None or not str(content).strip():
-                    raise ValueError("LLM returned empty content during correction.")
-                last_content = content
-
-                cleaned   = self._clean_json_response(content)
-                json_data = self._repair_json(cleaned)
-                json_data = self._normalize_response(json_data)
-                # The merge below only consumes `code` and the question bundle;
-                # every other schema-required field (difficulty, tables, ...)
-                # is discarded in favour of the source query anyway. Backfill
-                # missing fields from the source BEFORE validation so a lean
-                # correction (just the fixed code) never fails the full
-                # QuerySet schema over a field nobody reads — demanding the
-                # model regenerate unchanged fields is pure retry overhead.
-                corrected_raw = (
-                    json_data.get("queries") if isinstance(json_data, dict) else None
-                )
-                if corrected_raw and isinstance(corrected_raw[0], dict):
-                    for field, value in source_query.items():
-                        if field not in ("id", "client_id"):
-                            corrected_raw[0].setdefault(field, value)
-                validated = self.response_model.model_validate(json_data)
-                corrected_list = validated.model_dump().get("queries", [])
-                corrected_item = corrected_list[0] if corrected_list else {}
-
-                merged = dict(source_query)
-                merged["code"] = corrected_item.get("code", source_query.get("code", ""))
-                # `question`, `question_keywords`, `translated_question`,
-                # `translated_question_keywords`, `topic`, and `story` are one
-                # linked bundle produced together during planning (see
-                # prompting.models.SQLQueryPlan/PandasQueryPlan). The
-                # correction prompt instructs the LLM to regenerate all of
-                # them consistently whenever it rewrites `question`, or echo
-                # them unchanged otherwise — so trust whatever comes back,
-                # falling back to the original only when a field is
-                # omitted/empty (the LLM not bothering to echo it) rather
-                # than treating that as a deliberate clear.
-                for field, default in (
-                    ("question", ""),
-                    ("question_keywords", []),
-                    ("translated_question", ""),
-                    ("translated_question_keywords", []),
-                    ("topic", ""),
-                    ("story", ""),
-                ):
-                    merged[field] = corrected_item.get(field) or source_query.get(field, default)
-
-                return merged, usage, errors
-
-            except (json.JSONDecodeError, ValidationError) as e:
-                msg = f"Correction attempt {attempt + 1} parse/validation error: {e}"
-                errors.append(msg)
-                logger.warning("[Validator] %s\nRaw content: %.500s", msg, last_content)
-
-                if attempt < self.max_retries - 1:
-                    # Rebuild [system, user] with the error folded into the
-                    # user message, rather than appending the failed output as
-                    # an extra assistant turn — the shared formatters already
-                    # quote a bounded excerpt of it, and `user_content` still
-                    # carries the schema.
-                    error_text = (
-                        self._format_validation_error(e)
-                        if isinstance(e, ValidationError)
-                        else self._format_json_error(last_content, e)
-                    )
-                    messages = build_messages(f"{user_content}\n\n{error_text}")
-                    time.sleep(self.retry_delay)
-
-            except Exception as e:
-                msg = f"Correction attempt {attempt + 1} error: {e}"
-                errors.append(msg)
-                logger.error("[Validator] %s", msg)
-                if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay)
-
-        errors.append(
-            f"[Validator] All {self.max_retries} correction retries exhausted for "
-            f"query #{source_query.get('id')}; keeping original code."
+        result, usage = LLMClientStructured.complete(
+            self, user_content, root_key="queries", pre_validate=backfill,
+            max_tokens=GENERATION_MAX_TOKENS,
         )
-        logger.error(
-            "[Validator] Correction retries exhausted for query #%s. "
-            "Last raw content:\n%.1000s",
-            source_query.get("id"), last_content,
-        )
-        return dict(source_query), usage, errors
+        if not result:
+            message = (
+                f"[Validator] All {self.max_retries} correction retries exhausted for "
+                f"query #{source_query.get('id')}; keeping original code."
+            )
+            logger.error(message)
+            return dict(source_query), usage, [message]
+
+        corrected_list = result.get("queries", []) or []
+        corrected_item = corrected_list[0] if corrected_list else {}
+
+        merged = dict(source_query)
+        merged["code"] = corrected_item.get("code", source_query.get("code", ""))
+        # `question`, `question_keywords`, `translated_question`,
+        # `translated_question_keywords`, `topic`, and `story` are one
+        # linked bundle produced together during planning (see
+        # prompting.models.SQLQueryPlan/PandasQueryPlan). The correction
+        # prompt instructs the LLM to regenerate all of them consistently
+        # whenever it rewrites `question`, or echo them unchanged otherwise
+        # — so trust whatever comes back, falling back to the original only
+        # when a field is omitted/empty (the LLM not bothering to echo it)
+        # rather than treating that as a deliberate clear.
+        for field, default in (
+            ("question", ""),
+            ("question_keywords", []),
+            ("translated_question", ""),
+            ("translated_question_keywords", []),
+            ("topic", ""),
+            ("story", ""),
+        ):
+            merged[field] = corrected_item.get(field) or source_query.get(field, default)
+
+        return merged, usage, []
 
     # ------------------------------------------------------------------
     # Prompt builder — one query per prompt, shared by both correction paths
@@ -471,6 +431,7 @@ class LLMStatementValidator(LLMClientStructured):
         error_text: str,
         source_label: str,
         table_schemas: str,
+        column_statistics: str,
     ) -> str:
         """Render the user message correcting exactly ONE query.
 
@@ -501,6 +462,7 @@ class LLMStatementValidator(LLMClientStructured):
 
         return self._correction_prompt.update(
             table_schemas=table_schemas,
+            column_statistics=column_statistics,
             queries_with_errors=queries_with_errors_text,
             pydantic_constraint=self.reform_prompt_constraint("").strip(),
         )
@@ -547,15 +509,16 @@ class LLMStatementValidator(LLMClientStructured):
             logger.exception("[Validator] Static validator raised an exception.")
             return [], [str(exc)]
 
-    def _normalize_response(self, json_data):
+    def _normalize_response(self, json_data, root_key: str | None = "queries"):
+        key = root_key or "queries"
         if isinstance(json_data, list):
-            return {"queries": json_data}
+            return {key: json_data}
         if isinstance(json_data, dict):
-            if "queries" not in json_data:
+            if key not in json_data:
                 if json_data:
-                    return {"queries": [json_data]}
+                    return {key: [json_data]}
             return json_data
-        return {"queries": [json_data]}
+        return {key: [json_data]}
 
 
 # ------------------------------------------------------------------

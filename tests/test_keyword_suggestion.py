@@ -148,3 +148,66 @@ class TestScoreTies(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSpeakableAnchors(unittest.TestCase):
+    """Round 2 of experiments/structured_stability: the cheapest distinguishing
+    tokens of a family of files are codes and concatenations the question
+    judge rejects when quoted. A speakable anchor is preferred when one
+    achieves; a code-like one is still returned, flagged, when nothing else
+    does."""
+
+    def test_the_classifier(self):
+        from orqa.agent.utility.keyword_suggestion import is_speakable_term
+        for term in ("cash", "july", "2024", "3rd", "1st", "transport", "belfast", "tfgm", "nhs"):
+            self.assertTrue(is_speakable_term(term), term)
+        for term in ("3rdquarter2025", "csp23nmw", "csp20cd", "q3", "x" * 21):
+            self.assertFalse(is_speakable_term(term), term)
+        # column-only tokens: a vowel-less code or a concatenation is not a word
+        self.assertFalse(is_speakable_term("bfc", column_only=True))
+        self.assertFalse(is_speakable_term("miscandmilkindustrycash", column_only=True))
+        self.assertTrue(is_speakable_term("shape", column_only=True))
+
+    def _index(self, rankings):
+        records = {"T": {"title": "TfGM spending", "resource_name": "3rdquarter2025",
+                         "columns": [{"name": "miscandmilkindustrycash"}]},
+                   "c1": {}, "c2": {}}
+        return FakeCombinatorialIndex(rankings, records, default_ranking=["c1", "c2"])
+
+    def test_a_speakable_anchor_wins_when_it_achieves(self):
+        index = self._index({
+            _fs(): ["c1", "c2"],
+            _fs("3rdquarter2025"): ["T"],
+            _fs("spending"): ["c1", "T"],
+            _fs("spending", "tfgm"): ["T"],
+            _fs("tfgm"): ["c2", "T"],
+        })
+        result = suggest_retrievable_keywords([{"alias": "Table_0", "resource_id": "T"}], index, 1)
+        self.assertTrue(result["achieved"])
+        self.assertEqual(result["keywords"], ["spending", "tfgm"])
+        self.assertEqual(result["unspeakable_keywords"], [])
+
+    def test_a_code_is_used_and_flagged_only_when_nothing_speakable_works(self):
+        index = self._index({
+            _fs(): ["c1", "c2"],
+            _fs("3rdquarter2025"): ["T"],
+            _fs("spending"): ["c1", "c2", "T"],
+            _fs("tfgm"): ["c1", "c2", "T"],
+            _fs("spending", "tfgm"): ["c1", "c2", "T"],
+        })
+        result = suggest_retrievable_keywords([{"alias": "Table_0", "resource_id": "T"}], index, 1)
+        self.assertTrue(result["achieved"])
+        self.assertEqual(result["keywords"], ["3rdquarter2025"])
+        self.assertEqual(result["unspeakable_keywords"], ["3rdquarter2025"])
+
+    def test_speakable_first_can_be_switched_off(self):
+        index = self._index({
+            _fs(): ["c1", "c2"],
+            _fs("3rdquarter2025"): ["T"],
+            _fs("spending", "tfgm"): ["T"],
+        })
+        result = suggest_retrievable_keywords([{"alias": "Table_0", "resource_id": "T"}], index, 1, speakable_first=False)
+        self.assertTrue(result["achieved"])
+        # the plain greedy climb takes the single term that reaches rank 1
+        self.assertEqual(result["keywords"], ["3rdquarter2025"])
+        self.assertEqual(result["unspeakable_keywords"], ["3rdquarter2025"])

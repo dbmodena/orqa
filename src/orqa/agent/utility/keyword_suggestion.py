@@ -63,6 +63,7 @@ it affordable enough to run as a rare escalation.
 
 import itertools
 import math
+import re
 from typing import Any, Optional
 
 from orqa.benchmark.index import tokenize, _record_field_texts
@@ -151,6 +152,55 @@ _EXHAUSTIVE_POOL_SIZE = 12
 # cap means larger sizes are simply never reached rather than the rescue
 # failing outright.
 _EXHAUSTIVE_MAX_TRIALS = 4000
+
+
+# ---------------------------------------------------------------------------
+# Speakability. The anchor is handed to the question writer as vocabulary to
+# weave into a question a real person would type, and the question judge
+# rejects a raw identifier, code or column header quoted in the question. On
+# a family of near-identical files the cheapest distinguishing tokens are
+# exactly those: "3rdquarter2025" (a resource name), "csp20cd" / "bfc"
+# (column codes), "miscandmilkindustrycash" (a concatenated header). Measured
+# in experiments/structured_stability round 2 (2026-11-03): 40 of the
+# question judge's 121 layer rejections were readability, most of them a
+# pasted anchor term of that kind. So the search first looks for an anchor
+# made of SPEAKABLE terms only and falls back to the full vocabulary when
+# none works, flagging what it had to use (``unspeakable_keywords``).
+_ORDINAL_RE = re.compile(r"^\d{1,2}(st|nd|rd|th)$")
+_YEAR_RE = re.compile(r"^(1[89]|20)\d{2}$")
+# A column-only term longer than this is almost always a concatenation of
+# words ("miscandmilkindustrycash") rather than a word.
+_MAX_SPEAKABLE_COLUMN_TERM = 12
+
+
+def is_speakable_term(term: str, *, column_only: bool = False) -> bool:
+    """Whether a person would say or type ``term`` as a search word.
+
+    Speakable: words, acronyms a title or publisher carries (``tfgm``,
+    ``nhs``), years (``2024``), ordinals (``3rd``), short numbers. Not
+    speakable: a letters-and-digits mash (``3rdquarter2025``, ``csp23nmw``,
+    ``q3``), anything over 20 characters, and — for a term the column schema
+    ALONE supplies (``column_only``: no title / tag / publisher carries it) —
+    a vowel-less code (``bfc``) or a long concatenation
+    (``miscandmilkindustrycash``).
+    """
+    t = str(term or "").strip().lower()
+    if not t:
+        return False
+    if _YEAR_RE.match(t) or _ORDINAL_RE.match(t):
+        return True
+    if t.isdigit():
+        return len(t) <= 4
+    if any(ch.isdigit() for ch in t):
+        return False
+    if len(t) > 20:
+        return False
+    if column_only:
+        if not any(ch in "aeiouy" for ch in t):
+            return False
+        if len(t) > _MAX_SPEAKABLE_COLUMN_TERM:
+            return False
+    return True
 
 
 def _terms_from_text(*texts: str) -> list[str]:
@@ -340,6 +390,7 @@ def suggest_retrievable_keywords(
     max_column_terms: int = _MAX_COLUMN_TERMS,
     max_keywords_per_table: int = _MAX_KEYWORDS_PER_TABLE,
     exclude_terms: Optional[Any] = None,
+    speakable_first: bool = True,
 ) -> dict:
     """Greedily find a keyword set that surfaces every table within top_k.
 
@@ -358,7 +409,7 @@ def suggest_retrievable_keywords(
             seeds the search (see the warm start below). When no caller
             supplies it, the column names the tables literally share stand
             in for it.
-        index: A ``DatasetIndex``/``ESDatasetIndex`` (or ``None`` when
+        index: A ``DatasetIndex``/``SolrDatasetIndex`` (or ``None`` when
             unavailable for this portal — no-ops to an empty, unachieved
             result rather than raising, same degradation convention as
             ``retrievability_gate.check_question_retrievability``).
@@ -380,6 +431,13 @@ def suggest_retrievable_keywords(
             search may not use: what a question writer reported it cannot
             work into natural prose. The anchor is re-searched around them
             rather than left with a hole.
+        speakable_first: Search first over SPEAKABLE terms only (see
+            :func:`is_speakable_term`) and return that anchor when it
+            achieves; only when it does not, search the full vocabulary and
+            report the code-like terms it had to use under
+            ``unspeakable_keywords``. The question writer is told not to
+            paste those, and the lexical gate then falls back to the
+            question's own words for that table.
 
     When ``index`` sets ``restricts_candidates`` (a ``SolrDatasetIndex``, or a
     ``PortalIndexView`` imitating one), candidates are also restricted to terms
@@ -415,6 +473,9 @@ def suggest_retrievable_keywords(
         1`` means its rank is a position inside a tie of indistinguishable
         records, ordered by the engine's internal document order — not
         something any keyword can improve (see ``_score_ties``).
+        ``unspeakable_keywords`` is the subset of ``keywords`` a person would
+        not say (codes, letter-digit mashes, concatenated headers) — empty
+        whenever a speakable anchor achieved (see ``speakable_first``).
     """
     if index is None or not tables:
         return {
@@ -424,6 +485,7 @@ def suggest_retrievable_keywords(
             "missing_tables": [t["alias"] for t in tables],
             "iterations_used": 0,
             "column_keywords": [],
+            "unspeakable_keywords": [],
         }
 
     # What the group joins/unions on, as the caller's match constraint
@@ -486,6 +548,26 @@ def suggest_retrievable_keywords(
     } - {
         term for pool in metadata_pools.values() for term in pool
     }
+
+    unspeakable = {
+        term
+        for pools in (link_pools, metadata_pools, column_pools)
+        for pool in pools.values()
+        for term in pool
+        if not is_speakable_term(term, column_only=term in column_only)
+    }
+    if speakable_first and unspeakable:
+        # Pass 1: the same search over speakable vocabulary only. Achieved
+        # -> that is the anchor. Otherwise fall through to the full search
+        # below, which may need the code-like terms, and say which.
+        speakable_only = suggest_retrievable_keywords(
+            tables, index, top_k, max_iterations, max_column_terms, max_keywords_per_table,
+            exclude_terms=list(exclude_terms or ()) + sorted(unspeakable),
+            speakable_first=False,
+        )
+        if speakable_only["achieved"]:
+            speakable_only["unspeakable_keywords"] = []
+            return speakable_only
 
     ceiling = max(top_k * _RANK_CEILING_MULTIPLIER, _RANK_CEILING_FLOOR)
 
@@ -758,6 +840,7 @@ def suggest_retrievable_keywords(
         # (see ``column_only``) — lets the caller see whether the schema
         # was what made this group retrievable, without re-deriving it.
         "column_keywords": sorted(term for term in selected if term in column_only),
+        "unspeakable_keywords": sorted(term for term in selected if term in unspeakable),
     }
     if ties:
         # How many records score exactly what each table does for the final

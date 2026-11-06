@@ -13,6 +13,21 @@ write_path: "/home/bilel/gits/orqa/data/nyc"
 # The crawler always downloads into the literal "datasets" folder regardless,
 # so `crawl`/`clean` keep working when this is overridden.
 table_dir: "datasets"
+
+# Run log: every `src/main.py` run appends what it prints (colour codes
+# stripped, a progress bar's final state) and its logging records (OrQA's
+# from `level` up, libraries' from WARNING up), timestamped, to
+# <write_path>/<dir>/<file>. The file rotates at `max_size` into <file>.1 and
+# <file>.2 (`files` files in all); once they are all full the oldest is
+# overwritten. The live log is always <file>. `dir` may also be absolute.
+logging:
+  enabled: true
+  dir: log
+  file: orqa.log
+  max_size: 25MB
+  files: 3
+  level: INFO
+
 pandas:
   read:
     csv:
@@ -114,7 +129,7 @@ tasks:
     max_pool_time: 60
     enable_single_table: "yes"
     # A sampled table that cannot be found within
-    # mcp_search.retrieval_contract.single_table_top_k — no keyword search
+    # search.retrieval_contract.single_table_top_k — no keyword search
     # places it (checked before any LLM call), or the question stage ends
     # "unretrievable_group" — is skipped: NO entry is written for it,
     # and its slot (st_5, ...) is refilled by the next table of the same seeded
@@ -138,46 +153,51 @@ tasks:
     # covers them) and counts as ONE vote next to dense_question and hybrid_rrf,
     # under min_agreement — not as one search that must find every table. Logged
     # per slot as `question_feedback`.
-    # Rewrites a rejected question gets before its slot is dropped.
-    max_question_corrections: 3
-
-  # Reverse-index backend — used by the question stage's retrievability gate and the solve-benchmark step (see orqa.benchmark.solve)
-  mcp_search:
-    # elasticsearch: the reverse index lives in Elasticsearch (index
-    # "orqa-<provider>-<city>", built from normalized_metadata.json on the first
-    # run and rebuilt whenever that file changes). Elasticsearch MUST be running
-    # at elasticsearch_url — a run refuses to start rather than generate
-    # ungated questions if it is not. `builtin` needs no external service.
-    backend: elasticsearch
-    elasticsearch_url: http://localhost:9200
-    # OrQa runs the Elasticsearch itself — no Docker, nothing to start by hand.
-    # generate-statements (and solve-benchmark) start a local server before they
-    # connect and stop it when they exit. Everything lives in
-    # data/uk/index/elasticsearch/ : the unpacked distribution
-    # (elasticsearch-<version>/, downloaded once on the first run, ~1.5 GB, the
-    # download is unpacked as it streams), data/ (the index) and logs/.
-    # The server runs single-node on loopback with security AND disk watermarks
-    # off. Set keep_running: true if two runs share it.
-    elasticsearch_managed:
+    # Rewrites a rejected question gets before its slot is dropped (5: on a
+    # 6-table group the approved questions passed the judge on their 5th and
+    # 6th attempt; 4 rounds ended with none).
+    max_question_corrections: 5
+    # Generation trace (orqa.utils.generation_trace): one folder per
+    # generate-statements run with every question attempt (gate votes, judge
+    # panel, feedback), every plan and plan-judge round, the generated code and
+    # its validator/judge verdicts, every LLM call's outcome (the raw answer
+    # when it failed), warnings, errors and crashed groups — written as it
+    # happens, so a run killed mid-group keeps its trail. `dir` is relative to
+    # write_path (or absolute); the folder gets its own `*` .gitignore.
+    # Start with <dir>/latest/groups.jsonl (one line per group: status and
+    # where it stopped), then grep events.jsonl by group.
+    trace:
       enabled: true
-      heap: 2g
-      keep_running: false
-    # Use the existing semantic-discovery metadata vectors to rerank the
-    # complete lexical candidate set. Both components are normalized to
-    # [0, 1] before fusion, and every search consumer uses this same index.
-    hybrid_search_enabled: true
-    lexical_weight: 0.5
-    semantic_weight: 0.5
-    # How lexical/semantic get combined (see orqa.benchmark.hybrid_index):
-    # "weighted_score" (default, unchanged) averages the two normalized
-    # scores using the weights above; "rrf" instead fuses on each side's
-    # RANK (LakeGen's own Solr setup does this) — a candidate that ranks
-    # #1 on EITHER side alone already scores well, no need to also be
-    # strong on the other. lexical_weight/semantic_weight are ignored
-    # under "rrf".
-    fusion_method: weighted_score
-    rrf_k: 60
-    query_embedding_input_type: search_query
+      dir: log/generation
+      # Every LLM call of a group, as sent and received, in
+      # <run>/llm/<group>.txt: the user message, parameters, reasoning and raw
+      # answer (each system prompt once in llm/system/), in call order, with
+      # the outcome and errors above each call. all | failed (only attempts
+      # that gave no usable answer) | off. About 0.6 MB per group.
+      llm_io: all
+
+  # Retrieval backend — what the keyword-anchor search and the question stage's
+  # retrievability gate query.
+  search:
+    # solr: LakeGen's own live Solr core for this portal, queried READ-ONLY
+    # exactly as LakeGen queries it (orqa.benchmark.solr_index), so "retrievable"
+    # means retrievable by LakeGen. Keyword search: GET /<core>/select, edismax,
+    # q.op=AND, the core's own qf. Dense: KNN on table_embedding through POST
+    # /<core>/query (a 1024-d vector over GET is HTTP 414, and /select's edismax
+    # default silently returns 0 hits), the question embedded with
+    # cohere.embed-v4.0 at 1024 dims. Loading pings the core and checks its KNN
+    # answers; a run fails rather than gate against anything else.
+    backend: solr
+    solr:
+      core: nyc
+      url: null               # null: $SOLR_URL, else http://localhost:8983/solr
+      vector_field: table_embedding
+      # LakeGen's KNN filters: only its metadata-v1 vectors of this model.
+      knn_filters: ['representation_version:"metadata-v1"', 'embedding_model:"cohere.embed-v4.0"']
+      embedding_dimensions: 1024  # the core's vectors; OrQA's 1536-d caches do not fit
+      timeout: 30
+      retries: 3
+    # LRU cache of question embeddings for the KNN branch.
     query_embedding_cache_size: 2048
     # Adaptive top-K of the PRE-planning retrievability check for a multi-table
     # group: K = round(number_of_tables_in_group * this coefficient), so a group
@@ -198,63 +218,30 @@ tasks:
     gate_unretrievable_groups: false
     # Master on/off switch for the retrieval gate as a whole — the
     # PRE-planning keyword suggestion above AND the question stage's
-    # retriever-panel gate. Keep this enabled so hybrid retrieval is
-    # actually used to generate and verify the suggested keyword anchor.
+    # retriever-panel gate. Off, no question is checked against Solr at all.
     retrieval_gate_enabled: true
     # Retrievability contract (see orqa.agent.utility.retrievability_gate): a
-    # question passes when a panel of retrievers — lexical gate, semantic and
-    # hybrid RRF — majority-agrees that it finds every gold table within the
-    # top K. Nothing else is checked.
+    # question passes when a panel of retrievers majority-agrees that it finds
+    # every gold table within the top K. The retrievers are LakeGen's three
+    # ways of querying the core:
+    #   llm_keywords   -> keyword search. In the question stage it is replaced
+    #     by the lexical gate, a deterministic check per table — the table's
+    #     verified anchor keywords, or else the question's own words Solr
+    #     matches on that table — together ONE vote.
+    #   dense_question -> Solr KNN on the question's embedding.
+    #   hybrid_rrf     -> Reciprocal Rank Fusion of the keyword and KNN
+    #     rankings, as LakeGen's hybrid_rrf preset runs it.
+    # (lexical_question, the raw question text as an OR query, is left out:
+    # LakeGen searches keywords, never the question text.)
     retrieval_contract:
       enabled: true
-      # The gate's keyword search uses AND logic: `keyword_match: all` — every
-      # keyword must be present in SOME searched field, as in the portal's Solr
-      # (edismax q.op=AND), so one keyword the table lacks removes it. On the
-      # live Solr core that is `q.op=AND`; on the Elasticsearch index above it
-      # is a multi_match `cross_fields` / operator `and`. AND also switches the
-      # pipeline to per-table anchors, since no single AND query surfaces a
-      # multi-table group: each table gets its own verified anchor, searched
-      # alone, and a multi-table question is gated per table (see retrievers).
-      # `keyword_match: any` is the additive alternative, a multi_match
-      # `cross_fields` / operator `or` scored by Elasticsearch's BM25 with the
-      # per-field boosts, summed across fields — a record scores on every
-      # keyword it contains, in whichever field, so a keyword the table lacks
-      # merely adds nothing to it and the rest decide its rank. (Not
-      # `best_fields`: that keeps only the single best field, so a keyword only
-      # the tags hold could never tell apart records that share a title.)
-      #   search_fields   -> [] = all six record fields (title, resource_name,
-      #     tags, columns, publisher, description); list names to restrict.
-      #   retrievers      -> the three ways the portal is queried:
-      #     llm_keywords (keyword search, BM25), dense_question (semantic) and
-      #     hybrid_rrf (their Reciprocal Rank Fusion, as LakeGen runs it).
-      #     lexical_question (BM25 over the raw question text) is left out: the
-      #     keyword search above is what LakeGen runs.
-      #     In every question llm_keywords is replaced by the lexical gate: a
-      #     deterministic keyword check per table, together ONE vote next to
-      #     dense_question and hybrid_rrf under min_agreement. A table's check
-      #     is (1) its verified keywords — the anchor the pre-planning search
-      #     proved finds it, e.g. [belfast, ni]: a question that contains all of
-      #     them is searched with exactly that query and passes — and, when the
-      #     question lacks part of them, (2) the question's own words the table
-      #     can match. A table is covered when either finds it within top_k (a
-      #     check that also finds other tables covers them). The gate is not
-      #     an LLM keyword extraction, so the same question always votes the same.
-      # NOTE: this is an approximation of LakeGen's Solr, built from the
-      # normalized metadata. Measured under AND, against the live `uk` core it
-      # returned the same result set for only ~10% of random keyword queries
-      # (an index built from Solr's own documents: ~44%); its BM25 ranking has
-      # not been compared with Solr's. To query the live core directly instead
-      # set `keyword_backend: solr` and `solr_core: uk_fixed` (Solr at
-      # $SOLR_URL, default http://localhost:8983/solr).
-      # Old behaviour: keyword_match: any and retrievers
-      # [lexical_question, dense_question, llm_keywords].
-      keyword_backend: solr #index
-      solr_core: nyc
+      # q.op=AND, as LakeGen: one keyword the table lacks removes it. AND also
+      # gives each table of a multi-table group its own anchor, since no single
+      # AND query surfaces the whole group.
       keyword_match: all
-      search_fields: []
       retrievers: [llm_keywords, dense_question, hybrid_rrf]
       hybrid_rrf_k: 60        # LakeGen's RRF constant
-      hybrid_rrf_depth: 20    # each side's top-20 is fused (LakeGen's top_k)
+      hybrid_rrf_depth: 100   # each branch's top 100: LakeGen's top_k 20 x candidate_multiplier 5
       min_agreement: 2
       top_k_per_table: 10
       max_top_k: 20          # LakeGen's retrieval pool
@@ -264,15 +251,6 @@ tasks:
       # extra search cost when there's only one target.
       single_table_top_k: 10
 
-  # Round-trip benchmark solver (step: solve-benchmark) — see
-  # orqa.benchmark.solve / src/orqa/benchmark/readme.md.
-  benchmark_solver:
-    # How many candidate tables the reverse-index search retrieves per
-    # question, and the scope of the pairwise Valentine relationship pass.
-    top_k_tables: 10
-    # Valentine matcher for that pairwise pass — schema-only and fast:
-    # up to C(top_k_tables, 2) pairs get matched per question.
-    matcher: similarity_flooding
   judges:
     plan_mode: mono
     code_mode: mono

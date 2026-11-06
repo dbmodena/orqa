@@ -1,9 +1,13 @@
+# RETIRED (2026-11-04): Elasticsearch is no longer an OrQA backend; the five
+# Solr portals query LakeGen's live Solr cores (orqa.benchmark.solr_index).
+# Kept unchanged from src/orqa/benchmark/es_index.py; it does not import or run from
+# here. legacy/elasticsearch/README.md says how to reintegrate it.
 """
 Elasticsearch-backed reverse index over the normalized datasets metadata.
 
 Same role and interface as orqa.benchmark.index.DatasetIndex, but the
 inverted index lives in an Elasticsearch index (one per city, named
-"orqa-<provider>-<city>"). When the MCP server starts, the index is
+"orqa-<provider>-<city>"). When the index is first loaded, it is
 created from <data_path>/metadata/normalized_metadata.json if it does not
 exist, and recreated if the metadata file changed since it was built
 (a fingerprint of the metadata file is stored in the index _meta).
@@ -138,8 +142,8 @@ def connect(es_url: str) -> Elasticsearch:
             "docker run -d -p 9200:9200 -e discovery.type=single-node "
             "-e xpack.security.enabled=false "
             "docker.elastic.co/elasticsearch/elasticsearch:8.17.0) or fix "
-            "tasks.mcp_search.elasticsearch_url in the workflow yaml, or "
-            'switch tasks.mcp_search.backend to "builtin".'
+            "tasks.search.elasticsearch_url in the workflow yaml, or "
+            'switch tasks.search.backend to "builtin".'
         )
     return es
 

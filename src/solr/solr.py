@@ -1,3 +1,24 @@
+"""Core-admin CLI for a Solr of your OWN: create, delete, (re)post, reload
+and refresh one core per OrQA target, from conf/solr/<domain>/ and the
+target's normalized metadata.
+
+WARNING: DO NOT RUN THIS AGAINST THE SHARED SOLR AT $SOLR_URL. It serves
+LakeGen's live cores, and the domain names below are OrQA's target ids:
+uk, nyc, bologna, paris and valencia are also the names of live LakeGen
+cores. The core commands act on the core of that name: `delete` drops it,
+`post` indexes OrQA's normalized metadata into it, and `reload`/`refresh`
+copy conf/solr/<domain>/managed-schema.xml over its config. None of those
+schemas has LakeGen's `table_embedding` vector field. The config copy is
+worse than it looks: on that instance uk, nyc, bologna_v2, paris_v2,
+valencia_v2 and uk_fixed all share one configset, `nyc` (their
+core.properties, 2026-11-04), so `reload uk` rewrites the schema file all
+six load on their next reload or restart. `create` adds a core to an
+instance other projects share, and `stop` stops the whole server.
+
+Retrieval never needs this file: orqa.benchmark.solr_index reads those
+cores through solr.client.LocalSolrClient, which only queries.
+"""
+
 import argparse
 import os
 import shutil
@@ -218,10 +239,10 @@ class Solr:
 # --- domain helpers -----------------------------------------------------------
 
 # Every target main.py knows about is a valid Solr domain — its target_id
-# doubles as the Solr core/collection name (see e.g. conf/workflow/*.yaml's
-# tasks.mcp_search.retrieval_contract.solr_core, which is set to the same
-# name for bologna/valencia/paris/nyc). A domain with no conf/solr/<domain>/
-# folder yet just fails `create`/`reload` with a clear FileNotFoundError.
+# doubles as the Solr core/collection name, which is why five of them collide
+# with LakeGen's live cores (see the module docstring). A domain with no
+# conf/solr/<domain>/ folder yet just fails `create`/`reload` with a clear
+# FileNotFoundError.
 DOMAINS = tuple(spec.target_id for spec in _main.TARGETS)
 
 

@@ -11,6 +11,7 @@ before loading the actual table.
 """
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Callable
@@ -119,6 +120,21 @@ def _has_two_row_preamble(df: pl.DataFrame) -> bool:
     return is_first_preamble and is_second_empty
 
 
+def _attach_cleaning_log(path: Path) -> None:
+    """Every WARNING+ record into cleaning.log, as ``logging.basicConfig(
+    filename=path)`` used to do. basicConfig does nothing once the root logger
+    has a handler, and the run log (orqa.utils.run_log) gives it one."""
+    root = logging.getLogger()
+    target = os.path.abspath(path)
+    if any(isinstance(h, logging.FileHandler) and h.baseFilename == target
+           for h in root.handlers):
+        return
+    handler = logging.FileHandler(path)
+    handler.setLevel(logging.WARNING)
+    handler.setFormatter(logging.Formatter(logging.BASIC_FORMAT))
+    root.addHandler(handler)
+
+
 def _prepare_cleaning_environment(
     cfg: OrQAConfig, *, move_downloaded_datasets: bool = False
 ) -> logging.Logger:
@@ -132,7 +148,7 @@ def _prepare_cleaning_environment(
 
     cleaning_logfile = cfg.logging_path / "cleaning" / "cleaning.log"
     cleaning_logfile.parent.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(filename=cleaning_logfile)
+    _attach_cleaning_log(cleaning_logfile)
 
     cfg.datasets_path.mkdir(parents=True, exist_ok=True)
     return logging.getLogger("cleaning")

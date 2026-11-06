@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import re
-import time
 from io import StringIO
 from pathlib import Path
 from typing import Any, Type
@@ -13,12 +12,11 @@ import pandas as pd
 import polars as pl
 import yaml
 from litellm import completion, Router
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from ..llm_client.LLMClientStructured import LLMClientStructured
 from ..utility.alias_substitution import AliasSubstitution
 from ..utility.column_provenance import plan_derived_columns
-from ..utility.message_builder import ClientMessageBuilder, sanitize_messages
 from ..prompting import DatasetDescription, GenerationEnrichmentPrompt
 from ..utility.structured_outputs import Query, TableAnalyses, QueryPlan
 from ...utils.pipeline_logger import PipelineLogger
@@ -27,11 +25,16 @@ import sys
 
 logger = logging.getLogger(__name__)
 
-# See QueryPlanner.GENERATION_MAX_TOKENS for why this exists: neither call
-# site below set max_tokens before this, relying on OCI's own unmanaged
-# default for reasoning models. Not a fix for an observed failure — closing
-# the same gap the judges already had closed elsewhere in the pipeline.
-GENERATION_MAX_TOKENS = 8000
+# Output budget of a generation call and of a correction call (see
+# QueryPlanner.GENERATION_MAX_TOKENS for the mechanism: a reasoning model's
+# hidden thinking counts against max_tokens, and a cut answer surfaces as a
+# "Pydantic error"). Measured on the code stage
+# (experiments/structured_stability, 2026-11-03): the largest answers were
+# 4548 tokens for generation and 5158 for a correction against the former
+# 8000 cap — 1.7–2x margin on those groups, none on the first longer payload.
+# 32000 is the explicit budget every structured call now carries; the client
+# escalates further on a cut.
+GENERATION_MAX_TOKENS = 32000
 
 
 class LLMClientStatementGenerator(LLMClientStructured):
@@ -43,6 +46,15 @@ class LLMClientStatementGenerator(LLMClientStructured):
     (see StatementValidator.py).  This class only retries on JSON / Pydantic
     parse errors — it does NOT run PandasValidator / SQLValidator internally.
     """
+
+    # The system message's first line (the schema follows it).
+    preamble = "You are an expert Data Engineer."
+    # Code is a long output: under native JSON-schema decoding the constrained
+    # decoder looped the SELECT list of a 22-step plan's query until the
+    # repetition guard stopped it — the planner's failure mode again — so the
+    # two clients that return code stay prompt-only (the judges' short
+    # verdicts keep native decoding on).
+    native_schema = False
 
     def __init__(self, config_path: Path):
         super().__init__(config_path, "querying")
@@ -379,6 +391,13 @@ class LLMClientStatementGenerator(LLMClientStructured):
         still-failing queries are silently dropped and only the good ones are
         returned.
 
+        The LLM call itself is the shared budget-aware structured loop
+        (``LLMClientStructured.complete``: explicit ``GENERATION_MAX_TOKENS``
+        budget with escalation on a cut answer, shape coercion, one repair
+        call, the repetition guard); only the post-processing — alias
+        substitution, the plan fields, the single-query rule, alias-coverage
+        retries, the final gate — lives here.
+
         Args:
             precomputed_plan: The specific plan (dict form) this generation
                 call is bound to — one plan out of ``QueryPlanner.plan_batch``'s
@@ -401,15 +420,6 @@ class LLMClientStatementGenerator(LLMClientStructured):
         all_errors: list[str] = []
         all_aliases: list[str] = list(table_names.keys())  # e.g. ["Table_0", "Table_1"]
 
-        # Build analysis context for each table before generating the final queries.
-        metadata_list = metadata or []
-        if isinstance(metadata_list, dict):
-            metadata_list = [metadata_list.get(alias, {}) for alias in table_names]
-
-        detected_languages = languages or []
-        if isinstance(detected_languages, str):
-            detected_languages = [detected_languages]
-
         # Reuse the caller's already-computed plan verbatim — this method never
         # runs its own query-planner LLM call. Both the plan AND the
         # table-analysis enrichment are already injected into `prompt`
@@ -420,135 +430,63 @@ class LLMClientStatementGenerator(LLMClientStructured):
         plan = precomputed_plan
         self._log.query_plan(plan)
 
-        initial_message = prompt
+        # Copy the planner-owned question-level metadata onto every generated
+        # query. These fields are no longer part of the Query schema (the
+        # generation LLM never produces them) — they were already decided
+        # once, during planning, and every query bound to this plan/call
+        # shares that same metadata. `tables` (name/reason/columns_involved/
+        # description/keywords) is one of them: the plan's own `tables[]`
+        # (List[Table]) was already judged by the plan panel
+        # (PlanJudgment.table_check) and checked for full alias coverage by
+        # QueryPlanner.validate_plan, so it is simply copied here rather than
+        # asked of the generation LLM a second time.
+        plan_fields = {
+            "query_plan": plan.get("query_plan", ""),
+            "question_keywords": plan.get("question_keywords", []),
+            "translated_question_keywords": plan.get("translated_question_keywords", []),
+            "translated_question": plan.get("translated_question", ""),
+            "detected_language": plan.get("detected_language", ""),
+            "topic": plan.get("topic", ""),
+            "story": plan.get("story", ""),
+            "tables": plan.get("tables", []),
+            # The slot's target tier, judged on the question upstream and
+            # pinned onto the plan — not estimated from the plan, and not
+            # part of the generation LLM's own output.
+            "difficulty": plan.get("difficulty", ""),
+            # Plan-declared result contract, judged by the plan panel
+            # (PlanJudgment.expected_result_check) and mechanically enforced
+            # against the executed result by the validators
+            # (QueryValidator._check_expected_result_type).
+            "expected_result_type": plan.get("expected_result_type", ""),
+            "expected_result_description": plan.get("expected_result_description", ""),
+            # Columns the plan's steps declare they CREATE (see each step's
+            # `produces`). Resolved and checked at planning time, so the
+            # validator can tell a legitimate derived column from a
+            # hallucinated one by exact lookup instead of pattern-matching
+            # the generated code — see QueryValidator.prefilter_dataframes.
+            "derived_columns": sorted(plan_derived_columns(plan)),
+        }
 
-        message_builder = ClientMessageBuilder()
-        # The output-schema constraint is static per response model, so it
-        # rides in the system message — ahead of all dynamic content — where
-        # it extends the cacheable prefix shared by every generation call.
-        system_prompt = f"You are an expert Data Engineer.\n\n{self.schema_constraint()}"
-        messages = message_builder.build(system_prompt, initial_message)
-        last_content = ""
+        def ask(user_prompt: str) -> list[dict]:
+            """One structured generation call -> the cleaned, plan-stamped
+            queries it returned ([] when every attempt failed)."""
+            result, usage = LLMClientStructured.complete(
+                self, user_prompt, root_key="queries", max_tokens=GENERATION_MAX_TOKENS
+            )
+            for key in usage_total:
+                usage_total[key] += (usage or {}).get(key, 0)
+            if not result:
+                return []
+            cleaned = self.clean_query_set(result, table_names)
+            queries = cleaned.get("queries", []) or []
+            for q in queries:
+                q.update(plan_fields)
+            return queries
 
-        # ── Phase 1: initial generation with JSON/Pydantic retry loop ──────────
-        for attempt in range(self.max_retries):
-            try:
-                completion_args = {
-                    "model": self.config["model"],
-                    "messages": sanitize_messages(messages),
-                    "max_tokens": GENERATION_MAX_TOKENS,
-                    **self._default_temperature_kwargs(self.config["model"]),
-                }
-
-                response = self.router.completion(**completion_args)
-                usage = response["usage"]
-                usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
-                usage_total["completion_tokens"] += usage.get("completion_tokens", 0)
-                usage_total["total_tokens"] += usage.get("total_tokens", 0)
-
-                content = response["choices"][0]["message"]["content"]
-                if content is None:
-                    raise ValueError(
-                        "LLM returned None content — the model may have emitted a "
-                        "tool-call response instead of a text completion."
-                    )
-                last_content = content
-
-                cleaned_content = self._clean_json_response(content)
-                json_data = self._repair_json(cleaned_content)
-                json_data = self._normalize_response(json_data)
-                result = self.response_model.model_validate(json_data)
-                result_dict = result.model_dump()
-                result_dict = self.clean_query_set(result_dict, table_names)
-
-                # Copy the planner-owned question-level metadata onto every
-                # generated query. These fields are no longer part of the
-                # Query schema (the generation LLM never produces them) —
-                # they were already decided once, during planning, and every
-                # query bound to this plan/call shares that same metadata.
-                # `tables` (name/reason/columns_involved/description/keywords)
-                # is one of them: the plan's own `tables[]` (List[Table]) was
-                # already judged by the plan panel (PlanJudgment.table_check)
-                # and checked for full alias coverage by
-                # QueryPlanner.validate_plan, so it is simply copied here
-                # rather than asked of the generation LLM a second time.
-                plan_fields = {
-                    "query_plan": plan.get("query_plan", ""),
-                    "question_keywords": plan.get("question_keywords", []),
-                    "translated_question_keywords": plan.get("translated_question_keywords", []),
-                    "translated_question": plan.get("translated_question", ""),
-                    "detected_language": plan.get("detected_language", ""),
-                    "topic": plan.get("topic", ""),
-                    "story": plan.get("story", ""),
-                    "tables": plan.get("tables", []),
-                    # The slot's target tier, judged on the question upstream
-                    # and pinned onto the plan — not estimated from the plan,
-                    # and not part of the generation LLM's own output.
-                    "difficulty": plan.get("difficulty", ""),
-                    # Plan-declared result contract, judged by the plan panel
-                    # (PlanJudgment.expected_result_check) and mechanically
-                    # enforced against the executed result by the validators
-                    # (QueryValidator._check_expected_result_type).
-                    "expected_result_type": plan.get("expected_result_type", ""),
-                    "expected_result_description": plan.get("expected_result_description", ""),
-                    # Columns the plan's steps declare they CREATE (see each
-                    # step's `produces`). Resolved and checked at planning
-                    # time, so the validator can tell a legitimate derived
-                    # column from a hallucinated one by exact lookup instead
-                    # of pattern-matching the generated code — see
-                    # QueryValidator.prefilter_dataframes.
-                    "derived_columns": sorted(plan_derived_columns(plan)),
-                }
-                for q in result_dict.get('queries', []):
-                    q.update(plan_fields)
-
-                result_dict['queries'] = self._enforce_single_query(
-                    result_dict.get('queries', [])
-                )
-
-                # Successfully parsed — break out and move to alias validation
-                break
-
-            except json.JSONDecodeError as e:
-                all_errors.append(f"JSONDecodeError on attempt {attempt + 1}: {e}")
-                error_msg = self._format_json_error(last_content, e)
-                if attempt < self.max_retries - 1:
-                    # Rebuild from scratch with error feedback appended AFTER
-                    # the unchanged initial message, so the retry still shares
-                    # the same cached prompt prefix. The schema itself already
-                    # rides in the (static) system message.
-                    error_prompt = (
-                        f"{initial_message}\n\n"
-                        f"Your previous output could not be parsed as JSON:\n{error_msg}"
-                    )
-                    messages = message_builder.build(system_prompt, error_prompt)
-                    time.sleep(self.retry_delay)
-
-            except ValidationError as e:
-                all_errors.append(f"ValidationError on attempt {attempt + 1}: {e}")
-                error_msg = self._format_validation_error(e)
-                if attempt < self.max_retries - 1:
-                    # Rebuild from scratch with error feedback
-                    error_prompt = (
-                        f"{initial_message}\n\n"
-                        f"Your previous output failed schema validation:\n{error_msg}"
-                    )
-                    messages = message_builder.build(system_prompt, error_prompt)
-                    time.sleep(self.retry_delay)
-
-            except Exception as e:
-                all_errors.append(f"Unexpected error on attempt {attempt + 1}: {e}")
-                if attempt < self.max_retries - 1:
-                    # Rebuild from scratch with error feedback
-                    error_prompt = (
-                        f"{initial_message}\n\n"
-                        f"An error occurred: {e}\n"
-                        f"Return a JSON object matching the schema in the instructions."
-                    )
-                    messages = message_builder.build(system_prompt, error_prompt)
-                    time.sleep(self.retry_delay)
-        else:
-            # All JSON/Pydantic retries exhausted
+        # ── Phase 1: initial generation ──────────────────────────────────────
+        queries = ask(prompt)
+        if not queries:
+            all_errors.append("Generation produced no valid query set after every attempt.")
             return (
                 self._finalize_query_set([]),
                 usage_total,
@@ -559,7 +497,7 @@ class LLMClientStatementGenerator(LLMClientStructured):
 
         # ── Phase 2: table-alias validation with targeted retry loop ───────────
         good_queries, bad_queries = self._partition_queries(
-            result_dict.get("queries", []), all_aliases
+            self._enforce_single_query(queries), all_aliases
         )
 
         for alias_attempt in range(MAX_TABLE_ALIAS_RETRIES):
@@ -576,54 +514,17 @@ class LLMClientStatementGenerator(LLMClientStructured):
                 f"Table-alias check (attempt {alias_attempt + 1}): "
                 f"{len(bad_queries)} query/queries missing aliases."
             )
-
-            retry_messages = message_builder.build(
-                system_prompt,
-                f"{initial_message}\n\n"
-                f"Previous output (with issues):\n{json.dumps({'queries': bad_queries_clean})}\n\n"
-                f"{feedback}",
+            retried = ask(
+                f"{prompt}\n\n"
+                f"Previous output (with issues):\n{json.dumps({'queries': bad_queries_clean}, default=str)}\n\n"
+                f"{feedback}"
             )
-
-            try:
-                response = self.router.completion(
-                    model=self.config["model"],
-                    messages=sanitize_messages(retry_messages),
-                    max_tokens=GENERATION_MAX_TOKENS,
-                    **self._default_temperature_kwargs(self.config["model"]),
-                )
-                usage = response["usage"]
-                usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
-                usage_total["completion_tokens"] += usage.get("completion_tokens", 0)
-                usage_total["total_tokens"] += usage.get("total_tokens", 0)
-
-                content = response["choices"][0]["message"]["content"]
-                if content is None:
-                    raise ValueError("LLM returned None content during alias-retry.")
-
-                cleaned = self._clean_json_response(content)
-                json_data = self._repair_json(cleaned)
-                json_data = self._normalize_response(json_data)
-                retried = self.response_model.model_validate(json_data)
-                retried_dict = self.clean_query_set(retried.model_dump(), table_names)
-
-                # Re-apply the same planner-owned fields (including `tables`)
-                # the phase-1 queries got above — this is a FRESH LLM response,
-                # re-validated through the (tables-less) Query schema, so it
-                # never carries them on its own.
-                for q in retried_dict.get('queries', []):
-                    q.update(plan_fields)
-
-                # Re-partition: some may now be fixed, others still broken
-                newly_good, bad_queries = self._partition_queries(
-                    retried_dict.get("queries", []), all_aliases
-                )
-                good_queries.extend(self._enforce_single_query(newly_good))
-
-            except (json.JSONDecodeError, ValidationError, Exception) as e:
-                all_errors.append(
-                    f"Table-alias retry {alias_attempt + 1} failed with {type(e).__name__}: {e}"
-                )
-                time.sleep(self.retry_delay)
+            if not retried:
+                all_errors.append(f"Table-alias retry {alias_attempt + 1} produced no valid query set.")
+                continue
+            # Re-partition: some may now be fixed, others still broken
+            newly_good, bad_queries = self._partition_queries(retried, all_aliases)
+            good_queries.extend(self._enforce_single_query(newly_good))
 
         # After all alias retries, silently drop any still-failing queries
         if bad_queries:

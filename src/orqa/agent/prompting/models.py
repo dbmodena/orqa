@@ -6,7 +6,7 @@ query planner and column-statistics component. ``QueryLink`` is reused from
 existing plan-link contract is preserved.
 """
 
-from typing import List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field
 
@@ -17,7 +17,7 @@ from ..utility.structured_outputs import QueryLink, Table
 # Ops available to every plan (SQL and Pandas alike): plain relational/derive
 # steps, plus `clean` — a data-quality step (drop a column, impute, cast, or
 # drop rows) the planner adds explicitly when the raw per-column statistics
-# (see ColumnStat's nan_count/bad_token_counts/numeric_parseable_ratio) show
+# (see ColumnStat: nulls, missing tokens, number text, date text) show
 # it's warranted. Tables are no longer cleaned automatically before the
 # planner sees them (see utils.clean_columns/prepare_dataset), so this is
 # the planner's only lever over missing/dirty/miscast values. `correlate`,
@@ -106,7 +106,7 @@ _PLAN_TABLES_DESCRIPTION = (
 # into real code (see conf/prompts/*_statement_generation.md). The `clean`/
 # `derive` conventions exist because an outlier/rare value is NEVER
 # automatically noise: `clean` is for values that mean "no answer" (true
-# missing data, whether already counted in `bad_token_counts` or a new one
+# missing data, whether already listed as a missing token or a new one
 # the planner recognizes from COLUMN STATISTICS); `derive` is for values
 # that carry real information (a censoring convention, a qualitative label,
 # a genuine rare-but-real extreme) and deserve to become their own explicit,
@@ -119,13 +119,21 @@ _STEP_PARAMS_DESCRIPTION = (
     "For a `clean` step: `params` MUST be `{\"actions\": [...]}`, one entry "
     "per column-level decision: `{\"column\": <name>, \"action\": "
     "\"drop_column\"|\"drop_rows\"|\"impute\"|\"cast\"}`. `impute` adds "
-    "`\"strategy\": \"mean\"|\"median\"|\"mode\"|\"constant\"` (plus "
-    "`\"value\"` when strategy is `constant`); `cast` adds `\"to\": "
-    "\"numeric\"|\"string\"|\"datetime\"|\"boolean\"`. `impute`/`drop_rows` "
-    "MAY also add `\"treat_as_missing\": [<literal>, ...]` — specific values "
-    "(from `bad_token_counts`, `numeric_outliers`, or `minority_value_groups`) "
+    "`\"strategy\": \"mean\"|\"median\"|\"mode\"|\"constant\"|\"ffill\"` (plus "
+    "`\"value\"` when strategy is `constant`; `ffill` for a column COLUMN "
+    "STATISTICS shows as `filled down`); `cast` adds `\"to\": "
+    "\"numeric\"|\"string\"|\"datetime\"|\"boolean\"` and, for a column shown "
+    "as number text or date text, `\"format\"`: that fact copied from COLUMN "
+    "STATISTICS (e.g. `decimal comma; thousands dot` or `%d/%m/%Y`); for an "
+    "`ambiguous`/`mixed` number text or an `(order unknown)` date text, the one "
+    "reading you chose (e.g. `thousands comma` or `%m/%d/%Y`), never the "
+    "undecided fact. "
+    "`impute`/`drop_rows` "
+    "MAY also add `\"treat_as_missing\": [<literal>, ...]` — specific stored values "
+    "(from COLUMN STATISTICS: `missing tokens`, `not numbers`/`not dates` "
+    "values; far-high rows are excluded or flagged by their bound instead) "
     "the planner has judged to mean 'no answer' even though they weren't in "
-    "the configured bad-token list, e.g. an unlisted 'no data' phrasing or "
+    "the configured missing-value list, e.g. an unlisted 'no data' phrasing or "
     "an isolated numeric sentinel like `-1`/`999`. "
     "For a `derive` step whose purpose is to PRESERVE an outlier/rare-value "
     "pattern as its own feature rather than discard it: `params` SHOULD be "
@@ -351,58 +359,118 @@ class PandasQueryPlanSet(BaseModel):
 
 
 class ColumnStat(BaseModel):
-    """Cheap per-column statistics computed with pandas only (no LLM), on the
-    RAW table (before any cleaning — see utils.prepare_dataset). Feeds the
-    query planner's `clean`-step decisions: which columns are actually
-    missing/dirty/miscast, and by how much, rather than a pre-cleaned
-    ``null_ratio`` that already silently absorbed those judgment calls.
+    """Per-column facts computed with pandas only (no LLM) on the RAW table
+    (before any cleaning, see utils.prepare_dataset), rendered into the
+    planner, generation and correction prompts by
+    ``prompts.render_column_statistics``.
+
+    Every field holds RAW built-in Python values (int, float, str, bool; no
+    numpy scalars); all display formatting (number spelling, quoting,
+    cutting) happens in the renderer. A field left at its default means
+    "nothing to report" and is not rendered. Which fields a column gets
+    depends on its kind: numbers (``statistics.py``), text, number text,
+    date text, digit codes, geometry, free text (``text_profile.py``).
     """
 
     column: str
     dtype: str
     cardinality: int
-    null_ratio: float  # 0..1 — true NaN only (pandas' own NA detection)
-    nan_count: int = 0  # true NaN count (same signal as null_ratio, absolute)
-    bad_token_counts: dict = {}  # {literal sentinel token: count}, portal-specific
-    numeric_parseable_ratio: Optional[float] = None  # object columns only; see utils._numeric_parse_ratio
-    numeric_min: Optional[float] = None
-    numeric_max: Optional[float] = None
-    numeric_mean: Optional[float] = None
-    # Numeric-dtype columns only: Tukey IQR-fenced outliers — detection only,
-    # no judgment on whether they're noise (a sentinel, a data-entry error)
-    # or signal (a genuine rare-but-real extreme). None when too few rows or
-    # no values fall outside the fence. Shape: {"low_count", "high_count",
-    # "low_examples", "high_examples", "low_fence", "high_fence"}.
-    numeric_outliers: Optional[dict] = None
-    # Numeric-dtype columns only: a value AT the column's own min or max that
-    # repeats far more often than the column's cardinality would predict
-    # under a roughly uniform spread — the classic top-/bottom-coding
-    # signature in data that's ALREADY numeric (e.g. hundreds of rows
-    # reading exactly 90 in an age column capped at "90 or older"). Distinct
-    # from numeric_outliers above: that flags a RARE Tukey-fence extreme;
-    # this flags a FREQUENT one at the boundary — the two can legitimately
-    # both fire for the same value (a whole "shelf" of capped values sitting
-    # beyond the fence is itself the strongest evidence of top-coding). None
-    # when neither side clears the detection thresholds (see
-    # ColumnStatistics.compute). Shape: any subset of {"low": {"value",
-    # "count", "ratio"}, "high": {"value", "count", "ratio"}} — only the
-    # side(s) that cleared the thresholds are present.
-    numeric_pinned_extreme: Optional[dict] = None
-    top_values: List[str] = []  # top categorical values (bounded)
-    # Object-dtype columns only: the tail beyond top_values, grouped into
-    # cheap structural shapes (see utils._generalize_value_shape) so a table
-    # with many distinct rare values still stays compact. Bounded top-k,
-    # excludes exact bad-token matches. Each entry:
-    # {"pattern", "count", "examples"}.
-    minority_value_groups: List[dict] = []
+    null_ratio: float  # 0..1, true NaN only (pandas' own NA detection)
+    nan_count: int = 0
+    # Rendered type: "int", "float", "float, whole numbers", "str", "bool",
+    # "mixed (str ×a, int ×b)", ...; "" lets the renderer derive it from dtype.
+    type_label: str = ""
+
+    # Domain. `values` is the COMPLETE list of (raw value, rows) in rendered
+    # order; `top_values` only the most common ones.
+    constant: Optional[Any] = None
+    values: List[Tuple[Any, int]] = []
+    top_values: List[Tuple[Any, int]] = []
+    # "Most common" never stops inside a tie: the values left out that share
+    # the tied count ({"values": t, "rows": c}), or, when every value has the
+    # same count, that count alone (domain "k distinct, each ×c").
+    top_values_tied: Optional[dict] = None
+    uniform_count: Optional[int] = None
+    same_as: Optional[str] = None  # identical to this earlier column
+    # Structural evidence that the column names records (never a verdict):
+    # {"kind": "sequence" | "unique" | "unique_distinct_rows" | "code_of" |
+    # "row_key" | "fixes", "of": [columns]} — see statistics.py.
+    identifier: Optional[dict] = None
+    # A text column written once at the top of each block and blank below
+    # (spreadsheet fill-down): {"filled": rows holding a value, "rows": rows}.
+    filled_down: Optional[dict] = None
+    # Whole numbers that are calendar dates (20200416): {"min", "max"} as
+    # "YYYY-MM-DD"; range and quartiles are then left out.
+    date_number: Optional[dict] = None
+    # Text columns: distinct values that are not blank and not missing tokens
+    # (the "k distinct" / "all distinct" the renderer shows; cardinality also
+    # counts the blank and token spellings).
+    usable_distinct: Optional[int] = None
+    # Shown length of a long text value whose first 59 characters are shared
+    # with another stored value: raw value -> characters to show (<= 120), so a
+    # cut value stays a unique prefix.
+    cut_hints: Dict[str, int] = {}
+
+    # Numbers (numeric dtype, or object columns holding only numbers).
+    # int for integer columns: an 18-digit code kept as float64 printed a
+    # bound that is no stored value (NYC OFT codes).
+    numeric_min: Optional[Union[int, float]] = None
+    numeric_max: Optional[Union[int, float]] = None
+    sequence: Optional[dict] = None  # {"step", "gaps", "row_order"}
+    quartiles: List[Union[int, float]] = []
+    far_high: Optional[dict] = None  # {"values": [...], "rows", "below", "block"}
+    repeated_extreme: Dict[str, dict] = {}  # {"min"|"max": {"value", "rows"}}
+    negative_rows: int = 0
+    # Rows holding +inf/-inf (pandas reads "inf" text as float inf): left out
+    # of range and quartiles, and a SUM or AVG over them is inf.
+    infinite_rows: int = 0
+
+    # Text cleanliness.
+    blank: int = 0
+    untrimmed: int = 0
+    # Configured missing-value spellings, by raw stored spelling. Rendered as
+    # their own fact only when the domain is not a complete list; listed
+    # values/constant that are such tokens are named in missing_token_values.
+    missing_tokens: List[Tuple[str, int]] = []
+    missing_tokens_other_rows: int = 0
+    # {rows, spellings} of the unlisted spellings, when the profile cut the list.
+    missing_tokens_other: Optional[dict] = None
+    missing_token_values: List[str] = []
+    # Token spellings that look like the column's other values (letters only,
+    # same case pattern: "Nan" in a first-name column), shown as such.
+    missing_tokens_plausible: List[str] = []
+    # Untrimmed values whose trimmed form is also stored (trimming merges them).
+    untrimmed_merges: int = 0
+    variants: Optional[dict] = None  # {"groups", "rows", "examples": [raw]}
+
+    # Text kind: at most one of number / date / date_like_shape / digits /
+    # geometry / text_kind / shape is set.
+    number: Optional[dict] = None
+    date: Optional[dict] = None
+    date_like_shape: Optional[str] = None
+    digits: Optional[dict] = None
+    geometry: Optional[str] = None
+    text_kind: Optional[str] = None  # "URLs" | "emails" | "free text"
+    text_length: Optional[int] = None
+    shape: Optional[str] = None
+    patterns: List[Tuple[str, int]] = []
+    # Usable values of a number/date/digit column that do not conform, or
+    # that a code shape does not fit (`not matching`):
+    # {"value", "rows"} or {"shape", "rows", "example"}.
+    other: List[dict] = []
+    other_rows: int = 0
 
 
 class TableStats(BaseModel):
-    """Per-table statistics: row count plus per-column statistics."""
+    """Per-table statistics: row count, per-column facts, and table facts
+    (``structure``: empty_rows, repeated_rows, total_row, total_rows, grain,
+    one_to_one, determines, determines_more, sum_columns; built-in types
+    only, see ``table_structure.py``)."""
 
     alias: str
     num_rows: int
     columns: List[ColumnStat]
+    structure: Dict[str, Any] = {}
 
 
 # ---------------------------------------------------------------------------

@@ -33,6 +33,7 @@ from .agents.QuestionStage import (
     QuestionStageResult,
     QuestionStageSession,
     tiers_for,
+    build_question_tables_context,
 )
 from .agents.StatementClient import LLMClientStatementGenerator
 from .agents.StatementValidator import LLMStatementValidator
@@ -41,8 +42,10 @@ from .agents.table_analyzer import (
     portal_metadata,
     prompt_metadata,
     render_table_facts,
+    table_identities,
 )
 from ..utils.pipeline_logger import PipelineLogger
+from ..utils.generation_trace import trace_event
 from .prompting import (
     CandidatesDiscoveryPrompt,
     ColumnStatistics,
@@ -58,6 +61,7 @@ from .prompting import (
     SingleTableSQLPrompt,
     SQLStatementGenerationPrompt,
 )
+from .prompting.prompts import render_column_statistics
 from .prompting.models import (
     ExecutionTrace,
     JudgeTrace,
@@ -94,18 +98,22 @@ JUDGE_CONCURRENCY = 6
 # rejected more than this many times (the validator-judge loop runs
 # 1 + MAX_QUERY_CORRECTIONS iterations so every retry can actually happen);
 # a plan rejected by the plan panel is revised (QueryPlanner.revise_plan) and
-# re-judged up to MAX_PLAN_CORRECTIONS times.
-MAX_QUERY_CORRECTIONS = 3
-MAX_PLAN_CORRECTIONS = 3
+# re-judged up to MAX_PLAN_CORRECTIONS times. 5 (was 3), validity over
+# tokens: in experiments/structured_stability (2026-11-03) one code approval
+# came on the 5th judge round and plan approvals needed up to 3 revisions
+# with structural re-requests inside them; the former bound lost those.
+MAX_QUERY_CORRECTIONS = 5
+MAX_PLAN_CORRECTIONS = 5
 
-# Output-token cap for every judge call (code panel, plan panel, single-judge
+# Output budget for every judge call (code panel, plan panel, single-judge
 # fallback). Must leave headroom for REASONING models (gemini-2.5-flash,
 # gpt-oss): their hidden thinking tokens count against max_tokens, and a judge
-# that exhausts the cap while still thinking returns a choice with
-# finish_reason=max_tokens and NO message — which litellm's OCI transformer
-# rejects, so the judge produces no verdict at all. 2000 was routinely consumed
-# by thinking alone (~1997 reasoning tokens observed) before any JSON came out.
-JUDGE_MAX_TOKENS = 4096
+# that exhausts the cap while still thinking returns an empty or cut verdict
+# with finish_reason "stop" (OCI) — the former 4096 was hit three times on a
+# 6-table payload (completion tokens ran 1.5k–3.9k there). 32000 is the
+# explicit budget every structured call now carries; JudgePanel escalates it
+# further when a verdict is still cut (see LLMClientStructured).
+JUDGE_MAX_TOKENS = 32000
 
 # Keys on an executed-result record that are INTERNAL bookkeeping and must not
 # reach the code judge's payload. `_original_query` is a full deep copy of the
@@ -1086,13 +1094,13 @@ class StatementOrchestrator:
         self.config_path = config_path
         self.kind = kind
         self.bad_tokens = bad_tokens
-        # Reverse index (DatasetIndex/ESDatasetIndex, or None when
+        # Reverse index (DatasetIndex/SolrDatasetIndex, or None when
         # unavailable) the pre-planning keyword search runs on to find the
         # anchor a question is written from (see _run). The question stage's
         # own retrievability gate — orqa.agent.utility.question_gate, via
         # retrievability_gate.check_question_retrievability — votes the
         # question across the retrieval_panel below.
-        # `retrieval_gate_enabled=False` (tasks.mcp_search.
+        # `retrieval_gate_enabled=False` (tasks.search.
         # retrieval_gate_enabled in the workflow yaml) is the master off
         # switch for the retrieval gate as a whole — it's implemented by
         # simply treating the index (and, below, the retrieval_panel) as
@@ -1108,7 +1116,7 @@ class StatementOrchestrator:
         self._keyword_search_top_k_coefficient = keyword_search_top_k_coefficient
         # Whether the pre-planning retrievability check (see _run) may
         # ABORT a table group as "unretrievable_group" when it can't find a
-        # keyword combination that works (tasks.mcp_search.
+        # keyword combination that works (tasks.search.
         # gate_unretrievable_groups in the workflow yaml). False: the check
         # still runs and still hands the planner a verified anchor when one
         # is found — only the abort-on-failure half is gated.
@@ -1116,7 +1124,7 @@ class StatementOrchestrator:
         # The retrievability CONTRACT (see
         # orqa.agent.utility.retrievability_gate): the
         # retrieval_panel is None exactly when the contract is unavailable
-        # or disabled (tasks.mcp_search.retrieval_contract.enabled, or the
+        # or disabled (tasks.search.retrieval_contract.enabled, or the
         # master retrieval_gate_enabled switch) — same "None means off"
         # convention as self._search_index above, so _run only needs to
         # check for None rather than a separate enabled flag.
@@ -1483,11 +1491,17 @@ class StatementOrchestrator:
                 )
                 dfs.append(df)
                 infos.append(dataset_info)
-                # Cheap, LLM-free per-table statistics (Requirement 7), including
-                # raw missing-value/bad-token signal for the planner's `clean` step.
+                # Cheap, LLM-free per-table statistics (Requirement 7): how each
+                # column is stored (missing tokens, number/date text, extremes) and
+                # the table's structure, for the planner's `clean` step and the code.
+                # ``source``: a parquet table of 1M+ rows gets its frequency
+                # tables through Arrow (same facts, 1.6x faster on 113M rows).
                 stats.append(
                     ColumnStatistics.compute(
-                        df, alias=f"Table_{idx}", bad_tokens=self.bad_tokens
+                        df,
+                        alias=f"Table_{idx}",
+                        bad_tokens=self.bad_tokens,
+                        source=dataset_path,
                     )
                 )
                 total_columns += len(df.columns)
@@ -1563,6 +1577,13 @@ class StatementOrchestrator:
                 suggestion, adaptive_top_k, per_table_suggestions = self._group_anchor(
                     plan_tables, adaptive_top_k
                 )
+                trace_event(
+                    "anchor_search",
+                    top_k=adaptive_top_k,
+                    achieved=bool(suggestion.get("achieved")),
+                    suggestion=suggestion,
+                    per_table=per_table_suggestions or None,
+                )
                 if suggestion["achieved"]:
                     retrievable_keywords = suggestion["keywords"]
                     self._log.info(
@@ -1596,7 +1617,7 @@ class StatementOrchestrator:
                         "found within the bounded metadata-vocabulary search."
                     )
                     # Whether this actually ABORTS the group is a config
-                    # choice (tasks.mcp_search.gate_unretrievable_groups).
+                    # choice (tasks.search.gate_unretrievable_groups).
                     # The bounded-search miss is always logged; only the
                     # decision to skip planning over it is gated. When not
                     # gated, planning proceeds WITHOUT a verified anchor
@@ -1664,11 +1685,30 @@ class StatementOrchestrator:
             # own anchor — table vocabulary only, independent of any specific
             # question's wording.
             single_table_anchors: dict[str, list[str]] = {}
+            # Anchor terms a person would never type as written (see
+            # keyword_suggestion.is_speakable_term): the writer is told to say
+            # what they mean, never to paste them.
+            anchor_code_terms: dict[str, list[str]] = {}
             if mode == MULTI and self._search_index is not None:
                 for t in plan_tables:
                     suggestion = per_table_suggestions.get(t["alias"]) or self._suggest_single(t)[0]
                     if suggestion["achieved"]:
                         single_table_anchors[t["alias"]] = suggestion["keywords"]
+                        if suggestion.get("unspeakable_keywords"):
+                            anchor_code_terms[t["alias"]] = list(suggestion["unspeakable_keywords"])
+                    trace_event(
+                        "table_anchors",
+                        alias=t["alias"],
+                        achieved=bool(suggestion.get("achieved")),
+                        keywords=suggestion.get("keywords"),
+                        ranks=suggestion.get("ranks"),
+                        missing_tables=suggestion.get("missing_tables"),
+                        unspeakable_keywords=suggestion.get("unspeakable_keywords"),
+                    )
+            elif self._search_index is not None and retrievable_keywords and len(aliases) == 1:
+                codes = list((suggestion or {}).get("unspeakable_keywords") or [])
+                if codes:
+                    anchor_code_terms[next(iter(aliases))] = codes
 
             # ── Build the generation prompt ONCE after the loop ────────────
             # (Fixes the prompt-statefulness issue: descriptions are gathered
@@ -1717,6 +1757,7 @@ class StatementOrchestrator:
                 retrieval_contract=retrieval_contract,
                 retrievable_keywords=retrievable_keywords,
                 single_table_anchors=single_table_anchors,
+                anchor_code_terms=anchor_code_terms,
             )
             stage_result = question_session.run(tiers_for(self.num_query_plans))
             question_stage_ms = (time.perf_counter() - _t) * 1000.0
@@ -1763,6 +1804,7 @@ class StatementOrchestrator:
                 questions=self._questions_for_planning(approved_questions),
             )
             planning_ms = (time.perf_counter() - _t) * 1000.0
+            self._trace_plans("initial", approved_questions, plans)
 
             # Log every produced plan (question, ordered steps) before the
             # judge loop touches them.
@@ -1878,6 +1920,19 @@ class StatementOrchestrator:
                 last_model = model or last_model
 
                 plan_queries = query_set.get("queries", []) or []
+                trace_event(
+                    "code_generated",
+                    plan_index=plan_idx,
+                    plans=len(plans),
+                    question=getattr(plan_item, "question", ""),
+                    model=model,
+                    tokens=tokens,
+                    errors=list(errors or []),
+                    queries=[
+                        {k: q.get(k) for k in ("id", "client_id", "question", "code")}
+                        for q in plan_queries if isinstance(q, dict)
+                    ],
+                )
                 if not plan_queries:
                     reason = "; ".join(errors) if errors else "no errors reported by the generation client"
                     self._log.warning(
@@ -1987,6 +2042,10 @@ class StatementOrchestrator:
                 dfs=execution_dfs,
                 aliases=aliases,
                 table_schemas=table_schemas,
+                # Rendered once per run so every correction prompt carries the
+                # same bytes (a shared cacheable prefix across the concurrent
+                # one-query correction calls).
+                column_statistics=render_column_statistics(stats),
                 judge=judge,
                 all_tokens=all_tokens,
                 all_errors=all_errors,
@@ -2135,7 +2194,11 @@ class StatementOrchestrator:
                     info["num_rows"],
                     info["num_columns"],
                     metadata_i,
-                    info["columns_details"],
+                    # The Column Statistics block appended to this prompt
+                    # (build_generation_prompt) already gives every column's
+                    # type, nulls and distinct count; repeating them here only
+                    # costs tokens and can disagree with its typing.
+                    "(dtypes, nulls and distinct counts: see ### Column Statistics below)",
                     info["sample_data"],
                 )
             )
@@ -2195,6 +2258,7 @@ class StatementOrchestrator:
         retrieval_contract: Optional[RetrievalContract],
         retrievable_keywords: Optional[list[str]],
         single_table_anchors: Optional[dict],
+        anchor_code_terms: Optional[dict] = None,
     ) -> QuestionStageSession:
         """Build this run's question stage and everything it runs on — see
         ``QuestionStage``. The returned session both runs the stage and
@@ -2226,26 +2290,18 @@ class StatementOrchestrator:
                 {alias_list[0]: list(retrievable_keywords)}
                 if retrievable_keywords and alias_list else {}
             )
+        # Each table's identity (dated span of its rows, file name, publisher,
+        # distinguishing words) is computed once and shown to BOTH the writer
+        # (TABLE IDENTITY block) and the judge (`identity` in the payload), so
+        # the two read the same periods.
+        identities = table_identities(list(aliases), list(dfs or []), table_metadata)
         context = self._planner.question_context(
             analyses, aliases, match, involved_cols, stats, self.languages,
-            dfs=dfs, table_metadata=table_metadata,
+            dfs=dfs, table_metadata=table_metadata, identities=identities,
         )
-        tables_context = {
-            # Alias NAMES only: the values of `aliases` are the tables' file
-            # stems, i.e. the portal's dataset and resource ids — no
-            # information for a judge.
-            "aliases": list(aliases),
-            "analyses": list(analyses),
-            "metadata": table_metadata or {},
-            "columns": {
-                table.alias: [f"{c.column} ({c.dtype})" for c in table.columns]
-                for table in stats
-            },
-            "facts": {
-                alias: render_table_facts(df).splitlines()
-                for alias, df in zip(aliases, dfs or [])
-            },
-        }
+        tables_context = build_question_tables_context(
+            aliases, analyses, table_metadata, stats, dfs, identities=identities
+        )
 
         # Every header a question could copy: the columns the writer was shown
         # plus the loaded tables' own (the two can differ by the column budget).
@@ -2277,6 +2333,21 @@ class StatementOrchestrator:
             tables_context=tables_context,
             anchors=anchors,
             contract=retrieval_contract,
+            code_terms={a: t for a, t in (anchor_code_terms or {}).items() if a in anchors},
+        )
+
+    @staticmethod
+    def _trace_plans(phase: str, questions: list, plans: list) -> None:
+        """A ``plans`` trace event: the approved questions handed to the
+        planner, the plans it returned, and the questions it returned no plan
+        for (the planner dropping a question is a failure of its own)."""
+        planned = {getattr(p, "question", "") for p in plans}
+        trace_event(
+            "plans",
+            phase=phase,
+            questions=[q.get("question") for q in questions],
+            unplanned=[q.get("question") for q in questions if q.get("question") not in planned],
+            plans=[p.model_dump() if hasattr(p, "model_dump") else p for p in plans],
         )
 
     @staticmethod
@@ -2356,6 +2427,7 @@ class StatementOrchestrator:
                 }
                 for q in lost
             ]
+            trace_event("question_rewrite", requests=requests)
             rewritten = session.rewrite(requests)
             self._accumulate_tokens(usage, rewritten.usage)
             self._record_replans(question_feedback, requests, rewritten)
@@ -2369,6 +2441,7 @@ class StatementOrchestrator:
                 table_metadata=table_metadata,
                 questions=new_questions,
             )
+            self._trace_plans("rewrite", rewritten.approved, new_plans)
             if new_plans and self._plan_panel.is_configured:
                 new_plans, fb, panel_usage, _abort, attempts = self._judge_plans(
                     new_plans, analyses, aliases, stats,
@@ -2577,6 +2650,14 @@ class StatementOrchestrator:
                         "panel": last_panel,
                     }
                 )
+                trace_event("plan_judge_attempt", **{
+                    "plan_index": plan_idx,
+                    "plans": len(plans),
+                    "max_attempts": 1 + MAX_PLAN_CORRECTIONS,
+                    "failed_layers": failed_layers,
+                    "unjustified_tables": judgment.get("unjustified_tables"),
+                    **attempts[-1],
+                })
 
                 # Every judge's vote, feedback and suggestion for this attempt.
                 self._log.panel_votes(last_panel, level=1)
@@ -2676,7 +2757,7 @@ class StatementOrchestrator:
                 if revised is None:
                     self._log.warning(
                         f"Plan {plan_idx}: revision failed structural validation "
-                        "twice — stopping the correction loop for this plan."
+                        "after every re-request — stopping the correction loop for this plan."
                     )
                     break
                 self._log.plan_revised(
@@ -2709,6 +2790,14 @@ class StatementOrchestrator:
             if table_driven:
                 entry["rejected_for_unjustified_tables"] = True
             plan_feedback.append(entry)
+            trace_event(
+                "plan_judge_result",
+                plan_index=plan_idx,
+                question=entry["question"],
+                approved=approved,
+                rounds=len(attempts),
+                rejected_for_unjustified_tables=table_driven,
+            )
             scored.append((last_panel.get("approve_votes", 0), current, entry))
             # Keyed by identity so it survives regardless of whether `current`
             # is later kept outright, kept as the fallback, or dropped.
@@ -2838,6 +2927,7 @@ class StatementOrchestrator:
         dfs: list,
         aliases: dict,
         table_schemas: str,
+        column_statistics: str,
         judge: JudgementResponseAgent,
         all_tokens: dict,
         all_errors: list,
@@ -2847,6 +2937,10 @@ class StatementOrchestrator:
 
         Mirrors the legacy agents' loop: it runs at most ``max_judge_iterations``
         times. Approved queries are accumulated across iterations.
+
+        ``column_statistics`` is the run's rendered column-statistics block; every
+        correction prompt carries it, so the corrector sees how a value that
+        broke a cast or a filter is actually stored.
 
         ``plan_by_client_id`` (the same map built in Phase 2, keyed by the
         opaque ``client_id`` each query carries) is threaded into the validator
@@ -2969,6 +3063,12 @@ class StatementOrchestrator:
                     "panel": dict(panel) if panel else {},
                 }
             )
+            trace_event("code_verdict", **{
+                "query_id": q.get("id"),
+                "client_id": q.get("client_id", ""),
+                "question": q.get("question", ""),
+                **events[-1],
+            })
 
         for iteration in range(self.max_judge_iterations):
             self._log.step2_start(iteration + 1)
@@ -2981,6 +3081,7 @@ class StatementOrchestrator:
                 dfs,
                 aliases,
                 table_schemas=table_schemas,
+                column_statistics=column_statistics,
                 judge_feedback=structured_judge_feedback,
             )
             _val_dt = time.perf_counter() - start
@@ -2989,6 +3090,14 @@ class StatementOrchestrator:
 
             self._log.validator_result(
                 queries_before_validation, pending_queries, errors=val_errors
+            )
+            trace_event(
+                "validator_round",
+                iteration=iteration + 1,
+                queries_in=[str(q.get("id")) for q in queries_before_validation],
+                queries_out=[str(q.get("id")) for q in pending_queries],
+                errors=list(val_errors or []),
+                tokens=val_tokens,
             )
             self._accumulate_tokens(all_tokens, val_tokens)
 
@@ -3874,8 +3983,8 @@ class StatementOrchestrator:
                 _fail(
                     er,
                     "Empty result: the plan could not be revised (failed "
-                    "structural validation twice). One retry already "
-                    "exhausted.",
+                    "structural validation after every re-request). One retry "
+                    "already exhausted.",
                     history=[round_1],
                 )
                 continue

@@ -132,6 +132,12 @@ class QueryExecutor:
                 "Install it with: pip install duckdb"
             )
         con = duckdb.connect(database=":memory:")
+        # A safety net for timestamp text with UTC offsets: the generation
+        # recipes give UTC on their own (timezone('UTC', ... TIMESTAMPTZ)),
+        # but a stray TIMESTAMPTZ -> TIMESTAMP cast follows the session zone,
+        # and the validator's and executor's results must not depend on the
+        # machine's clock.
+        con.execute("SET TimeZone='UTC'")
         for alias, df in dataframes.items():
             con.register(alias, df)
         try:

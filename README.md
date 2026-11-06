@@ -44,6 +44,18 @@ A local installation of Apache Solr search engine allows us to simulate a CKAN O
 After you have downloaded an Apache Solr release (OrQA is tested on [9.10][https://www.apache.org/dyn/closer.lua/solr/solr/9.10.0/solr-9.10.0.tgz?action=download]),
 you can load the metadata fetched during the crawling stage to the Apache Solr server with the Python class "src/solr/solr.py:Solr".
 
+Do not run `src/solr/solr.py` against the shared Solr instance: its domain names (`uk`, `nyc`, `bologna`, `paris`, `valencia`) are the names
+of LakeGen's live cores, and `create`, `delete`, `post`, `reload` or `refresh` would destroy or overwrite them. Retrieval does not need it:
+for uk, nyc, bologna, paris and valencia, OrQA queries LakeGen's own cores read-only at `$SOLR_URL` (default `http://localhost:8983/solr`).
+
+- LLM models
+
+The models every stage calls are configured in `conf/llm/litellm.yaml` (LiteLLM model strings; OCI credentials are read from `.env`).
+The dedicated OCI AI cluster is addressed through the `deployments` section of that file, over OCI's OpenAI-compatible route with the
+Generative AI API key: each deployment names the endpoint OCID (`DEDICATE_OCI_MODEL` / `_MODEL_2` / `_MODEL_3` in `.env`), the base URL
+(`DEDICATE_OCI_BASE_URL`) and the key (`DEDICATED_API_KEY`), and may cap the answer length with `max_output_tokens`. A deployment name can
+be used wherever a model is referenced (`model`, `fallback_models`, `judge_profiles.*`). See `docs/structured-output.md`.
+
 ---
 
 ### Run the Workflow
@@ -56,4 +68,10 @@ To run a workflow, you can call:
 ```sh
 $ python main.py <canada | uk>
 ```
+
+The benchmark's search side (LakeGen's Solr cores, the builtin index for the
+portals without one, the retrievability gate's retrievers) is documented in
+[docs/benchmark-retrieval.md](docs/benchmark-retrieval.md). The retired
+Elasticsearch backend, and how to bring it back, is in
+[legacy/elasticsearch/README.md](legacy/elasticsearch/README.md).
 

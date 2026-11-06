@@ -4,9 +4,9 @@ A question is only *retrievable* if it would actually be found — not by one
 search method's opinion, but by AGREEMENT across independently-built
 retrievers: lexical BM25 over the raw question text, a dense/semantic
 ranking of the embedded question, and BM25 over keywords an independent LLM
-call extracts from the question (the same call the benchmark solver itself
-makes — see ``orqa.agent.agents.BenchmarkSolver.BenchmarkSolverAgent.
-generate_keywords``). See ``orqa.agent.utility.retrievability_gate`` for how
+call extracts from the question (see ``orqa.agent.agents.SearchKeywords.
+SearchKeywordsAgent.generate_keywords``). See
+``orqa.agent.utility.retrievability_gate`` for how
 the panel's vote becomes a pass/fail gate.
 
 Ranks are those of the exact gold table: a retriever finds a table when the
@@ -28,7 +28,7 @@ RANK_CEILING = 200
 # Every retriever a panel can hold, in the order they vote and are reported.
 #   lexical_question — BM25 over the raw question text (additive)
 #   dense_question   — embedding search over the question
-#   llm_keywords     — the solver's own LLM keyword extraction, searched
+#   llm_keywords     — an LLM's keyword extraction from the question, searched
 #                      lexically (AND-matched, portal-restricted, when the
 #                      panel is given a portal view as its ``keyword_index``)
 #   hybrid_rrf       — Reciprocal Rank Fusion of llm_keywords + dense_question,
@@ -50,7 +50,7 @@ def _unpack_keyword_result(result: Any) -> tuple[list[str], dict]:
     """Normalize a keyword extractor's return into ``(keywords, usage)``.
 
     Accepts either a plain ``[str, ...]`` (or ``{"keywords": [...]}``) or the
-    ``(payload, usage)`` tuple ``BenchmarkSolverAgent.generate_keywords``
+    ``(payload, usage)`` tuple ``SearchKeywordsAgent.generate_keywords``
     returns, so a caller may pass that method directly.
     """
     usage: dict = {}
@@ -65,31 +65,33 @@ def _unpack_keyword_result(result: Any) -> tuple[list[str], dict]:
 
 
 def make_llm_keyword_extractor(config_path) -> Callable[[str], Any]:
-    """A ``keyword_extractor`` bound to a fresh ``BenchmarkSolverAgent`` —
-    the solver's OWN keyword-generation call (``conf/prompts/
-    benchmark_search_keywords.md``), reused here so the retrievability gate
-    checks against the exact vocabulary a real solver would search with.
+    """A ``keyword_extractor`` bound to a fresh ``SearchKeywordsAgent`` —
+    its keyword-generation call (``conf/prompts/
+    benchmark_search_keywords.md``), so the retrievability gate checks
+    against the vocabulary a user would search with.
 
     Imported lazily to avoid a module-load-time dependency between
     ``orqa.benchmark`` and ``orqa.agent`` — mirrors ``orqa.benchmark.index.
     load_index``'s lazy hybrid-retrieval import.
     """
-    from ..agent.agents.BenchmarkSolver import BenchmarkSolverAgent
+    from ..agent.agents.SearchKeywords import SearchKeywordsAgent
 
-    return BenchmarkSolverAgent(config_path).generate_keywords
+    return SearchKeywordsAgent(config_path).generate_keywords
 
 
 class RetrieverPanel:
     """Builds and queries whichever retrievers are actually available.
 
     Args:
-        lexical_index: A ``DatasetIndex``/``ESDatasetIndex``-compatible
-            backend (``search(keywords, top_k)`` -> ``[SearchResult, ...]``).
+        lexical_index: Any index with ``search(keywords, top_k)`` ->
+            ``[SearchResult, ...]`` (``DatasetIndex``, ``SolrDatasetIndex``).
             When ``hybrid_index`` is given, its own ``lexical_index`` is used
             instead, so ``lexical_question`` always searches plain BM25 even
             when the caller's main index is the hybrid fusion.
-        hybrid_index: A ``HybridDatasetIndex`` exposing ``semantic_search_many``,
-            or ``None`` to skip the ``dense_question`` retriever.
+        hybrid_index: The dense retriever — any index exposing
+            ``semantic_search_many(texts, top_k)``: a ``HybridDatasetIndex``
+            (local metadata embeddings) or a ``SolrDatasetIndex`` (the core's
+            KNN) — or ``None`` to skip the ``dense_question`` retriever.
         keyword_extractor: ``question -> keywords`` (or ``(payload, usage)``,
             see ``_unpack_keyword_result``), or ``None`` to skip
             ``llm_keywords``. See ``make_llm_keyword_extractor``.
@@ -104,13 +106,12 @@ class RetrieverPanel:
             answer the way the portal's AND-matching keyword search does.
         universe: Resource ids the target search engine actually holds. Every
             retriever's ranking is restricted to them, so a retriever that
-            ranks a wider collection (the local embedding cache covers the
-            whole normalized metadata; a Solr core may hold only part of it)
-            competes on the same field the real portal does. ``None`` keeps
-            every ranked id.
+            ranks a wider collection (a Solr core holds only the non-empty
+            local tables, not every normalized record) competes on the same
+            field the real portal does. ``None`` keeps every ranked id.
         rrf_k / rrf_depth: ``hybrid_rrf``'s RRF constant (LakeGen uses 60) and
             how many results each side contributes before fusing (LakeGen
-            fetches top 20).
+            fetches top_k 20 x candidate_multiplier 5 = 100 per branch).
     """
 
     def __init__(
@@ -124,7 +125,10 @@ class RetrieverPanel:
         rrf_depth: int = 20,
         universe: Optional[Iterable[str]] = None,
     ):
-        self.lexical_index = getattr(hybrid_index, "lexical_index", None) or lexical_index
+        # ``is not None``, not ``or``: an index defines ``__len__``, so ``or``
+        # would ask a Solr core for its size and drop an empty one.
+        hybrid_lexical = getattr(hybrid_index, "lexical_index", None)
+        self.lexical_index = hybrid_lexical if hybrid_lexical is not None else lexical_index
         self.keyword_index = keyword_index if keyword_index is not None else self.lexical_index
         self.hybrid_index = hybrid_index
         self.keyword_extractor = keyword_extractor

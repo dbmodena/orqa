@@ -1,6 +1,20 @@
 seed: 42
 source: ckan
 
+# Run log: every `src/main.py` run appends what it prints (colour codes
+# stripped, a progress bar's final state) and its logging records (OrQA's
+# from `level` up, libraries' from WARNING up), timestamped, to
+# <write_path>/<dir>/<file>. The file rotates at `max_size` into <file>.1 and
+# <file>.2 (`files` files in all); once they are all full the oldest is
+# overwritten. The live log is always <file>. `dir` may also be absolute.
+logging:
+  enabled: true
+  dir: log
+  file: orqa.log
+  max_size: 25MB
+  files: 3
+  level: INFO
+
 pandas:
   read:
     csv:
@@ -95,18 +109,26 @@ tasks:
     max_memory_usage: 512
     max_pool_time: 60
     languages: ["French","English"]
+    # Generation trace (orqa.utils.generation_trace): one folder per
+    # generate-statements run with every question attempt (gate votes, judge
+    # panel, feedback), every plan and plan-judge round, the generated code and
+    # its validator/judge verdicts, every LLM call's outcome (the raw answer
+    # when it failed), warnings, errors and crashed groups — written as it
+    # happens, so a run killed mid-group keeps its trail. `dir` is relative to
+    # write_path (or absolute); the folder gets its own `*` .gitignore.
+    # Start with <dir>/latest/groups.jsonl (one line per group: status and
+    # where it stopped), then grep events.jsonl by group.
+    trace:
+      enabled: true
+      dir: log/generation
+      # Every LLM call of a group, as sent and received, in
+      # <run>/llm/<group>.txt: the user message, parameters, reasoning and raw
+      # answer (each system prompt once in llm/system/), in call order, with
+      # the outcome and errors above each call. all | failed (only attempts
+      # that gave no usable answer) | off. About 0.6 MB per group.
+      llm_io: all
 
-  # Reverse-index backend — used by the question stage's retrievability gate and the solve-benchmark step (see orqa.benchmark.solve)
-  mcp_search:
+  # Reverse-index backend — used by the question stage's retrievability gate
+  search:
     backend: builtin  # local BM25 index under <data_path>/index/ — no external service needed
-    elasticsearch_url: http://localhost:9200
 
-  # Round-trip benchmark solver (step: solve-benchmark) — see
-  # orqa.benchmark.solve / src/orqa/benchmark/readme.md.
-  benchmark_solver:
-    # How many candidate tables the reverse-index search retrieves per
-    # question, and the scope of the pairwise Valentine relationship pass.
-    top_k_tables: 10
-    # Valentine matcher for that pairwise pass — schema-only and fast:
-    # up to C(top_k_tables, 2) pairs get matched per question.
-    matcher: similarity_flooding
