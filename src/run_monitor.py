@@ -550,4 +550,4 @@ def status() -> dict[str, Any]:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    return (_HERE / "static" / "monitor.html").read_text()
+    return (_PROJECT_ROOT / "static" / "monitor.html").read_text()

@@ -38,9 +38,9 @@ from orqa.embedding_discovery.clustering import compute_cluster_projection, save
 from orqa.queries.query_execution import QueryExecutor
 from orqa.utils import load_json
 
-_HERE = Path(os.path.dirname(__file__))
+_HERE = Path(__file__).resolve().parent
 _PROJECT_ROOT = _HERE.parent
-_STATIC_DIR = _HERE / "static"
+_STATIC_DIR = _PROJECT_ROOT / "static"
 
 _DATADIR = Path(os.environ.get("DATADIR", str(_PROJECT_ROOT / "data")))
 

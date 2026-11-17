@@ -10,7 +10,6 @@ job*.sh
 *tmp
 venv
 .codex
-metadata_handling
 experiments
 *.ipynb_checkpoints
 data
