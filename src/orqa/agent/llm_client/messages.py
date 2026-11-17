@@ -38,30 +38,6 @@ def sanitize_messages(messages: list[dict], placeholder: str = _EMPTY_CONTENT_PL
     return sanitized
 
 
-class ClientMessageBuilder:
-    """Builds the fixed 2-block message array for Statement Client.
-
-    The client always sends exactly 2 messages:
-      1. System prompt (role: system)
-      2. Generation prompt (role: user) — the full generation instruction
-    """
-
-    def build(self, system_prompt: str, generation_prompt: str) -> list[dict]:
-        """Returns exactly 2 message blocks: [system, generation]
-
-        Args:
-            system_prompt: The system-level instruction for the generation LLM.
-            generation_prompt: The user-facing generation prompt with all context.
-
-        Returns:
-            A list of exactly 2 message dicts with 'role' and 'content' keys.
-        """
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": generation_prompt},
-        ]
-
-
 class JudgeMessageBuilder:
     """Builds the fixed 2-block message array for Statement Judge.
 

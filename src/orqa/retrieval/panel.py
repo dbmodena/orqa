@@ -4,9 +4,9 @@ A question is only *retrievable* if it would actually be found — not by one
 search method's opinion, but by AGREEMENT across independently-built
 retrievers: lexical BM25 over the raw question text, a dense/semantic
 ranking of the embedded question, and BM25 over keywords an independent LLM
-call extracts from the question (see ``orqa.agent.agents.SearchKeywords.
+call extracts from the question (see ``orqa.retrieval.search_keywords.
 SearchKeywordsAgent.generate_keywords``). See
-``orqa.agent.utility.retrievability_gate`` for how
+``orqa.retrieval.gate`` for how
 the panel's vote becomes a pass/fail gate.
 
 Ranks are those of the exact gold table: a retriever finds a table when the
@@ -71,10 +71,9 @@ def make_llm_keyword_extractor(config_path) -> Callable[[str], Any]:
     against the vocabulary a user would search with.
 
     Imported lazily to avoid a module-load-time dependency between
-    ``orqa.benchmark`` and ``orqa.agent`` — mirrors ``orqa.benchmark.index.
-    load_index``'s lazy hybrid-retrieval import.
+    ``orqa.retrieval`` and ``orqa.agent``.
     """
-    from ..agent.agents.SearchKeywords import SearchKeywordsAgent
+    from orqa.retrieval.search_keywords import SearchKeywordsAgent
 
     return SearchKeywordsAgent(config_path).generate_keywords
 
@@ -84,26 +83,26 @@ class RetrieverPanel:
 
     Args:
         lexical_index: Any index with ``search(keywords, top_k)`` ->
-            ``[SearchResult, ...]`` (``DatasetIndex``, ``SolrDatasetIndex``).
-            When ``hybrid_index`` is given, its own ``lexical_index`` is used
-            instead, so ``lexical_question`` always searches plain BM25 even
-            when the caller's main index is the hybrid fusion.
-        hybrid_index: The dense retriever — any index exposing
-            ``semantic_search_many(texts, top_k)``: a ``HybridDatasetIndex``
-            (local metadata embeddings) or a ``SolrDatasetIndex`` (the core's
-            KNN) — or ``None`` to skip the ``dense_question`` retriever.
+            ``[SearchResult, ...]`` (a ``SolrDatasetIndex``). When
+            ``dense_index`` is given, its own ``lexical_index`` is used
+            instead.
+        dense_index: The dense retriever — any index exposing
+            ``semantic_search_many(texts, top_k)`` (a ``SolrDatasetIndex``:
+            the core's KNN) — or ``None`` to skip the ``dense_question``
+            retriever.
         keyword_extractor: ``question -> keywords`` (or ``(payload, usage)``,
             see ``_unpack_keyword_result``), or ``None`` to skip
             ``llm_keywords``. See ``make_llm_keyword_extractor``.
         retrievers: Which retrievers VOTE (names from ``RETRIEVER_NAMES``);
             ``None`` — the default — is every retriever that is available.
-            A named retriever that is unavailable (no hybrid index, no
+            A named retriever that is unavailable (no dense index, no
             keyword extractor) is skipped; if that leaves none, every
             available one votes instead (with a warning) rather than a gate
             that can approve nothing.
         keyword_index: The index ``llm_keywords`` searches. Defaults to the
-            lexical index; pass a ``PortalIndexView`` to make that retriever
-            answer the way the portal's AND-matching keyword search does.
+            lexical index; pass the core with ``keyword_match: all`` to make
+            that retriever answer the way the portal's AND-matching keyword
+            search does.
         universe: Resource ids the target search engine actually holds. Every
             retriever's ranking is restricted to them, so a retriever that
             ranks a wider collection (a Solr core holds only the non-empty
@@ -117,7 +116,7 @@ class RetrieverPanel:
     def __init__(
         self,
         lexical_index: Any,
-        hybrid_index: Optional[Any] = None,
+        dense_index: Optional[Any] = None,
         keyword_extractor: Optional[Callable[[str], Any]] = None,
         retrievers: Optional[Sequence[str]] = None,
         keyword_index: Optional[Any] = None,
@@ -127,10 +126,10 @@ class RetrieverPanel:
     ):
         # ``is not None``, not ``or``: an index defines ``__len__``, so ``or``
         # would ask a Solr core for its size and drop an empty one.
-        hybrid_lexical = getattr(hybrid_index, "lexical_index", None)
-        self.lexical_index = hybrid_lexical if hybrid_lexical is not None else lexical_index
+        dense_lexical = getattr(dense_index, "lexical_index", None)
+        self.lexical_index = dense_lexical if dense_lexical is not None else lexical_index
         self.keyword_index = keyword_index if keyword_index is not None else self.lexical_index
-        self.hybrid_index = hybrid_index
+        self.dense_index = dense_index
         self.keyword_extractor = keyword_extractor
         if rrf_k < 1 or rrf_depth < 1:
             raise ValueError("rrf_k and rrf_depth must be >= 1")
@@ -149,11 +148,11 @@ class RetrieverPanel:
 
     def _available(self) -> list[str]:
         names = ["lexical_question"]
-        if self.hybrid_index is not None:
+        if self.dense_index is not None:
             names.append("dense_question")
         if self.keyword_extractor is not None:
             names.append("llm_keywords")
-        if self.hybrid_index is not None and self.keyword_extractor is not None:
+        if self.dense_index is not None and self.keyword_extractor is not None:
             names.append("hybrid_rrf")
         return names
 
@@ -219,9 +218,9 @@ class RetrieverPanel:
                 lexical_results = []
             computed["lexical_question"] = keep(lexical_results)
 
-        if self.hybrid_index is not None and ("dense_question" in active or fuse):
+        if self.dense_index is not None and ("dense_question" in active or fuse):
             if question:
-                semantic_batches = self.hybrid_index.semantic_search_many(
+                semantic_batches = self.dense_index.semantic_search_many(
                     [question], top_k=RANK_CEILING
                 )
                 semantic_results = semantic_batches[0] if semantic_batches else []
@@ -287,7 +286,7 @@ class RetrieverPanel:
         ``extra``: verdicts of voters that are not a single ranking of the
         question — ``{name: {"pass": bool, "ranks": {...}, ...}}`` — each
         counted as ONE vote next to
-        the ranked retrievers (see ``retrievability_gate._question_terms_vote``,
+        the ranked retrievers (see ``gate._question_terms_vote``,
         whose one verdict aggregates a keyword check per table).
 
         Returns ``{"per_retriever": {name: {"pass", "ranks"}}, "passes": int, "approved": bool,

@@ -9,7 +9,7 @@ import litellm
 import yaml
 from litellm import Router
 
-from ..utility.message_builder import sanitize_messages
+from orqa.agent.llm_client.messages import sanitize_messages
 
 import logging
 
@@ -23,6 +23,16 @@ _SPEC_OWN_KEYS = ("model", "name", "max_output_tokens", "description")
 # .env (LiteLLM's own ``os.environ/NAME`` form covers whole values only, and
 # the model string also carries the provider prefix).
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# When set, the one model reference (a deployment name or LiteLLM model
+# string) any client or judge panel may resolve: a run pinned to one endpoint
+# stops at start instead of calling another model.
+ONLY_LLM_ENV = "ORQA_ONLY_LLM"
+
+
+class DisallowedModelError(RuntimeError):
+    """The LLM config names a model other than ``$ORQA_ONLY_LLM``. Not a
+    ValueError: a judge panel skips an entry it cannot resolve, and this one
+    must stop the run, not shrink the panel."""
 
 
 class LLMClient:
@@ -69,6 +79,7 @@ class LLMClient:
         # The primary model, resolved once: ``primary_model`` is the LiteLLM
         # model string the Router calls, ``primary_label`` how the pipeline
         # names it (the deployment name when one is configured).
+        self._require_allowed(self.config["model"])
         self.primary = self._resolve_model_spec(self.config["model"])
         self.primary_model: str = self.primary["model"]
         self.primary_label: str = self.primary["label"]
@@ -211,6 +222,20 @@ class LLMClient:
             }
         return deployments
 
+    @staticmethod
+    def _require_allowed(spec: Any) -> None:
+        """Refuse a model reference of the LLM config (primary, fallback,
+        judge) other than ``$ORQA_ONLY_LLM``. Checked where the config's
+        references become Router entries, not in :meth:`_resolve_model_spec`,
+        which also looks up params of already-resolved model strings."""
+        allowed = os.environ.get(ONLY_LLM_ENV, "").strip()
+        name = str((spec.get("model") if isinstance(spec, dict) else spec) or "").strip()
+        if allowed and name != allowed:
+            raise DisallowedModelError(
+                f"{ONLY_LLM_ENV}={allowed}, but the LLM config also names {name!r}: remove it from "
+                "conf/llm/litellm.yaml (model, fallback_models, judge_profiles) or unset the variable"
+            )
+
     def _resolve_model_spec(self, spec: Any) -> dict:
         """Resolve one model reference into what a Router entry needs.
 
@@ -345,6 +370,7 @@ class LLMClient:
         for idx, fallback_spec in enumerate(self.config.get("fallback_models") or []):
             fallback_name = f"fallback_{idx}"
             fallback_names.append(fallback_name)
+            self._require_allowed(fallback_spec)
             fallback = self._resolve_model_spec(fallback_spec)
             self._register_router_entry(fallback_name, fallback)
             model_list.append(

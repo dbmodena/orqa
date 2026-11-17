@@ -5,6 +5,7 @@ import logging
 import re
 from pathlib import Path
 import tempfile
+import time
 import polars as pl
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -435,6 +436,11 @@ def _read_csv_resilient(dataset_path: Path, csv_opts: dict) -> pd.DataFrame:
 
 
 def pd_read_dataset(dataset_path: Path, opts: dict = {}) -> pd.DataFrame:
+    # A table the machine cannot hold is refused before it is read (on a
+    # shared machine without swap, reading it froze everyone's work).
+    from .memory_guard import check_load
+
+    check_load(dataset_path)
     match dataset_path.suffix:
         case ".csv":
             csv_opts = dict(opts.get("csv", {}))
@@ -731,7 +737,9 @@ def prepare_dataset(
     # ``pd_read_dataset``'s underlying ``pd.read_csv``/``read_parquet`` —
     # that's an unambiguous "this cell is empty" signal, not a portal-
     # specific convention needing a judgment call.
+    started = time.perf_counter()
     df = pd_read_dataset(dataset_path, opts={"csv": {"low_memory": False}})
+    load_seconds = time.perf_counter() - started
 
     # Row cap for the LLM-facing view only — opt-in. The statement-generation
     # pipeline passes ``None`` (no cap): the model still sees just a handful
@@ -759,6 +767,8 @@ def prepare_dataset(
     )
     dataset_info["dataset_name"] = dataset_path.stem
     dataset_info["id"] = dataset_path.stem
+    # LakeGen's time limit covers loading the table too (QueryValidator).
+    df.attrs["orqa_load_seconds"] = load_seconds
 
     return df, dataset_info
 
@@ -813,9 +823,19 @@ def extract_dataset_info(
 #    return df
 
 def save_json(data, path: Path, indent: int = 2) -> None:
+        # Written next to the file and renamed over it: a run killed while
+        # saving (out of memory, the memory watchdog) keeps the previous
+        # complete file instead of a truncated one.
+        path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=indent, ensure_ascii=False)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=indent, ensure_ascii=False)
+            os.replace(tmp, path)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
 
 def load_json(path: Path):
         with open(path, "r", encoding="utf-8") as f:

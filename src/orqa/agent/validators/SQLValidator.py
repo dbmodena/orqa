@@ -16,7 +16,7 @@ import duckdb
 import pandas as pd
 
 from .QueryValidator import QueryValidator
-from ..utility.undecodable_names import undecodable_matches
+from orqa.utils.undecodable_names import undecodable_matches
 from ...utils import summarize_large_value
 
 _LITERAL_RE = re.compile(r"'(?:''|[^'])*'")

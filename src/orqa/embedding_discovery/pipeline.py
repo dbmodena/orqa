@@ -34,7 +34,7 @@ from ..utils import (
     split_dataset_stem,
 )
 from ..utils.pipeline_logger import PipelineLogger
-from ..agent.llm_client.EmbeddingClient import EmbeddingClient
+from ..agent.llm_client.EmbeddingClient import EmbeddingClient, solr_embedding_client
 from .clustering import ClusterNeighborIndex, compute_cluster_projection, save_cluster_projection
 from .embeddings import (
     EmbeddingCache,
@@ -113,6 +113,27 @@ def save_time_statistics(records: list, path: Path):
         pl.DataFrame(records).write_csv(path, float_precision=3)
 
 
+def discovery_embedding_client(cfg: OrQAConfig):
+    """The client the metadata texts are embedded with:
+    ``tasks.candidates_discovery.embedding_model`` by the Solr cores' rule
+    (a local model on OrQA's embedding server, started if needed), else
+    litellm.yaml's ``embedding_model``."""
+    cd = cfg.candidates_discovery
+    if not cd.embedding_model:
+        return EmbeddingClient(
+            cfg.llm_config_path / "litellm.yaml", batch_size=cd.embedding_batch_size
+        )
+    client = solr_embedding_client(
+        cd.embedding_model, cd.embedding_url, cfg.llm_config_path,
+        batch_size=cd.embedding_batch_size,
+    )
+    if cd.embedding_url is None and not cd.embedding_model.startswith(("cohere.", "ocid1.")):
+        from solr.embedder import OllamaServer
+
+        OllamaServer.from_env().ensure(cd.embedding_model)
+    return client
+
+
 def build_embedding_texts(cfg: OrQAConfig, max_tokens: int) -> dict[str, str]:
     """One embedding document per dataset on disk that has metadata.
 
@@ -174,75 +195,6 @@ def build_embedding_texts(cfg: OrQAConfig, max_tokens: int) -> dict[str, str]:
             f"{max_columns} columns (limit_to_n_columns)."
         )
     return texts
-
-
-def embed_search_metadata(cfg: OrQAConfig) -> tuple[list[str], "pl.DataFrame | None"]:
-    """Embed EVERY normalized metadata record — not just the ones discovery
-    indexes (see :func:`build_embedding_texts`) — into a SEPARATE cache
-    (``candidates_discovery/search_embeddings.npz``).
-
-    Only about half a typical CKAN portal's records have a local downloaded
-    file; ``HybridDatasetIndex`` previously gave every record WITHOUT one a
-    semantic score of 0 outright, making retrieval strictly easier for a
-    gold table (which always has a local file, hence always a vector) than
-    for its non-downloaded siblings — an asymmetry the retrievability gate's
-    ``dense_question`` retriever would otherwise inherit. Covering every
-    record removes it.
-
-    Records WITH a local file are embedded with the SAME text
-    ``build_embedding_texts`` would use (``dataset_path=file``, keyed by the
-    file stem, so the content hash matches) and this cache is seeded from
-    discovery's own cache first (see ``EmbeddingCache.seed_from``), so those
-    vectors are never paid for twice. Records with no local file are
-    embedded from metadata alone (``dataset_path=None``), keyed by
-    ``resource_id`` — the only key available for them.
-    """
-    client = EmbeddingClient(
-        cfg.llm_config_path / "litellm.yaml",
-        batch_size=cfg.candidates_discovery.embedding_batch_size,
-    )
-    max_tokens = embedding_max_input_tokens(client.model)
-    raw_metadata = load_raw_normalized_metadata(cfg.normalized_metadata_filepath)
-    scan_opts = cfg.polars_opts.scan
-
-    local_stems: dict[str, Path] = {}
-    if cfg.datasets_path.exists():
-        for filepath in sorted(cfg.datasets_path.iterdir()):
-            if filepath.is_file():
-                local_stems[remove_file_extension(filepath.name)] = filepath
-
-    texts: dict[str, str] = {}
-    covered_resource_ids: set[str] = set()
-    for stem, filepath in local_stems.items():
-        resource_id = dataset_id_to_resource_id(stem)
-        record = raw_metadata.get(resource_id)
-        if record is None:
-            continue
-        texts[stem] = build_embedding_text(
-            record, dataset_path=filepath, scan_opts=scan_opts, max_tokens=max_tokens
-        )
-        covered_resource_ids.add(resource_id)
-
-    for resource_id, record in raw_metadata.items():
-        if resource_id in covered_resource_ids:
-            continue
-        texts[resource_id] = build_embedding_text(
-            record, dataset_path=None, max_tokens=max_tokens
-        )
-
-    search_cache = EmbeddingCache(cfg.candidates_discovery.search_embeddings_path)
-    discovery_cache_path = cfg.candidates_discovery.embeddings_cache_path
-    if discovery_cache_path is not None and Path(discovery_cache_path).exists():
-        seeded = search_cache.seed_from(EmbeddingCache(discovery_cache_path))
-        if seeded:
-            print(f"Seeded {seeded} vector(s) from the discovery embeddings cache.")
-
-    ids, vectors = search_cache.get_or_compute(texts, client)
-    print(
-        f"Search embeddings: {len(ids)}/{len(texts)} normalized metadata "
-        f"record(s) now have a vector."
-    )
-    return ids, vectors
 
 
 def is_resumable(cfg: OrQAConfig) -> bool:
@@ -408,9 +360,7 @@ def pipeline(cfg: OrQAConfig):
 
     # ── Embeddings + cluster neighbor index ─────────────────────────────────
     print(" BUILDING METADATA EMBEDDINGS ".center(PRINT_PAD, "="))
-    client = EmbeddingClient(
-        cfg.llm_config_path / "litellm.yaml", batch_size=cd.embedding_batch_size
-    )
+    client = discovery_embedding_client(cfg)
     texts = build_embedding_texts(cfg, embedding_max_input_tokens(client.model))
     cache = EmbeddingCache(cd.embeddings_cache_path)
     ids, vectors = cache.get_or_compute(texts, client)

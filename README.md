@@ -1,77 +1,95 @@
-# <img src="static/images/clipart58856.png" alt="Image Alt Text" style="width: 50px; vertical-align: middle;"> OrQA
+# OrQA
 
-**OrQA** (Open Data Retrieval and Question Answering) is a workflow for generating new benchmark datasets for retrieval and tabular question answering model evaluation on Open Data.
-
-The workflow is composed of four main stages:
-
-1. Crawling data and metadata from the desired Open Data endpoint  
-2. Searching for candidate related tables  
-3. Evaluating the previously found pairs  
-4. Generating questions and corresponding SQL queries
-
-All scripts needed to run your own experiments are located in the `scripts` folder.
+**OrQA** (Open Data Retrieval and Question Answering) generates benchmark datasets for retrieval and tabular question
+answering on Open Data portals: it crawls a portal, finds tables that can be joined or unioned, and generates questions
+with the pandas code that answers them, checked by LLM judges and by the portal's own search.
 
 ---
 
-### 🧰 Requirements
+### Requirements
 
-- Python environment
-Install the required Python packages via Conda:
+- Python 3.13 and the packages of `pyproject.toml`, e.g. with [uv](https://docs.astral.sh/uv/):
 
-```sh
-$ conda env create -f env.yaml
+  ```sh
+  uv sync
+  ```
+
+- A `.env` file at the repository root (loaded by `src/main.py`). `DATADIR` is the base folder of all the data:
+
+  ```sh
+  DATADIR=/path/to/your/data/directory
+  ```
+
+### Data layout
+
+Each target writes under its own folder of `DATADIR`. The folder comes from the target in `src/main.py` and the
+workflow yaml's `flat_layout` (e.g. `<DATADIR>/uk/` or `<DATADIR>/ods/bologna/`); inside it:
+
+```
+datasets/<format>/       the crawled tables
+metadata/                the portal's metadata, raw and normalized
+candidates_discovery/    candidate join/union groups and the generated questions
+log/                     orqa.log of every run; log/generation/<run>/ traces of generate-statements
 ```
 
-- Define a "DATADIR" environment variable path. This will be the base path for OrQA and all the stages.
+### Run the workflow
+
+The workflow configuration of each target is in `conf/workflow/*.yaml`. Run one or more steps, in order:
 
 ```sh
-$ export DATADIR=/path/to/your/data/directory
+python src/main.py --country uk --steps crawl clean normalize-metadata
+python src/main.py --country italy --city bologna --steps generate-statements
 ```
 
-### OrQA Files Organization
+Targets: `uk`, `italy/bologna`, `spain/valencia`, `france/paris`, `usa/nyc`.
+Steps: `crawl`, `clean`, `normalize-metadata`, `build-solr-core`, `index`, `candidates-discovery`,
+`generate-query-candidates`, `generate-statements`.
 
-OrQA organizes its data under the environment variable path "DATADIR". 
+Two browser views run from `src/`: `uvicorn web_app:app --port 8000` (the generated benchmark) and
+`uvicorn run_monitor:app --port 8001` (the runs in progress).
 
-DATADIR/open_data/ckan/<tag>/datasets/<format> --> here will be stored all the crawled datasets, with the given format.
+### LLM models
 
-                            /metadata/ --> here will be saved metadata JSON files about datasets fetched in the initial crawling stage.
-                            /log/ --> logfiles for all the stages are here.
-                            /BLEND/index.db --> here will be saved the BLEND index after creation.
+The models every stage calls are configured in `conf/llm/litellm.yaml` (LiteLLM model strings; OCI credentials are read
+from `.env`). The dedicated OCI AI cluster is addressed through the `deployments` section of that file, over OCI's
+OpenAI-compatible route with the Generative AI API key: each deployment names the endpoint OCID (`DEDICATE_OCI_MODEL` /
+`_MODEL_2` / `_MODEL_3` in `.env`), the base URL (`DEDICATE_OCI_BASE_URL`) and the key (`DEDICATED_API_KEY`), and may cap
+the answer length with `max_output_tokens`. A deployment name can be used wherever a model is referenced (`model`,
+`fallback_models`, `judge_profiles.*`). See `docs/structured-output.md`.
 
--  Apache Solr Installation
-A local installation of Apache Solr search engine allows us to simulate a CKAN Open Data endpoint against which we can make query.
+### Apache Solr
 
-After you have downloaded an Apache Solr release (OrQA is tested on [9.10][https://www.apache.org/dyn/closer.lua/solr/solr/9.10.0/solr-9.10.0.tgz?action=download]),
-you can load the metadata fetched during the crawling stage to the Apache Solr server with the Python class "src/solr/solr.py:Solr".
+OrQA runs its own Solr for the portals LakeGen is scored on: one core per portal, holding the documents LakeGen
+searches, which the question stage's retrievability gate queries. Every target needs its core. Their vectors are
+`bge-m3`, embedded on CPU by OrQA's own Ollama; questions are embedded by the same server, as LakeGen embeds them.
 
-Do not run `src/solr/solr.py` against the shared Solr instance: its domain names (`uk`, `nyc`, `bologna`, `paris`, `valencia`) are the names
-of LakeGen's live cores, and `create`, `delete`, `post`, `reload` or `refresh` would destroy or overwrite them. Retrieval does not need it:
-for uk, nyc, bologna, paris and valencia, OrQA queries LakeGen's own cores read-only at `$SOLR_URL` (default `http://localhost:8983/solr`).
-
-- LLM models
-
-The models every stage calls are configured in `conf/llm/litellm.yaml` (LiteLLM model strings; OCI credentials are read from `.env`).
-The dedicated OCI AI cluster is addressed through the `deployments` section of that file, over OCI's OpenAI-compatible route with the
-Generative AI API key: each deployment names the endpoint OCID (`DEDICATE_OCI_MODEL` / `_MODEL_2` / `_MODEL_3` in `.env`), the base URL
-(`DEDICATE_OCI_BASE_URL`) and the key (`DEDICATED_API_KEY`), and may cap the answer length with `max_output_tokens`. A deployment name can
-be used wherever a model is referenced (`model`, `fallback_models`, `judge_profiles.*`). See `docs/structured-output.md`.
-
----
-
-### Run the Workflow
-
-In conf/workflow there are the workflow configuration files for UK and Canada (.yaml). You can customize them in order to modify, for instance,
-the number of datasets fetched during the initial crawling stage and their sizes.
-
-To run a workflow, you can call:
+Prerequisites: Java (tested on OpenJDK 17), Solr (tested on 9.10.1) and Ollama (tested on 0.35, at
+`/usr/local/bin/ollama`). In `.env`:
 
 ```sh
-$ python main.py <canada | uk>
+ORQA_SOLR_HOME=/path/with/room/for/the/indexes/solr   # required
+ORQA_SOLR_PORT=8984                                   # default
+SOLR_PATH=/opt/solr                                   # default
+ORQA_OLLAMA_MODELS=/path/to/ollama/models             # required
+ORQA_OLLAMA_PORT=11435                                # default
 ```
 
-The benchmark's search side (LakeGen's Solr cores, the builtin index for the
-portals without one, the retrievability gate's retrievers) is documented in
-[docs/benchmark-retrieval.md](docs/benchmark-retrieval.md). The retired
-Elasticsearch backend, and how to bring it back, is in
-[legacy/elasticsearch/README.md](legacy/elasticsearch/README.md).
+```sh
+python src/solr/cli.py start                             # Solr and the embedding server; also: stop, status
+python src/main.py --country uk --steps build-solr-core  # builds the core uk_build
+python src/solr/cli.py publish uk                        # uk_build -> uk; the replaced core stays as uk_previous
+python src/solr/cli.py reembed uk --model bge-m3         # new vectors for an existing core, into uk_build
+```
 
+Neither server starts at boot; `start` them again after a reboot. `start` pulls no model; `build-solr-core` and
+`reembed` pull a missing one into OrQA's Ollama. Every core uses the configset `conf/solr/portal/`
+(`python src/solr/cli.py sync-config` copies a changed one to the server and reloads the cores).
+
+The code is in `src/solr/`: `instance.py` (the server's files, process and cores; every write first checks that the
+server's Solr home is `ORQA_SOLR_HOME`, so OrQA never writes to LakeGen's shared Solr on port 8983), `embedder.py` (the
+Ollama server), `cli.py` (the commands above), `client.py` (the read-only HTTP client), `index.py` (a portal's core as
+retrieval queries it) and `build.py` (the `build-solr-core` step). The gate's retriever panel is
+`src/orqa/retrieval/panel.py`.
+
+The search side of the benchmark (the Solr cores and the retrievability gate's retrievers) is documented in [docs/benchmark-retrieval.md](docs/benchmark-retrieval.md). The retired
+Elasticsearch backend, and how to bring it back, is in [legacy/elasticsearch/README.md](legacy/elasticsearch/README.md).

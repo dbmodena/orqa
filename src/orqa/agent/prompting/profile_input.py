@@ -198,11 +198,19 @@ def select_parquet_columns(
 # ---------------------------------------------------------------------------
 
 
+def uniform_rows(num_rows: int, size: int, seed: int = 0) -> np.ndarray:
+    """``size`` distinct row positions of ``num_rows``, drawn uniformly with
+    ``seed``, in file order (int64)."""
+    rng = np.random.default_rng(seed)
+    return np.sort(rng.choice(int(num_rows), size=min(int(size), int(num_rows)), replace=False)).astype(np.int64)
+
+
 def profile_parquet(
     path: Union[str, Path],
     columns: Sequence[str],
     *,
     limit_to_n_rows: Optional[int] = None,
+    rows: Optional[np.ndarray] = None,
     use_threads: bool = True,
 ) -> ProfileInput:
     """The frequency tables of ``columns`` of the parquet file ``path``,
@@ -216,6 +224,10 @@ def profile_parquet(
             names them: stringified labels. Each must exist in the file.
         limit_to_n_rows: ``prepare_dataset``'s row cap (``df.head``), None
             for every row (production).
+        rows: Row positions (``uniform_rows``) to profile instead of every
+            row: the tables of each column are those of these rows, while the
+            column's dtype is still decided by the whole column (an int
+            column with a null outside the sample loads as float64).
         use_threads: Passed to the parquet reader.
 
     Raises:
@@ -253,19 +265,29 @@ def profile_parquet(
             num_rows = min(num_rows, max(0, int(limit_to_n_rows)))
         out: List[ColumnInput] = []
         for column in selected:
-            chunked = parquet_file.read(columns=[column.field_name], use_threads=use_threads).column(0)
+            try:
+                chunked = parquet_file.read(columns=[column.field_name], use_threads=use_threads).column(0)
+            except pa.ArrowCapacityError:
+                # The dictionary of a near-unique text column can pass 2 GB,
+                # more than one Arrow string array holds (the 169M-row nyc
+                # taxi table): its plain values are read instead.
+                if column.field_name not in dictionary_fields:
+                    raise
+                chunked = pq.read_table(path, columns=[column.field_name], use_threads=use_threads).column(0)
             # pandas types the whole column before ``head``: an int column
             # with a null past the cap is float64 in the capped frame too.
             has_nulls = chunked.null_count > 0
             if len(chunked) > num_rows:
                 chunked = chunked.slice(0, num_rows)
-            given = _column_from_arrow(column, chunked, num_rows, has_nulls)
+            if rows is not None:
+                chunked = chunked.take(pa.array(rows))
+            given = _column_from_arrow(column, chunked, len(chunked), has_nulls)
             if given is not None:
                 out.append(given)
             del chunked
     finally:
         parquet_file.close()
-    return ProfileInput(num_rows=num_rows, columns=out, source="arrow")
+    return ProfileInput(num_rows=num_rows if rows is None else len(rows), columns=out, source="arrow")
 
 
 def _read_as_dictionary(arrow_type: pa.DataType) -> bool:
@@ -307,7 +329,7 @@ def _column_from_arrow(
     timestamp (``Int64``, ``boolean``, ``category``, ``string``... restored
     from the file's pandas metadata): only the frame has its exact values."""
     dtype = _pandas_dtype(column.base_dtype, has_nulls)
-    if not isinstance(dtype, (np.dtype, pd.DatetimeTZDtype)):
+    if not (isinstance(dtype, (np.dtype, pd.DatetimeTZDtype)) or is_default_str(dtype)):
         return None
     if len(chunked) == 0:
         # Nothing to encode.
@@ -380,6 +402,14 @@ def _codes_of(encoded: pa.ChunkedArray) -> np.ndarray:
     return indices.to_numpy().astype(np.int32, copy=False)
 
 
+def is_default_str(dtype: Any) -> bool:
+    """pandas 3's default string dtype ("str", NaN for a missing value): what
+    text columns load as with ``future.infer_string`` on (``orqa/__init__``).
+    The ``string`` dtype (pd.NA) a file's pandas metadata restores is not it
+    and stays with the frame."""
+    return isinstance(dtype, pd.StringDtype) and dtype.na_value is np.nan
+
+
 def _pandas_dtype(base_dtype: Any, has_nulls: bool) -> Any:
     """The frame's dtype of a column: pyarrow gives an integer column with
     nulls as float64 and a bool column with nulls as object; every other
@@ -402,7 +432,16 @@ def _pandas_uniques(values: pa.Array, dtype: Any) -> Tuple[pd.Index, Optional[np
     null), or None when the Arrow codes already are the final ones."""
     arrow_type = values.type
     if _read_as_dictionary(arrow_type) or pa.types.is_fixed_size_binary(arrow_type):
-        # str / bytes: Arrow's byte equality is pandas' object equality.
+        # str / bytes: Arrow's byte equality is pandas' object equality. A
+        # text column of the "str" dtype factorizes to a "str" Index, built
+        # from the Arrow values without a Python object per value.
+        if is_default_str(dtype):
+            series = values.to_pandas()
+            if str(series.dtype) != str(dtype):
+                series = series.astype(dtype)
+            if values.null_count == 0:
+                return pd.Index(series), None
+            return _refactorize(series)
         array = values.to_numpy(zero_copy_only=False)
         if values.null_count == 0:
             return pd.Index(array, dtype=object), None

@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 load_dotenv()
 
 from conf import load_config
-from orqa.benchmark.index import load_index
+from solr.index import load_index
 from orqa.utils.questions import META_KEY, iter_questions, match_plan_feedback
 from orqa.embedding_discovery.clustering import compute_cluster_projection, save_cluster_projection
 from orqa.queries.query_execution import QueryExecutor
@@ -576,9 +576,9 @@ def keyword_search(
     num_tables: int = 1,
 ) -> dict:
     """Reverse-index search for the "Search Index" play button on a query's
-    detail view: same ``DatasetIndex``/``SolrDatasetIndex`` the plan judge's
+    detail view: same ``SolrDatasetIndex`` the plan judge's
     retrievability check runs against (see
-    ``orqa.agent.utility.retrievability_gate``), exposed here so a human
+    ``orqa.retrieval.gate``), exposed here so a human
     can re-run a manual keyword search by hand for one query's
     ``question_keywords`` and see which tables actually come back.
 

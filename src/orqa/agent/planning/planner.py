@@ -25,7 +25,7 @@ falling back to a schema-valid free-text plan (Requirements 5.3, 5.4, 5.5,
 5.6).
 
 The planner never writes a question: every plan answers one question that was
-written and approved upstream (see :mod:`orqa.agent.agents.QuestionStage`),
+written and approved upstream (see :mod:`orqa.agent.question`),
 which is pinned onto the plan and cannot change in a revision.
 """
 
@@ -36,11 +36,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Sequence, Union, get_args
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
-from ..llm_client.LLMClientStructured import LLMClientStructured
-from ..utility.structured_coercion import coerce_to_model, errors_brief, unwrap_top, validate_leniently
-from ..prompting.models import (
+from orqa.agent.llm_client.LLMClientStructured import LLMClientStructured
+from orqa.agent.llm_client.coercion import coerce_to_model, errors_brief, unwrap_top, validate_leniently
+from orqa.agent.prompting.models import (
     _DIFFICULTY_LEVELS,
     _RESULT_TYPES,
     PandasPlanStep,
@@ -51,12 +51,12 @@ from ..prompting.models import (
     SQLQueryPlanSet,
     TableStats,
 )
-from ..prompting.prompts import QueryPlannerPrompt, render_column_statistics
-from ..utility.column_provenance import compose_feedback, resolve_plan_columns
-from ..utility.structured_outputs import QueryLink, Table
-from ..utility.undecodable_names import escaped_literal, resolve_plan_names
-from ...utils import shield_dataframe_for_prompt
-from .table_analyzer import render_table_facts, render_table_identities, table_identities
+from orqa.agent.prompting.prompts import QueryPlannerPrompt, render_column_statistics
+from orqa.agent.planning.provenance import compose_feedback, resolve_plan_columns
+from orqa.agent.structured_outputs import QueryLink, Table
+from orqa.utils.undecodable_names import escaped_literal, resolve_plan_names
+from orqa.utils import shield_dataframe_for_prompt
+from orqa.utils.table_analyzer import render_table_facts, render_table_identities, table_identities
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,6 @@ def _question_copies_column_header(question: str, headers: Iterable[str]) -> Opt
 
 
 QueryPlan = Union[SQLQueryPlan, PandasQueryPlan]
-PlanStep = Union[SQLPlanStep, PandasPlanStep]
 
 # Output budget of a planner call. A reasoning model's hidden thinking counts
 # against max_tokens and OCI reports finish_reason "stop" even when the budget
@@ -266,7 +265,7 @@ class QueryPlanner:
 
         The planner never writes a question: each plan answers one question
         already written AND approved upstream (see
-        ``orqa.agent.agents.QuestionStage``), and is asked for its ordered
+        ``orqa.agent.question``), and is asked for its ordered
         ``steps``, each table's role, and the result declaration.
 
         Each returned plan preserves the mandatory ``table_links`` from the
@@ -647,7 +646,7 @@ class QueryPlanner:
         one string, an ``op`` synonym such as ``groupby``, a wrapped answer —
         so that ``_assemble_plan`` reads what the model meant instead of
         silently dropping a step or a table entry (content is never
-        invented; see ``orqa.agent.utility.structured_coercion``). Each step
+        invented; see ``orqa.agent.llm_client.coercion``). Each step
         is validated leniently on its own, so a readable step reaches
         ``_coerce_steps`` already in strict shape."""
         log: list[str] = []
@@ -682,7 +681,7 @@ class QueryPlanner:
         are labels, not code, so a written name that names no real column but
         matches exactly one damaged header is replaced by it here, before
         validation. Nothing is guessed: no unique match, no change (see
-        :mod:`orqa.agent.utility.undecodable_names`).
+        :mod:`orqa.utils.undecodable_names`).
         """
         plan, changes = resolve_plan_names(raw_plan, known_columns)
         if changes:
@@ -772,7 +771,7 @@ class QueryPlanner:
         ``produces``, whose own sources transitively root in real columns.
 
         Column resolution lives in
-        :mod:`orqa.agent.utility.column_provenance`. It reports EVERY column
+        :mod:`orqa.agent.planning.provenance`. It reports EVERY column
         problem at once rather than the first, because there is only one
         re-request before :meth:`_free_text_fallback` degrades the plan.
 
@@ -888,7 +887,7 @@ class QueryPlanner:
 
         # Requirement 5.5: every column a step names must resolve to a real
         # schema column or to a derived column an earlier step declared in its
-        # `produces` (see orqa.agent.utility.column_provenance). ALL violations
+        # `produces` (see orqa.agent.planning.provenance). ALL violations
         # are collected and reported together: the planner gets exactly one
         # re-request before degrading to _free_text_fallback, so surfacing one
         # problem per round-trip would spend that retry on a plan with two
@@ -1059,7 +1058,7 @@ class QueryPlanner:
         No generic closing instruction is added: ``error`` is already a
         self-contained message that states the rule it broke and the fix for
         each problem (see
-        :func:`orqa.agent.utility.column_provenance.compose_feedback`). The
+        :func:`orqa.agent.planning.provenance.compose_feedback`). The
         boilerplate that used to live here ("return a corrected plan...")
         both repeated that preamble and worked against its closing line by
         implying the whole plan should be rewritten, which tends to lose
@@ -1336,7 +1335,7 @@ class QueryPlanner:
         identities: Optional[Sequence[dict]] = None,
     ) -> dict:
         """Prompt blocks for the question generator (see
-        ``orqa.agent.agents.QuestionGenerator``), rendered with this planner's
+        ``orqa.agent.question``), rendered with this planner's
         own renderers so the question agent sees the tables exactly as the
         planner would. Column statistics are left out on purpose: a question
         needs what the tables are about, which columns exist and real values —

@@ -1,7 +1,6 @@
 """Deterministic plan<->code column-coverage check.
 
-Companion to ``difficulty_estimator.py``: a code-computed fact fed into the
-code judge as extra context, not a replacement for its own reading of the
+A code-computed fact fed into the code judge as extra context, not a replacement for its own reading of the
 code. It answers exactly one narrow question a regex CAN answer reliably —
 does every column the plan says this query depends on (``tables[].
 columns_involved``, decided once at planning time and never re-derived at

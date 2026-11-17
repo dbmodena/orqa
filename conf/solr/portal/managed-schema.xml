@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Solr managed schema - automatically generated - DO NOT EDIT -->
+<schema name="orqa-nyc" version="1.6">
+  <uniqueKey>resource_id</uniqueKey>
+  <fieldType name="_nest_path_" class="solr.NestPathField" maxCharsForDocValues="-1" omitNorms="true" omitTermFreqAndPositions="true" stored="false" multiValued="false"/>
+  <fieldType name="binary" class="solr.BinaryField"/>
+  <fieldType name="boolean" class="solr.BoolField" omitNorms="true" sortMissingLast="true"/>
+  <fieldType name="booleans" class="solr.BoolField" sortMissingLast="true" multiValued="true"/>
+  <fieldType name="date" class="solr.DatePointField" positionIncrementGap="0" omitNorms="true"/>
+  <fieldType name="double" class="solr.DoublePointField" positionIncrementGap="0" omitNorms="true"/>
+  <fieldType name="float" class="solr.FloatPointField" positionIncrementGap="0" omitNorms="true"/>
+  <fieldType name="int" class="solr.IntPointField" positionIncrementGap="0" omitNorms="true"/>
+  <fieldType name="lakegen_vector_1024" class="solr.DenseVectorField" vectorDimension="1024" similarityFunction="cosine"/>
+  <fieldType name="location" class="solr.LatLonPointSpatialField" docValues="true"/>
+  <fieldType name="long" class="solr.LongPointField" positionIncrementGap="0" omitNorms="true"/>
+  <fieldType name="pdate" class="solr.DatePointField" positionIncrementGap="0" omitNorms="true"/>
+  <fieldType name="pdates" class="solr.DatePointField" positionIncrementGap="0" multiValued="true"/>
+  <fieldType name="pdouble" class="solr.DoublePointField" positionIncrementGap="0" omitNorms="true"/>
+  <fieldType name="pdoubles" class="solr.DoublePointField" positionIncrementGap="0" multiValued="true"/>
+  <fieldType name="pfloat" class="solr.FloatPointField" positionIncrementGap="0" omitNorms="true"/>
+  <fieldType name="pfloats" class="solr.FloatPointField" positionIncrementGap="0" multiValued="true"/>
+  <fieldType name="pint" class="solr.IntPointField" positionIncrementGap="0" omitNorms="true"/>
+  <fieldType name="pints" class="solr.IntPointField" positionIncrementGap="0" multiValued="true"/>
+  <fieldType name="plong" class="solr.LongPointField" positionIncrementGap="0" omitNorms="true"/>
+  <fieldType name="plongs" class="solr.LongPointField" positionIncrementGap="0" multiValued="true"/>
+  <fieldType name="string" class="solr.StrField" omitNorms="true" sortMissingLast="true"/>
+  <fieldType name="text" class="solr.TextField" positionIncrementGap="100">
+    <analyzer type="index">
+      <tokenizer class="solr.WhitespaceTokenizerFactory"/>
+      <filter class="solr.WordDelimiterGraphFilterFactory" generateNumberParts="1" generateWordParts="1" catenateAll="0" splitOnCaseChange="1" catenateNumbers="1" catenateWords="1"/>
+      <filter class="solr.FlattenGraphFilterFactory"/>
+      <filter class="solr.LowerCaseFilterFactory"/>
+      <filter class="solr.SnowballPorterFilterFactory" language="English" protected="protwords.txt"/>
+      <filter class="solr.ASCIIFoldingFilterFactory"/>
+    </analyzer>
+    <analyzer type="query">
+      <tokenizer class="solr.WhitespaceTokenizerFactory"/>
+      <filter class="solr.SynonymGraphFilterFactory" ignoreCase="true" synonyms="synonyms.txt" expand="true"/>
+      <filter class="solr.WordDelimiterGraphFilterFactory" generateNumberParts="1" generateWordParts="1" catenateAll="0" splitOnCaseChange="1" catenateNumbers="0" catenateWords="0"/>
+      <filter class="solr.LowerCaseFilterFactory"/>
+      <filter class="solr.SnowballPorterFilterFactory" language="English" protected="protwords.txt"/>
+      <filter class="solr.ASCIIFoldingFilterFactory"/>
+    </analyzer>
+  </fieldType>
+  <fieldType name="text_general" class="solr.TextField" positionIncrementGap="100">
+    <analyzer type="index">
+      <tokenizer class="solr.WhitespaceTokenizerFactory"/>
+      <filter class="solr.WordDelimiterGraphFilterFactory" generateNumberParts="1" generateWordParts="1" catenateAll="0" splitOnCaseChange="0" catenateNumbers="1" catenateWords="1"/>
+      <filter class="solr.FlattenGraphFilterFactory"/>
+      <filter class="solr.LowerCaseFilterFactory"/>
+    </analyzer>
+    <analyzer type="query">
+      <tokenizer class="solr.WhitespaceTokenizerFactory"/>
+      <filter class="solr.SynonymGraphFilterFactory" ignoreCase="true" synonyms="synonyms.txt" expand="true"/>
+      <filter class="solr.WordDelimiterGraphFilterFactory" generateNumberParts="1" generateWordParts="1" catenateAll="0" splitOnCaseChange="0" catenateNumbers="0" catenateWords="0"/>
+      <filter class="solr.LowerCaseFilterFactory"/>
+    </analyzer>
+  </fieldType>
+  <fieldType name="text_ngram" class="solr.TextField" positionIncrementGap="100">
+    <analyzer type="index">
+      <tokenizer class="solr.NGramTokenizerFactory" minGramSize="2" maxGramSize="10"/>
+      <filter class="solr.LowerCaseFilterFactory"/>
+    </analyzer>
+    <analyzer type="query">
+      <tokenizer class="solr.WhitespaceTokenizerFactory"/>
+      <filter class="solr.LowerCaseFilterFactory"/>
+    </analyzer>
+  </fieldType>
+  <field name="_nest_path_" type="_nest_path_"/>
+  <field name="_root_" type="string" docValues="false" indexed="true" stored="false"/>
+  <field name="_version_" type="string" indexed="true" stored="true"/>
+  <field name="child_of" type="text" multiValued="true" indexed="true" stored="false"/>
+  <field name="columns.description" type="text_general" multiValued="true" indexed="true" stored="true"/>
+  <field name="columns.label" type="text_general" multiValued="true" indexed="true" stored="true"/>
+  <field name="columns.name" type="text_general" multiValued="true" indexed="true" stored="true"/>
+  <field name="columns.type" type="string" multiValued="true" indexed="true" stored="true"/>
+  <field name="columns_description" type="text_general" multiValued="true" indexed="true" stored="true"/>
+  <field name="columns_label" type="text_general" multiValued="true" indexed="true" stored="true"/>
+  <field name="columns_name" type="text_general" multiValued="true" indexed="true" stored="true"/>
+  <field name="columns_type" type="string" multiValued="true" indexed="true" stored="true"/>
+  <field name="created_at" type="date" multiValued="false" indexed="true" stored="true"/>
+  <field name="data_dict" type="string" indexed="false" stored="true"/>
+  <field name="dataset_id" type="string" indexed="true" required="true" stored="true"/>
+  <field name="dataset_url" type="string" omitNorms="true" indexed="true" stored="true"/>
+  <field name="dependency_of" type="text" multiValued="true" indexed="true" stored="false"/>
+  <field name="depends_on" type="text" multiValued="true" indexed="true" stored="false"/>
+  <field name="derives_from" type="text" multiValued="true" indexed="true" stored="false"/>
+  <field name="description" type="text" indexed="true" stored="true"/>
+  <field name="download_url" type="string" omitNorms="true" indexed="true" stored="true"/>
+  <field name="embedding_model" type="string" multiValued="false" indexed="true" stored="true"/>
+  <field name="format" type="string" indexed="true" stored="true"/>
+  <field name="has_derivation" type="text" multiValued="true" indexed="true" stored="false"/>
+  <field name="indexed_ts" type="date" default="NOW" multiValued="false" indexed="true" stored="true"/>
+  <field name="linked_from" type="text" multiValued="true" indexed="true" stored="false"/>
+  <field name="links_to" type="text" multiValued="true" indexed="true" stored="false"/>
+  <field name="metadata_created" type="date" multiValued="false" indexed="true" stored="true"/>
+  <field name="metadata_modified" type="date" multiValued="false" indexed="true" stored="true"/>
+  <field name="modified_at" type="date" multiValued="false" indexed="true" stored="true"/>
+  <field name="parent_of" type="text" multiValued="true" indexed="true" stored="false"/>
+  <field name="publisher" type="text_general" indexed="true" stored="true"/>
+  <field name="representation_version" type="string" multiValued="false" indexed="true" stored="true"/>
+  <field name="resource_id" type="string" indexed="true" required="true" stored="true"/>
+  <field name="resources_accessed_recent" type="int" indexed="true" stored="false"/>
+  <field name="resources_accessed_total" type="int" indexed="true" stored="false"/>
+  <field name="source" type="string" indexed="true" stored="true"/>
+  <field name="table_embedding" type="lakegen_vector_1024" indexed="true" stored="true"/>
+  <field name="tags" type="text_general" multiValued="true" indexed="true" stored="true"/>
+  <field name="text" type="text" multiValued="true" indexed="true" stored="false"/>
+  <field name="title" type="text" indexed="true" stored="true"/>
+  <field name="title_ngram" type="text_ngram" indexed="true" stored="false"/>
+  <field name="title_string" type="string" indexed="true" stored="false"/>
+  <field name="urls" type="text" multiValued="true" indexed="true" stored="false"/>
+  <field name="validated_data_dict" type="string" indexed="false" stored="true"/>
+  <field name="views_recent" type="int" indexed="true" stored="false"/>
+  <field name="views_total" type="int" indexed="true" stored="false"/>
+  <dynamicField name="res_extras_*" type="text" multiValued="true" indexed="true" stored="true"/>
+  <dynamicField name="columns.*" type="text_general" multiValued="true" indexed="true" stored="true"/>
+  <dynamicField name="extras_*" type="text" multiValued="false" indexed="true" stored="true"/>
+  <dynamicField name="vocab_*" type="string" multiValued="true" indexed="true" stored="true"/>
+  <dynamicField name="*_date" type="date" multiValued="false" indexed="true" stored="true"/>
+  <dynamicField name="*" type="string" multiValued="true" indexed="true" stored="true"/>
+  <copyField source="columns.description" dest="text"/>
+  <copyField source="columns.label" dest="text"/>
+  <copyField source="columns.name" dest="text"/>
+  <copyField source="columns.type" dest="text"/>
+  <copyField source="columns_description" dest="text"/>
+  <copyField source="columns_label" dest="text"/>
+  <copyField source="columns_name" dest="text"/>
+  <copyField source="columns_type" dest="text"/>
+  <copyField source="dataset_id" dest="text"/>
+  <copyField source="dataset_url" dest="urls"/>
+  <copyField source="description" dest="text"/>
+  <copyField source="download_url" dest="urls"/>
+  <copyField source="format" dest="text"/>
+  <copyField source="publisher" dest="text"/>
+  <copyField source="resource_id" dest="text"/>
+  <copyField source="source" dest="text"/>
+  <copyField source="tags" dest="text"/>
+  <copyField source="title" dest="text"/>
+  <copyField source="title" dest="title_ngram"/>
+</schema>

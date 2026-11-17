@@ -4,12 +4,12 @@ candidate question against it.
 A QUESTION (not a separately-maintained keyword list) is retrievable when a
 panel of independent retrievers — semantic, hybrid (RRF) and the lexical gate
 — MAJORITY-agree that it finds every gold table within the top K. See
-``orqa.benchmark.retrieval_panel``. Nothing else is checked here: no
+``orqa.retrieval.panel``. Nothing else is checked here: no
 same-dataset sibling files, no details the question must state.
 
 No-ops to an automatic pass when no panel/contract is available, the same
 degradation convention as the pre-planning keyword search
-(``keyword_suggestion.suggest_retrievable_keywords``).
+(``anchors.suggest_retrievable_keywords``).
 """
 
 from __future__ import annotations
@@ -17,10 +17,11 @@ from __future__ import annotations
 import re
 
 from dataclasses import dataclass, field
-from typing import Optional, Union
+from typing import Optional, Union, Callable
 
-from ...benchmark.index import tokenize
-from ...benchmark.retrieval_panel import RANK_CEILING, RetrieverPanel
+from orqa.retrieval.panel import RANK_CEILING, RetrieverPanel
+from orqa.retrieval.text import tokenize
+
 
 CONTRACT_VERSION = 2
 
@@ -72,7 +73,7 @@ def build_contract(
             (``len(plan_tables) <= 1``) — literal rank 1 by default: with
             only one target, a greedy search over the table's own real
             vocabulary reaching rank 1 costs no more than reaching a looser
-            rank (see ``orqa.agent.utility.keyword_suggestion``'s module
+            rank (see ``orqa.retrieval.anchors``'s module
             docstring), so there is no reason to settle for less.
         min_agreement: How many retrievers must pass.
     """
@@ -183,7 +184,7 @@ def _anchor_hint(question: str, retrievable_keywords: Optional[list[str]]) -> st
     names no actual words, so it leaves the LLM nothing concrete to write
     instead. ``retrievable_keywords`` is the SAME
     pre-verified anchor (see
-    ``orqa.agent.utility.keyword_suggestion.suggest_retrievable_keywords``)
+    ``orqa.retrieval.anchors.suggest_retrievable_keywords``)
     already rendered into the planning prompt as a hint; naming it again HERE,
     against the question that just failed, turns it into a pointed diagnosis:
     either the anchor was never used (say so, and name the exact missing
@@ -261,8 +262,7 @@ def _question_terms_for(question: str, resource_id: str, index) -> list[str]:
 
     Which words match is the index's answer (``terms_matching``): on a Solr
     core Solr's own analysis decides (stemming, word splits, title n-grams —
-    'tree' matches 119 nyc tables, 'trees' 48), on the builtin index the
-    record's tokens. An index that cannot say gets every question word.
+    'tree' matches 119 nyc tables, 'trees' 48). An index that cannot say gets every question word.
     """
     matcher = getattr(index, "terms_matching", None)
     if callable(matcher):
@@ -291,8 +291,8 @@ def anchor_presence(question: str, terms: list[str]) -> tuple[list[str], list[st
     """``(present, missing)``: which anchor ``terms`` the question contains.
 
     A term is present when EVERY one of its tokens is among the question's
-    tokens — the same ``benchmark.index.tokenize`` the index applies, so
-    "present" means exactly "would be a query term for the index". The index
+    tokens (``orqa.retrieval.text.tokenize``: lower-cased, accent-folded
+    words), so "present" means "would be a query word". The index
     is bag-of-words, so adjacency is not required. A term with no token at all
     (punctuation) is ignored."""
     question_tokens = set(tokenize(question))
@@ -319,7 +319,7 @@ def _question_terms_vote(
     index (the lexical, portal-faithful one):
 
     1. **Its verified anchor.** ``anchors`` is the keyword set the pre-planning
-       search proved surfaces the table (see ``keyword_suggestion``), e.g.
+       search proved surfaces the table (see ``orqa.retrieval.anchors``), e.g.
        ``[belfast, ni]``. When the question contains EVERY anchor term, the
        question supports exactly that query — one that already found the table
        — so it is searched as it is: no LLM call and no dependence on which
@@ -511,7 +511,7 @@ def check_question_retrievability(
     ``retrievable_keywords``: the SAME pre-verified anchor the question was
     written from — handed to the question writer as the vocabulary to build
     it around (see
-    ``orqa.agent.utility.keyword_suggestion.suggest_retrievable_keywords``)
+    ``orqa.retrieval.anchors.suggest_retrievable_keywords``)
     — optional. It is the first check of the lexical gate: a question that
     holds every term of a table's anchor is searched with exactly that query
     (see ``_question_terms_vote``), which is how a question that carries e.g.
@@ -583,3 +583,121 @@ def check_question_retrievability(
             contract, vote, missing_tables, question, retrievable_keywords
         ),
     }
+
+
+# ── Question gate ─────────────────────────────────────────────────────────────
+# Deterministic gate for a stage-1 question — no LLM, no plan.
+#
+# A question written by the question agent (see
+# ``orqa.agent.question.QuestionStage``) is checked here, cheapest check first, before any judge is
+# paid for:
+#
+# 1. **leak** — a raw column identifier pasted into the prose.
+# 2. **retrieval** — the retriever panel's majority vote (lexical gate,
+#    semantic, hybrid RRF) over the question, via
+#    ``gate.check_question_retrievability``.
+#
+# The verified retrieval anchor (see ``orqa.retrieval.anchors``)
+# is handed to the question writer as vocabulary to build the question around,
+# and to the retrieval check as the lexical gate's first query: a question that
+# holds a table's WHOLE anchor (e.g. ``[belfast, ni]``) passes the lexical vote,
+# because that exact query already surfaced the table (see
+# ``gate._question_terms_vote``). The gate does not REQUIRE the
+# anchor: a question that words the table differently still passes when its own
+# words find it.
+#
+# Anchor terms are compared on ``orqa.retrieval.text.tokenize`` tokens
+# (lower-cased, accent-folded words), so "present in the question" means
+# "would be a query word".
+
+def _normalized(term: str) -> str:
+    return " ".join(tokenize(term))
+
+
+def covered_terms(question: str, anchors: dict[str, list[str]]) -> list[str]:
+    """The anchor terms that ARE in the question, deduplicated, in anchor
+    order — the deterministic ``question_keywords`` of a stage-1 question
+    (never an LLM-authored list that could drift from the prose). A term is
+    present when EVERY one of its tokens is among the question's tokens (the
+    index is bag-of-words, so adjacency is not required)."""
+    question_tokens = set(tokenize(question))
+    seen: set[str] = set()
+    out: list[str] = []
+    for terms in anchors.values():
+        for term in terms:
+            tokens = tokenize(term)
+            key = _normalized(term)
+            if not tokens or key in seen:
+                continue
+            if all(token in question_tokens for token in tokens):
+                seen.add(key)
+                out.append(term)
+    return out
+
+
+@dataclass
+class QuestionGateResult:
+    approved: bool
+    # None when approved; else which check stopped it: "leak" | "retrieval".
+    # Checks run in that order and the first miss short-circuits.
+    failed_at: Optional[str] = None
+    feedback: str = ""
+    retrieval: Optional[dict] = None
+
+
+_RETRIEVAL_FIX = (
+    "Reword the QUESTION so each missed table's real vocabulary appears "
+    "naturally in its own prose, in the exact wording given (a topic worded "
+    "differently, e.g. one merged word instead of the indexed multi-word "
+    "term, will not match even if it means the same thing). Keep it a "
+    "single plain-language question, the way an average user would ask it: "
+    "never paste a column header, code or identifier — say the idea in "
+    "everyday words."
+)
+
+
+def gate_question(
+    question: str,
+    *,
+    anchors: Optional[dict[str, list[str]]] = None,
+    contract: Optional[RetrievalContract] = None,
+    panel: Optional[RetrieverPanel] = None,
+    per_table_top_k: Optional[int] = None,
+    leak_check: Optional[Callable[[str], Optional[str]]] = None,
+) -> QuestionGateResult:
+    """Run the deterministic checks on ``question``, cheapest first.
+
+    ``anchors``: ``{alias: [term, ...]}`` — the verified vocabulary the
+    question was written from (per table for a multi-table group); used to
+    make a retrieval miss's feedback name concrete words.
+    ``per_table_top_k``: see ``check_question_retrievability``.
+    ``leak_check``: ``question -> reason | None`` (kept a parameter so this
+    module stays free of the agents package).
+
+    With no contract / panel the retrieval check is a no-op, the same
+    degradation convention as the retrievability gate itself.
+    """
+    if not (question or "").strip():
+        return QuestionGateResult(False, "leak", "The question is empty.")
+
+    if leak_check is not None:
+        reason = leak_check(question)
+        if reason:
+            return QuestionGateResult(
+                False,
+                "leak",
+                f"The question {reason}. Write it in plain everyday words "
+                "with no column identifiers.",
+            )
+
+    retrieval = check_question_retrievability(
+        question, contract, panel, anchors or None, per_table_top_k
+    )
+    if not retrieval["approved"]:
+        return QuestionGateResult(
+            False,
+            "retrieval",
+            f"{retrieval['feedback']}\n{_RETRIEVAL_FIX}".strip(),
+            retrieval=retrieval,
+        )
+    return QuestionGateResult(True, retrieval=retrieval)

@@ -360,7 +360,7 @@ class PipelineLogger:
 
     def retrieval_votes(self, summary: dict, title: str = "", level: int = 1) -> None:
         """The retriever panel's vote on one question (see ``orqa.agent.
-        utility.retrievability_gate.describe_votes``): the tally, then one line
+        orqa.retrieval.gate.describe_votes``): the tally, then one line
         per voter — lexical, semantic, hybrid — with the rank each table got."""
         if not summary or not summary.get("voters"):
             return

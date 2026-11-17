@@ -25,7 +25,8 @@ import pandas as pd
 _BENIGN_NUMPY_STATS_WARNING = r"(invalid value encountered|divide by zero encountered|Degrees of freedom)"
 
 from orqa.utils import prepare_dataframe
-from ..utility.undecodable_names import escaped_literal, is_undecodable, resolve_undecodable_name
+from orqa.utils import memory_guard
+from orqa.utils.undecodable_names import escaped_literal, is_undecodable, resolve_undecodable_name
 
 
 def _spellings(column: str) -> tuple:
@@ -146,6 +147,14 @@ def _sandbox_worker(queue: mp.Queue, fn, args: tuple) -> None:
     misleading "sandbox crashed" error.
     """
     try:
+        # Out of memory, the kernel kills this process, not the run that
+        # forked it: a filter copying most of a 45 GB table (nyc taxi trips)
+        # then fails as this code's error (exit -9), the run goes on.
+        with open("/proc/self/oom_score_adj", "w") as f:
+            f.write("1000")
+    except OSError:
+        pass
+    try:
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore", category=RuntimeWarning, message=_BENIGN_NUMPY_STATS_WARNING
@@ -198,9 +207,131 @@ def _sandbox_worker(queue: mp.Queue, fn, args: tuple) -> None:
     queue.put(("ok", payload))
 
 
+# Exception types the sandbox worker may report back by name. Anything
+# unknown becomes RuntimeError (message text is preserved either way).
+SANDBOX_EXC_TYPES = {
+    "KeyError": KeyError, "ValueError": ValueError, "TypeError": TypeError,
+    "MemoryError": MemoryError, "SyntaxError": SyntaxError,
+    "IndentationError": SyntaxError, "TabError": SyntaxError,
+    "TimeoutError": TimeoutError, "NameError": NameError,
+    "AttributeError": AttributeError, "IndexError": IndexError,
+    "ZeroDivisionError": ZeroDivisionError, "OverflowError": OverflowError,
+    "RecursionError": RecursionError, "ImportError": ImportError,
+    "ModuleNotFoundError": ImportError, "ArithmeticError": ArithmeticError,
+    "FloatingPointError": ArithmeticError, "UnicodeDecodeError": ValueError,
+    "UnicodeEncodeError": ValueError, "StopIteration": RuntimeError,
+    "SystemExit": RuntimeError, "KeyboardInterrupt": RuntimeError,
+    "MergeError": ValueError, "ParserError": ValueError,
+    "OutOfBoundsDatetime": ValueError, "InvalidIndexError": KeyError,
+    "DataError": ValueError, "SpecificationError": ValueError,
+    "DuplicateLabelError": ValueError, "IndexingError": IndexError,
+    # duckdb exceptions the SQL validator doesn't translate itself.
+    "OutOfMemoryException": MemoryError, "CatalogException": KeyError,
+    "SyntaxException": SyntaxError,
+}
+
+
+def run_in_sandbox(fn, args: tuple = (), *, timeout: float, exc_types: "dict | None" = None) -> Any:
+    """Run ``fn(*args)`` in a forked child and return its result.
+
+    The child shares the parent's frames copy-on-write and is the OOM
+    killer's first choice (_sandbox_worker), so code that copies a huge
+    table fails as its own error instead of killing the run. Exceptions come
+    back by type name, mapped through ``exc_types`` (``SANDBOX_EXC_TYPES``).
+    """
+    exc_types = SANDBOX_EXC_TYPES if exc_types is None else exc_types
+    result_queue = mp.Queue()
+    p = mp.Process(
+        target=_sandbox_worker,
+        args=(result_queue, fn, args),
+        daemon=True,
+    )
+    # The machine's free memory when the child starts: the child is stopped
+    # when it takes the machine under the floor (memory_guard), well before
+    # the kernel's OOM killer, which acts only once the machine thrashes.
+    free_at_start = memory_guard.available_bytes()
+    p.start()
+    # Read the queue WHILE the worker runs. mp.Queue feeds its payload
+    # through a pipe from a background thread, and the child cannot exit
+    # until the parent has drained it: joining first (what this used to
+    # do) deadlocked on any result above the pipe buffer (~64 KB, a few
+    # thousand rows) until the timeout, which was then reported as a
+    # cartesian product.
+    deadline = time.monotonic() + timeout
+    message = None
+    while message is None:
+        try:
+            message = result_queue.get(timeout=0.2)
+        except queue_module.Empty:
+            free = memory_guard.sandbox_should_stop(free_at_start) if p.is_alive() else None
+            if free is not None:
+                p.kill()
+                p.join()
+                raise MemoryError(memory_guard.sandbox_memory_feedback(free))
+            if not p.is_alive():
+                # Dead without a message: one last short read, the feeder
+                # thread may have flushed just before exit.
+                try:
+                    message = result_queue.get(timeout=2)
+                except queue_module.Empty:
+                    break
+            elif time.monotonic() > deadline:
+                p.kill()
+                p.join()
+                raise TimeoutError(
+                    f"The code ran for more than {timeout}s and was stopped.\n"
+                    "Likely causes: a join on a non-unique or missing key (a cartesian product), "
+                    "a row-by-row loop or apply over a large table, a sort/distinct over the whole "
+                    "raw table, or a regex over millions of rows.\n"
+                    "Fix: join on the full key the plan declares, filter and aggregate before joining, "
+                    "and use vectorised column operations instead of loops or apply."
+                )
+    p.join(timeout=10)
+    if p.is_alive():
+        p.kill()
+        p.join()
+
+    if message is None:
+        exit_code = p.exitcode
+        hint = (
+            " Exit code -9 usually means the OS killed it (out of memory)."
+            if exit_code == -9 else ""
+        )
+        raise RuntimeError(
+            f"Sandbox process exited unexpectedly without returning a result "
+            f"(exit code: {exit_code}).{hint}\n"
+            "The code may have crashed the interpreter or been killed by the OS.\n"
+            "Fix: reduce the data processed — pre-filter rows, select fewer "
+            "columns, or aggregate earlier."
+        )
+
+    status, *rest = message
+    if status == "error":
+        exc_type_name, exc_msg = rest[0], rest[1]
+        exc_type = exc_types.get(exc_type_name, RuntimeError)
+        if exc_type is RuntimeError and exc_type_name not in exc_types:
+            exc_msg = f"{exc_type_name}: {exc_msg}"
+        raise exc_type(exc_msg)
+
+    # The worker ships the result pre-pickled (see _sandbox_worker).
+    try:
+        return pickle.loads(rest[0])
+    except Exception as exc:
+        raise RuntimeError(
+            f"Sandbox result could not be decoded: {exc}\n"
+            "End the query with a DataFrame, Series, or plain Python value."
+        )
+
+
 class QueryValidator(ABC):
 
-    DEFAULT_TIMEOUT   = 300
+    # LakeGen re-executes every reference_code with 180 s for loading its
+    # tables AND running it (reference_execution.py): code LakeGen would stop
+    # is rejected here. None: that budget minus the tables' load time, as
+    # utils.prepare_dataset measured it (df.attrs["orqa_load_seconds"]).
+    LAKEGEN_TIMEOUT   = 180
+    MIN_TIMEOUT       = 10
+    DEFAULT_TIMEOUT   = None
     # None: half the machine's RAM (see _default_memory_limit_mb).
     DEFAULT_MEM_LIMIT = None
 
@@ -210,13 +341,13 @@ class QueryValidator(ABC):
         table_names:  List[str],
         lookup_dict:  dict,
         mem_limit_mb: "int | None" = DEFAULT_MEM_LIMIT,
-        timeout:      int = DEFAULT_TIMEOUT,
+        timeout:      "int | None" = DEFAULT_TIMEOUT,
     ):
         self.dataframes   = dataframes
         self.table_names  = table_names
         self.lookup_dict  = lookup_dict
         self.mem_limit_mb = mem_limit_mb or _default_memory_limit_mb()
-        self.timeout      = timeout
+        self.timeout      = timeout if timeout is not None else self._lakegen_timeout(dataframes)
 
         self.validation_errors: list = []
         self.good_queries:      dict = {}
@@ -310,102 +441,17 @@ class QueryValidator(ABC):
     # ------------------------------------------------------------------
     # Sandbox
     # ------------------------------------------------------------------
-    # Exception types the sandbox worker may report back by name. Anything
-    # unknown becomes RuntimeError (message text is preserved either way).
-    _SANDBOX_EXC_TYPES = {
-        "KeyError": KeyError, "ValueError": ValueError, "TypeError": TypeError,
-        "MemoryError": MemoryError, "SyntaxError": SyntaxError,
-        "IndentationError": SyntaxError, "TabError": SyntaxError,
-        "TimeoutError": TimeoutError, "NameError": NameError,
-        "AttributeError": AttributeError, "IndexError": IndexError,
-        "ZeroDivisionError": ZeroDivisionError, "OverflowError": OverflowError,
-        "RecursionError": RecursionError, "ImportError": ImportError,
-        "ModuleNotFoundError": ImportError, "ArithmeticError": ArithmeticError,
-        "FloatingPointError": ArithmeticError, "UnicodeDecodeError": ValueError,
-        "UnicodeEncodeError": ValueError, "StopIteration": RuntimeError,
-        "SystemExit": RuntimeError, "KeyboardInterrupt": RuntimeError,
-        "MergeError": ValueError, "ParserError": ValueError,
-        "OutOfBoundsDatetime": ValueError, "InvalidIndexError": KeyError,
-        "DataError": ValueError, "SpecificationError": ValueError,
-        "DuplicateLabelError": ValueError, "IndexingError": IndexError,
-        # duckdb exceptions the SQL validator doesn't translate itself.
-        "OutOfMemoryException": MemoryError, "CatalogException": KeyError,
-        "SyntaxException": SyntaxError,
-    }
+    # Exception types the sandbox worker may report back by name (see
+    # SANDBOX_EXC_TYPES).
+    _SANDBOX_EXC_TYPES = SANDBOX_EXC_TYPES
+
+    @classmethod
+    def _lakegen_timeout(cls, dataframes: List) -> int:
+        loading = sum(float(getattr(df, "attrs", {}).get("orqa_load_seconds", 0.0)) for df in dataframes or [])
+        return max(cls.MIN_TIMEOUT, math.floor(cls.LAKEGEN_TIMEOUT - loading))
 
     def _run_in_sandbox(self, fn, args: tuple = ()) -> Any:
-        result_queue = mp.Queue()
-        p = mp.Process(
-            target=_sandbox_worker,
-            args=(result_queue, fn, args),
-            daemon=True,
-        )
-        p.start()
-        # Read the queue WHILE the worker runs. mp.Queue feeds its payload
-        # through a pipe from a background thread, and the child cannot exit
-        # until the parent has drained it: joining first (what this used to
-        # do) deadlocked on any result above the pipe buffer (~64 KB, a few
-        # thousand rows) until the timeout, which was then reported as a
-        # cartesian product.
-        deadline = time.monotonic() + self.timeout
-        message = None
-        while message is None:
-            try:
-                message = result_queue.get(timeout=0.5)
-            except queue_module.Empty:
-                if not p.is_alive():
-                    # Dead without a message: one last short read, the feeder
-                    # thread may have flushed just before exit.
-                    try:
-                        message = result_queue.get(timeout=2)
-                    except queue_module.Empty:
-                        break
-                elif time.monotonic() > deadline:
-                    p.kill()
-                    p.join()
-                    raise TimeoutError(
-                        f"The code ran for more than {self.timeout}s and was stopped.\n"
-                        "Likely causes: a join on a non-unique or missing key (a cartesian product), "
-                        "a row-by-row loop or apply over a large table, a sort/distinct over the whole "
-                        "raw table, or a regex over millions of rows.\n"
-                        "Fix: join on the full key the plan declares, filter and aggregate before joining, "
-                        "and use vectorised column operations instead of loops or apply."
-                    )
-        p.join(timeout=10)
-        if p.is_alive():
-            p.kill()
-            p.join()
-
-        if message is None:
-            exit_code = p.exitcode
-            hint = (
-                " Exit code -9 usually means the OS killed it (out of memory)."
-                if exit_code == -9 else ""
-            )
-            raise RuntimeError(
-                f"Sandbox process exited unexpectedly without returning a result "
-                f"(exit code: {exit_code}).{hint}\n"
-                "The code may have crashed the interpreter or been killed by the OS.\n"
-                "Fix: reduce the data processed — pre-filter rows, select fewer "
-                "columns, or aggregate earlier."
-            )
-
-        status, *rest = message
-        if status == "error":
-            exc_type_name, exc_msg = rest[0], rest[1]
-            exc_type = self._SANDBOX_EXC_TYPES.get(exc_type_name, RuntimeError)
-            if exc_type is RuntimeError and exc_type_name not in self._SANDBOX_EXC_TYPES:
-                exc_msg = f"{exc_type_name}: {exc_msg}"
-            raise exc_type(exc_msg)
-
-        # The worker ships the result pre-pickled (see _sandbox_worker).
-        try:
-            return pickle.loads(rest[0])
-        except Exception as exc:
-            raise RuntimeError(
-                f"Sandbox result could not be decoded: {exc}\n"
-                "End the query with a DataFrame, Series, or plain Python value."
-            )
+        return run_in_sandbox(fn, args, timeout=self.timeout, exc_types=self._SANDBOX_EXC_TYPES)
 
     # ------------------------------------------------------------------
     # Expected-result-type enforcement (plan contract)
@@ -799,7 +845,7 @@ class QueryValidator(ABC):
         A declared column that is missing from the raw table is an error
         UNLESS the plan itself creates it: ``derived_columns`` is the set of
         names the planner declared and resolved to a column of origin (see
-        :mod:`orqa.agent.utility.column_provenance`), and it is authoritative.
+        :mod:`orqa.agent.planning.provenance`), and it is authoritative.
         ``code`` only feeds the legacy fallback for plans that predate those
         declarations — see :meth:`_is_column_created_by_code`.
 
@@ -851,7 +897,7 @@ class QueryValidator(ABC):
                 # `columns_involved` is a label list, not code: "Total £" written
                 # for the header "Total �" (U+FFFD where the source file's
                 # byte could not be decoded) is resolved to it when that is the
-                # only header it can spell — see utility.undecodable_names.
+                # only header it can spell — see orqa.utils.undecodable_names.
                 resolved = [
                     c if c in dataframe.columns or c in derived_columns
                     else (resolve_undecodable_name(c, dataframe.columns) or c)
@@ -870,7 +916,7 @@ class QueryValidator(ABC):
                     # `derived_columns` is the AUTHORITATIVE answer to which
                     # columns those are: the planner resolved every one
                     # against its declared column of origin (each step's
-                    # `produces`, see orqa.agent.utility.column_provenance)
+                    # `produces`, see orqa.agent.planning.provenance)
                     # and rejected the plan otherwise. A name in that set is
                     # known-good; a name outside it gets no free pass.
                     #
@@ -1094,7 +1140,7 @@ class QueryValidator(ABC):
         Superseded by the plan's own ``produces`` declarations, which name
         every created column and the column(s) it came from, resolved at
         planning time (see
-        :mod:`orqa.agent.utility.column_provenance`). Callers pass that set as
+        :mod:`orqa.agent.planning.provenance`). Callers pass that set as
         ``prefilter_dataframes(derived_columns=...)`` and it settles the
         question exactly; this function is consulted only when it does not —
         a plan predating the declarations, the free-text fallback plan, or a

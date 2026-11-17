@@ -196,56 +196,56 @@ judge_profiles:
 
 # Response model configuration
 response_model:
-  module: "utility.structured_outputs"  # Python module where the model is defined
+  module: "structured_outputs"  # Python module where the model is defined
   class: "Result"  # Pydantic model class name
 
 querying: 
-  module: "utility.structured_outputs"
+  module: "structured_outputs"
   class: "QuerySet"
 
 table_analyzer:
-  module: "utility.structured_outputs"
+  module: "structured_outputs"
   class: "TableAnalyses"
 
 pair_task_selector:
-  module: "utility.structured_outputs"
+  module: "structured_outputs"
   class: "PairTaskSelection"
 
 query_planner:
-  module: "utility.structured_outputs"
+  module: "structured_outputs"
   class: "QueryPlan"
 
 fallback_querying:
-  module: "utility.structured_outputs"
+  module: "structured_outputs"
   class: "Query"
 
 statement_judge:
-  module: "utility.structured_outputs"
+  module: "structured_outputs"
   class: "Judgments"
 
 # Plan judge: the question is FROZEN (approved by the question stage before
 # planning), so it votes four plan layers only — plan alignment, table usage,
 # result coherence, metric combination.
 plan_judge:
-  module: "utility.structured_outputs"
+  module: "structured_outputs"
   class: "PlanJudgment"
 
-# Search keywords (orqa.agent.agents.SearchKeywords) — the retrievability
-# gate's llm_keywords retriever (orqa.benchmark.retrieval_panel).
+# Search keywords (orqa.retrieval.search_keywords) — the retrievability
+# gate's llm_keywords retriever (orqa.retrieval.panel).
 benchmark_search_keywords:
-  module: "utility.structured_outputs"
+  module: "structured_outputs"
   class: "SearchKeywords"
 
-# Question stage (orqa.agent.agents.QuestionGenerator / QuestionStage): the
+# Question stage (orqa.agent.question / QuestionStage): the
 # generator writes anchor-built questions BEFORE any plan exists; the judge
 # panel (judge_profiles.plan) votes them on readability / topic linkage /
 # grounding / table necessity.
 question_generator:
-  module: "utility.structured_outputs"
+  module: "structured_outputs"
   class: "QuestionDraftSet"
 
 question_judge:
-  module: "utility.structured_outputs"
+  module: "structured_outputs"
   class: "QuestionJudgment"
 
 # Local Ollama setup

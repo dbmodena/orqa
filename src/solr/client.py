@@ -1,10 +1,10 @@
-"""Read-only HTTP client of the live Solr cores OrQA retrieves from.
+"""Read-only HTTP client of the Solr cores OrQA retrieves from.
 
-The Solr instance is SHARED with LakeGen, whose benchmark runs query the same
-cores, so this client only reads: ``select`` (GET ``/<core>/select``) and
-``query_json`` (POST ``/<core>/query``, a JSON *search* request). Nothing here
-updates, deletes, commits or reloads; ``solr.solr`` is the admin script and is
-never used by retrieval.
+It serves OrQA's own Solr (``solr.instance``) and only reads:
+``select`` (GET ``/<core>/select``), ``query_json`` (POST ``/<core>/query``,
+a JSON *search* request) and ``schema`` (GET ``/<core>/schema``). Nothing
+here updates, deletes, commits or reloads; writes go through
+``solr.instance.SolrInstance``, which only writes to OrQA's own server.
 
 Two transport choices are measured, not stylistic:
 
@@ -31,6 +31,8 @@ from typing import Any, Optional
 import requests
 from requests.adapters import HTTPAdapter
 
+from solr.instance import default_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,7 +47,7 @@ class LocalSolrClient:
         core: Default core of ``select`` (an index passes its own ``core=``
             per call, so one client and its connection pool can serve
             several cores).
-        base_url: The Solr service URL (``.../solr``).
+        base_url: The Solr service URL (``.../solr``); None: OrQA's own.
         timeout: Seconds per request.
         retries: Attempts per request on connection errors, timeouts and
             HTTP 5xx; a 4xx is the caller's mistake and is not retried.
@@ -58,14 +60,14 @@ class LocalSolrClient:
     def __init__(
         self,
         core: Optional[str] = None,
-        base_url: str = "http://localhost:8983/solr",
+        base_url: Optional[str] = None,
         timeout: float = 30.0,
         retries: int = 3,
         backoff: float = 0.5,
         pool_size: int = 16,
     ) -> None:
         self.core = core.strip("/") if core else None
-        self.base_url = base_url.rstrip("/")
+        self.base_url = (base_url or default_url()).rstrip("/")
         self.timeout = timeout
         self.retries = max(1, int(retries))
         self.backoff = backoff
@@ -174,12 +176,14 @@ class LocalSolrClient:
         def_type: str = "edismax",
         q_op: str = "AND",
         indent: bool = True,
+        restore_columns: bool = True,
         **params: Any,
     ) -> dict[str, Any]:
         """GET ``/<core>/select`` with ``q`` = the tokens joined by spaces —
         LakeGen's lexical request. ``qf`` is left to the core's handler
         defaults unless passed. A list value (``fq=[...]``) repeats the
-        parameter."""
+        parameter. ``restore_columns=False`` leaves the flat ``columns.*``
+        arrays as stored (an export)."""
         if isinstance(tokens, str):
             raise TypeError("tokens must be a sequence of strings, not a string")
         name = self._core(core)
@@ -196,7 +200,14 @@ class LocalSolrClient:
                 **params,
             },
         )
-        return self._restore_response_docs(result)
+        return self._restore_response_docs(result) if restore_columns else result
+
+    def schema(self, core: Optional[str] = None) -> dict[str, Any]:
+        """GET ``/<core>/schema``: the core's whole schema."""
+        name = self._core(core)
+        return self._request(
+            "GET", f"{self.base_url}/{name}/schema", name, params={"wt": "json"}
+        )["schema"]
 
     def query_json(self, core: str, body: dict[str, Any]) -> dict[str, Any]:
         """POST a JSON Request API search to ``/<core>/query`` (``query``,

@@ -17,9 +17,9 @@ STEP_CHOICES = (
     "crawl",
     "clean",
     "normalize-metadata",
+    "build-solr-core",
     "index",
     "candidates-discovery",
-    "embed-search-metadata",
     "generate-query-candidates",
     "generate-statements",
 )
@@ -37,14 +37,6 @@ class TargetSpec:
 
 TARGETS = (
     TargetSpec(
-        target_id="canada",
-        country="canada",
-        city=None,
-        backend="ckan",
-        workflow_path=_PROJECT_ROOT / "conf" / "workflow" / "canada.yaml",
-        relative_data_path=Path("open_data", "ckan", "canada_small"),
-    ),
-    TargetSpec(
         target_id="uk",
         country="uk",
         city=None,
@@ -53,28 +45,12 @@ TARGETS = (
         relative_data_path=Path("orqa", "ckan", "uk"),
     ),
     TargetSpec(
-        target_id="modena",
-        country="italy",
-        city="modena",
-        backend="ckan",
-        workflow_path=_PROJECT_ROOT / "conf" / "workflow" / "modena.yaml",
-        relative_data_path=Path("open_data", "ckan", "modena"),
-    ),
-    TargetSpec(
         target_id="bologna",
         country="italy",
         city="bologna",
         backend="ods",
         workflow_path=_PROJECT_ROOT / "conf" / "workflow" / "bologna.yaml",
         relative_data_path=Path("orqa", "ods", "bologna"),
-    ),
-    TargetSpec(
-        target_id="madrid",
-        country="spain",
-        city="madrid",
-        backend="ckan",
-        workflow_path=_PROJECT_ROOT / "conf" / "workflow" / "madrid.yaml",
-        relative_data_path=Path("orqa", "ckan", "madrid"),
     ),
     TargetSpec(
         target_id="valencia",
@@ -108,16 +84,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run OrQA workflow steps for a specific country or city target.",
         epilog=(
             "Examples:\n"
-            "  python src/main.py --country canada --steps crawl index\n"
+            "  python src/main.py --country uk --steps crawl clean normalize-metadata\n"
             "  python src/main.py --country italy --city bologna --steps "
-            "crawl clean normalize-metadata"
+            "build-solr-core generate-statements"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--country",
         required=True,
-        help="Country target to run, such as canada, uk, italy, spain, france, or usa.",
+        help="Country target to run: uk, italy, spain, france or usa.",
     )
     parser.add_argument(
         "--city",
@@ -279,8 +255,8 @@ def _step_callable_path(step: str, spec: TargetSpec, cfg) -> str:
 
     step_paths = {
         "normalize-metadata": "orqa.normalize_metadata:normalize_metadata",
+        "build-solr-core": "solr.build:build_solr_core",
         "index": "orqa.indexing:create_blend_index",
-        "embed-search-metadata": "orqa.embedding_discovery.pipeline:embed_search_metadata",
         "generate-query-candidates": "orqa.query_candidates:generate_query_candidates",
         "generate-statements": "orqa.statement_generation:generate_statements",
     }
@@ -308,6 +284,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.exit(status=1, message=f"{exc}\n")
 
     from orqa.utils.run_log import run_log
+    from orqa.utils.memory_guard import start_watchdog
+
+    # Under ORQA_MEMORY_HARD_FLOOR_GB free on the machine, the run kills its
+    # code sandboxes and then stops itself (exit 75) rather than let a
+    # machine without swap freeze for everyone (orqa/utils/memory_guard.py).
+    start_watchdog()
 
     # The run log (workflow yaml `logging`): from here on, what the run prints
     # and logs is also appended to <write_path>/log/orqa.log, rotated.

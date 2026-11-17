@@ -32,11 +32,11 @@ from typing import Any, List, Optional
 import pandas as pd
 from pandas.api import types as ptypes
 
-from ...benchmark.index import tokenize
+from ..retrieval.text import tokenize
 
-from ..llm_client.LLMClientStructured import LLMClientStructured
-from ..prompting.prompts import TableAnalyzerBatchPrompt
-from ...utils import shield_dataframe_for_prompt, summarize_large_value
+from ..agent.llm_client.LLMClientStructured import LLMClientStructured
+from ..agent.prompting.prompts import TableAnalyzerBatchPrompt
+from . import shield_dataframe_for_prompt, summarize_large_value
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +152,7 @@ def scope_values(df: Any) -> dict:
     """``{column: value}`` for every column holding exactly ONE distinct
     (non-null) value across the whole table — the same single-value test
     ``render_table_facts`` reports as "Scope", factored out so a caller that
-    only needs the raw values (see ``orqa.agent.utility.retrievability_gate
+    only needs the raw values (see ``orqa.retrieval.gate
     .build_contract``'s data-scope facet fallback) doesn't have to re-derive
     them by parsing that prose back out.
     """

@@ -168,8 +168,6 @@ class ColumnStatistics:
             A :class:`TableStats` with one :class:`ColumnStat` per column, in
             column order, under its exact name.
         """
-        tokens = {str(t).strip().lower() for t in bad_tokens} if bad_tokens else set()
-        num_rows = int(len(df))
         if any(not isinstance(c, str) for c in df.columns):
             # The table facts name columns by label, ColumnStat by str: int
             # labels 0, 1 gave a one-to-one on [0, 1] beside columns "0" and
@@ -178,115 +176,233 @@ class ColumnStatistics:
             # str in production. A shallow copy: no data is copied.
             df = df.copy(deep=False)
             df.columns = [str(c) for c in df.columns]
-
-        columns: List[ColumnStat] = []
-        codes: Dict[str, np.ndarray] = {}
-        uniques: Dict[str, list] = {}
-        kinds: Dict[str, str] = {}
-        measures: Dict[str, np.ndarray] = {}
-        empty_codes: Dict[str, set] = {}
-        views: Dict[str, Optional[dict]] = {}
+        num_rows = int(len(df))
         arrow = _arrow_inputs(source, df) if source is not None and num_rows >= _ARROW_MIN_ROWS else {}
-        for label in df.columns:
-            series = df[label]
-            given = arrow.pop(label, None)
-            if given is not None:
-                col_codes, col_uniques, hashable, counts = given.codes, given.uniques, given.hashable, given.counts
-            else:
-                col_codes, col_uniques, hashable = _factorize(series, label)
-                counts = np.bincount(col_codes[col_codes >= 0], minlength=len(col_uniques))
-            del given
-            nan_count = num_rows - int(counts.sum())
-            base = {
-                "column": str(label),
-                "dtype": str(series.dtype),
-                "cardinality": int(len(col_uniques)),
-                "null_ratio": nan_count / num_rows if num_rows else 0.0,
-                "nan_count": nan_count,
-            }
-            stat = None
-            if hashable:
-                try:
-                    kind, type_label, profile, measure, empties, view = _profile_column(
-                        series, col_codes, col_uniques, counts, tokens, top_k
-                    )
-                    stat = ColumnStat(**base, type_label=type_label, **profile)
-                except Exception:
-                    # One column's failure must not cost the table the other
-                    # columns' facts (and the planner its prompt): the column
-                    # keeps its counts and enters the table facts as "other"
-                    # (codes only, no measure).
-                    logger.exception("Column statistics: profiling column %r failed; keeping its counts only", label)
-            if stat is None:
-                kind, measure, empties, view = "other", None, set(), None
-                stat = ColumnStat(**base, type_label=_unprofiled_type(series.dtype))
-            codes[label] = col_codes
-            uniques[label] = col_uniques.tolist()
-            kinds[label] = kind
-            empty_codes[label] = empties
-            views[label] = view
-            if measure is not None:
-                measures[label] = measure
-            columns.append(stat)
+        return _compute(df, lambda label: df[label], arrow, alias, top_k, bad_tokens)
 
-        try:
-            structure, same_as = profile_table(df, codes, uniques, kinds, measures, empty_codes, seed=0)
-        except Exception:
-            # The column facts stand on their own: a failure in the table
-            # facts drops only those (no structure, no "same values as").
-            logger.exception("Column statistics: table facts of %s failed; keeping the column facts only", alias)
-            structure, same_as = {}, {}
+    @staticmethod
+    def compute_from_parquet(
+        path: Union[str, Path],
+        columns: Sequence[str],
+        alias: str,
+        top_k: int = 5,
+        bad_tokens: Optional[Sequence[str]] = None,
+    ) -> TableStats:
+        """The statistics ``compute`` gives on the frame ``utils.prepare_dataset``
+        loads from the parquet ``path`` with ``columns`` selected (no row cap),
+        computed from the file without that frame: every column's frequency
+        table comes through Arrow (``profile_input``), one column in memory at
+        a time; a column the Arrow route leaves to pandas is loaded on its own.
 
-        # A whole-number column that a table fact uses as a key is a code:
-        # its quartiles and a repeated min/max read as a quantity's (fact
-        # audit: quartiles of census blocks, of arrondissements 75001..75020
-        # and of account codes; "repeated min 1" on a census block that is
-        # part of the grain). Its range stays: it bounds the code space.
-        keys = _key_columns(structure)
-        for i, label in enumerate(df.columns):
-            if label in keys and kinds[label] == "int":
-                columns[i] = columns[i].model_copy(update={"quartiles": [], "repeated_extreme": {}})
+        For the largest tables (the 169M-row nyc taxi table: a 45 GB frame),
+        so that the statistics and the frame are never in memory together.
+        ``columns``: ``profile_input.select_parquet_columns`` of the file.
 
-        # The identifier fact (SPEC_V4 A): a column that names records keeps
-        # its range and its frequent values, but its quartiles, far-high
-        # values, repeated extremes and negative count are a quantity's facts
-        # and would read as one. The header names the single-column row key.
-        labels = list(df.columns)
-        identifiers = _identifiers(labels, columns, views, kinds, structure, same_as)
-        for i, label in enumerate(labels):
-            if label in identifiers:
-                columns[i] = columns[i].model_copy(update={
-                    "identifier": identifiers[label], "quartiles": [], "far_high": None,
-                    "repeated_extreme": {}, "negative_rows": 0,
-                })
-        row_key = _row_key_column(labels, identifiers, structure)
-        if row_key is not None:
-            structure["row_key_col"] = row_key
+        A table of more than ``STATS_SAMPLE_ABOVE_ROWS`` rows is described by
+        a uniform sample of ``STATS_SAMPLE_ROWS`` of them (``sampled_from``
+        holds its row count, the header says so): the statistics cost about
+        1 KB per row on the taxi table, 150 GB for its 169M rows.
+        """
+        import pyarrow as pa
+        import pyarrow.parquet as pq
 
-        # A fill-down column (SPEC_V4 B, found by the table facts) carries its
-        # fact on the column line too.
-        position = {label: i for i, label in enumerate(df.columns)}
-        for label, fill in (structure.get("fill_down") or {}).items():
-            if label in position:
-                columns[position[label]] = columns[position[label]].model_copy(
-                    update={"filled_down": {"filled": int(fill["filled"]), "rows": int(fill["rows"])}}
+        from .profile_input import profile_parquet, uniform_rows
+
+        labels = [str(c) for c in columns]
+        total = int(pq.ParquetFile(path).metadata.num_rows)
+        rows = uniform_rows(total, STATS_SAMPLE_ROWS) if total > STATS_SAMPLE_ABOVE_ROWS else None
+        inputs = profile_parquet(path, labels, rows=rows)
+        arrow = {given.name: given for given in inputs.columns}
+        rest = [label for label in labels if label not in arrow]
+        frame = None
+        if rest:
+            table = pq.read_table(path, columns=rest)
+            if rows is not None:
+                table = table.take(pa.array(rows))
+            frame = table.to_pandas()
+            frame.columns = [str(c) for c in frame.columns]
+        dtypes = {label: given.pandas_dtype for label, given in arrow.items()}
+
+        def series_of(label: str) -> pd.Series:
+            if label in dtypes:
+                # Its values are the Arrow codes: only the dtype is read.
+                return pd.Series([], dtype=dtypes[label], name=label)
+            return frame[label]
+
+        stats = _compute(_Shape(inputs.num_rows, labels), series_of, arrow, alias, top_k, bad_tokens)
+        return stats if rows is None else stats.model_copy(update={"sampled_from": total})
+
+
+# From this many rows a parquet table's statistics are computed from the file
+# before its frame is loaded (compute_from_parquet): nyc's 169M-row taxi table
+# needs a 45 GB frame and more than that again for its statistics. 22 of the
+# 18.4k nyc/uk tables pass it.
+FILE_STATS_MIN_ROWS = 20_000_000
+# Above this many rows the statistics describe a uniform sample of
+# STATS_SAMPLE_ROWS rows (user's choice, 2026-11-09): the three nyc tables of
+# 135M-295M rows. 20M taxi rows: 19 GB, 90 s.
+STATS_SAMPLE_ABOVE_ROWS = 50_000_000
+STATS_SAMPLE_ROWS = 20_000_000
+
+
+def stats_from_file(path: Union[str, Path]) -> bool:
+    """A parquet ``path`` of at least ``FILE_STATS_MIN_ROWS`` rows."""
+    path = Path(path)
+    if path.suffix.lower() != ".parquet":
+        return False
+    try:
+        import pyarrow.parquet as pq
+
+        return pq.ParquetFile(path).metadata.num_rows >= FILE_STATS_MIN_ROWS
+    except Exception:
+        return False
+
+
+def matches_frame(stats: TableStats, df: pd.DataFrame) -> bool:
+    """``stats`` (from the file) describe ``df`` (as loaded): its rows, its
+    columns in order, their dtypes."""
+    return (
+        (stats.sampled_from if stats.sampled_from is not None else stats.num_rows) == len(df)
+        and [c.column for c in stats.columns] == [str(c) for c in df.columns]
+        and [c.dtype for c in stats.columns] == [str(t) for t in df.dtypes]
+    )
+
+
+class _Shape:
+    """What the table facts read of a frame: its length and column order."""
+
+    def __init__(self, num_rows: int, columns: List[str]):
+        self._num_rows = int(num_rows)
+        self.columns = list(columns)
+
+    def __len__(self) -> int:
+        return self._num_rows
+
+
+def _compute(
+    df: Any,
+    series_of: Callable[[str], pd.Series],
+    arrow: Dict[str, Any],
+    alias: str,
+    top_k: int,
+    bad_tokens: Optional[Sequence[str]],
+) -> TableStats:
+    """``ColumnStatistics.compute``'s body. ``df``: the frame, or a ``_Shape``
+    (only its length and column order are read); ``series_of(label)``: the
+    column (only its dtype is read when ``arrow`` holds its frequency table);
+    ``arrow``: the Arrow inputs by label, consumed here."""
+    tokens = {str(t).strip().lower() for t in bad_tokens} if bad_tokens else set()
+    num_rows = int(len(df))
+    columns: List[ColumnStat] = []
+    codes: Dict[str, np.ndarray] = {}
+    uniques: Dict[str, list] = {}
+    kinds: Dict[str, str] = {}
+    measures: Dict[str, np.ndarray] = {}
+    empty_codes: Dict[str, set] = {}
+    views: Dict[str, Optional[dict]] = {}
+    for label in df.columns:
+        series = series_of(label)
+        given = arrow.pop(label, None)
+        if given is not None:
+            col_codes, col_uniques, hashable, counts = given.codes, given.uniques, given.hashable, given.counts
+        else:
+            col_codes, col_uniques, hashable = _factorize(series, label)
+            counts = np.bincount(col_codes[col_codes >= 0], minlength=len(col_uniques))
+        del given
+        nan_count = num_rows - int(counts.sum())
+        base = {
+            "column": str(label),
+            "dtype": str(series.dtype),
+            "cardinality": int(len(col_uniques)),
+            "null_ratio": nan_count / num_rows if num_rows else 0.0,
+            "nan_count": nan_count,
+        }
+        stat = None
+        if hashable:
+            try:
+                kind, type_label, profile, measure, empties, view = _profile_column(
+                    series, col_codes, col_uniques, counts, tokens, top_k
                 )
+                stat = ColumnStat(**base, type_label=type_label, **profile)
+            except Exception:
+                # One column's failure must not cost the table the other
+                # columns' facts (and the planner its prompt): the column
+                # keeps its counts and enters the table facts as "other"
+                # (codes only, no measure).
+                logger.exception("Column statistics: profiling column %r failed; keeping its counts only", label)
+        if stat is None:
+            kind, measure, empties, view = "other", None, set(), None
+            stat = ColumnStat(**base, type_label=_unprofiled_type(series.dtype))
+        codes[label] = col_codes
+        # A "str" Index stays one: its values are Arrow strings, where a
+        # list would hold one Python object per distinct value (four
+        # near-unique columns of the taxi table: tens of GB).
+        uniques[label] = col_uniques if isinstance(col_uniques.dtype, pd.StringDtype) else col_uniques.tolist()
+        kinds[label] = kind
+        empty_codes[label] = empties
+        views[label] = view
+        if measure is not None:
+            measures[label] = measure
+        columns.append(stat)
 
-        # An identical column says only "same values as <first>" (plus its
-        # nulls): repeating its facts would cost tokens and hide the identity.
-        for later, first in same_as.items():
-            base = columns[position[later]]
-            columns[position[later]] = ColumnStat(
-                column=base.column,
-                dtype=base.dtype,
-                cardinality=base.cardinality,
-                null_ratio=base.null_ratio,
-                nan_count=base.nan_count,
-                type_label=base.type_label,
-                same_as=str(first),
+    try:
+        structure, same_as = profile_table(df, codes, uniques, kinds, measures, empty_codes, seed=0)
+    except Exception:
+        # The column facts stand on their own: a failure in the table
+        # facts drops only those (no structure, no "same values as").
+        logger.exception("Column statistics: table facts of %s failed; keeping the column facts only", alias)
+        structure, same_as = {}, {}
+
+    # A whole-number column that a table fact uses as a key is a code:
+    # its quartiles and a repeated min/max read as a quantity's (fact
+    # audit: quartiles of census blocks, of arrondissements 75001..75020
+    # and of account codes; "repeated min 1" on a census block that is
+    # part of the grain). Its range stays: it bounds the code space.
+    keys = _key_columns(structure)
+    for i, label in enumerate(df.columns):
+        if label in keys and kinds[label] == "int":
+            columns[i] = columns[i].model_copy(update={"quartiles": [], "repeated_extreme": {}})
+
+    # The identifier fact (SPEC_V4 A): a column that names records keeps
+    # its range and its frequent values, but its quartiles, far-high
+    # values, repeated extremes and negative count are a quantity's facts
+    # and would read as one. The header names the single-column row key.
+    labels = list(df.columns)
+    identifiers = _identifiers(labels, columns, views, kinds, structure, same_as)
+    for i, label in enumerate(labels):
+        if label in identifiers:
+            columns[i] = columns[i].model_copy(update={
+                "identifier": identifiers[label], "quartiles": [], "far_high": None,
+                "repeated_extreme": {}, "negative_rows": 0,
+            })
+    row_key = _row_key_column(labels, identifiers, structure)
+    if row_key is not None:
+        structure["row_key_col"] = row_key
+
+    # A fill-down column (SPEC_V4 B, found by the table facts) carries its
+    # fact on the column line too.
+    position = {label: i for i, label in enumerate(df.columns)}
+    for label, fill in (structure.get("fill_down") or {}).items():
+        if label in position:
+            columns[position[label]] = columns[position[label]].model_copy(
+                update={"filled_down": {"filled": int(fill["filled"]), "rows": int(fill["rows"])}}
             )
 
-        return TableStats(alias=alias, num_rows=num_rows, columns=columns, structure=structure)
+    # An identical column says only "same values as <first>" (plus its
+    # nulls): repeating its facts would cost tokens and hide the identity.
+    for later, first in same_as.items():
+        base = columns[position[later]]
+        columns[position[later]] = ColumnStat(
+            column=base.column,
+            dtype=base.dtype,
+            cardinality=base.cardinality,
+            null_ratio=base.null_ratio,
+            nan_count=base.nan_count,
+            type_label=base.type_label,
+            same_as=str(first),
+        )
+
+    return TableStats(alias=alias, num_rows=num_rows, columns=columns, structure=structure)
 
 
 # Rows per column compared between the Arrow input and the frame.
@@ -537,7 +653,10 @@ def _factorize(series: pd.Series, label: str):
 def _unprofiled_type(dtype) -> str:
     """Type label of a column whose profile failed, from its dtype alone: ""
     lets the renderer derive int / float / bool / datetime; an object
-    column's values were never classified, so "str" would claim text."""
+    column's values were never classified, so "str" would claim text. A
+    "str" column holds text by its dtype."""
+    if isinstance(dtype, pd.StringDtype):
+        return "str"
     return "object" if dtype == object else ""
 
 

@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OrQA Run Monitor</title>
+<style>
+  :root {
+    --surface: #fcfcfb; --plane: #f9f9f7; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --ring: rgba(11,11,11,0.10);
+    --track: #cde2fb; --fill: #2a78d6;
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+    --good-ink: #006300; --code: #f1f0ec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --surface: #1a1a19; --plane: #0d0d0d; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --ring: rgba(255,255,255,0.10);
+      --track: #183454; --fill: #5598e7; --good-ink: #0ca30c; --code: #222220;
+    }
+  }
+  :root[data-theme="dark"] {
+    --surface: #1a1a19; --plane: #0d0d0d; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --ring: rgba(255,255,255,0.10);
+    --track: #183454; --fill: #5598e7; --good-ink: #0ca30c; --code: #222220;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--plane); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 16px; margin: 0; }
+  h3 { font-size: 12px; margin: 14px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .muted { color: var(--muted); }
+  .ink2 { color: var(--ink-2); }
+  .card { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 14px 16px; }
+  .top { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .portals { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 12px; }
+  @media (max-width: 440px) { .portals { grid-template-columns: 1fr; } }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; overflow-wrap: anywhere; }
+  .model { font-weight: 600; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 10px; }
+  .step { border: 1px solid var(--ring); border-radius: 8px; padding: 6px 8px; min-width: 0; }
+  .step .name { font-size: 12px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .step .when { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .step.running { border-color: var(--fill); }
+  .meter { margin: 6px 0 8px; }
+  .meter .label { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+  .meter .label span:last-child { font-variant-numeric: tabular-nums; color: var(--ink-2); }
+  .track { height: 8px; background: var(--track); border-radius: 4px; overflow: hidden; margin-top: 3px; }
+  .bar { height: 100%; background: var(--fill); border-radius: 4px; min-width: 2px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 8px; }
+  .tile { border: 1px solid var(--ring); border-radius: 8px; padding: 6px 8px; }
+  .tile .v { font-size: 18px; font-weight: 600; }
+  .tile .k { font-size: 11px; color: var(--muted); }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--ink-2); font-size: 12px; }
+  pre { background: var(--code); border-radius: 6px; padding: 8px; margin: 6px 0 0; max-height: 240px; overflow: auto;
+        font-size: 11px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+  .chip { border: 1px solid var(--ring); border-radius: 999px; padding: 1px 8px; font-size: 12px; color: var(--ink-2); }
+  .warn { color: var(--critical); font-weight: 600; }
+  button { font: inherit; font-size: 12px; background: var(--surface); color: var(--ink-2); border: 1px solid var(--ring);
+           border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>OrQA run monitor</h1>
+    <span class="muted" id="updated">loading…</span>
+    <span style="flex:1"></span>
+    <button id="theme" type="button" title="Switch light / dark">Theme</button>
+  </header>
+  <section class="top" id="top"></section>
+  <section class="portals" id="portals"></section>
+</main>
+<script>
+const STATUS = {
+  done:    {color: "var(--good)",     icon: "✓", label: "Done"},
+  running: {color: "var(--fill)",     icon: "▶", label: "Running"},
+  pending: {color: "var(--muted)",    icon: "○", label: "Pending"},
+  stopped: {color: "var(--warning)",  icon: "!", label: "Stopped"},
+  waiting: {color: "var(--warning)",  icon: "⏸", label: "Waiting"},
+  failed:  {color: "var(--critical)", icon: "✕", label: "Failed"},
+};
+const STEP_NAMES = {
+  "candidates-discovery": "1 · Discovery",
+  "generate-query-candidates": "2 · Query candidates",
+  "generate-statements": "3 · Statements",
+};
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const num = n => n == null ? "–" : Number(n).toLocaleString();
+const compact = n => n == null ? "–" : Intl.NumberFormat(undefined, {notation: "compact", maximumFractionDigits: 1}).format(n);
+const time = t => t ? new Date(t * 1000).toLocaleString(undefined, {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "";
+function duration(s) {
+  if (s == null) return "–";
+  s = Math.max(0, Math.round(s));
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+}
+function status(state, text) {
+  const s = STATUS[state] || STATUS.pending;
+  return `<span class="status"><span class="dot" style="background:${s.color}"></span>${s.icon} ${esc(text || s.label)}</span>`;
+}
+function meter(label, value, max, detail) {
+  const pct = max ? Math.min(100, 100 * (value || 0) / max) : 0;
+  return `<div class="meter"><div class="label"><span>${esc(label)}</span><span>${detail ?? `${num(value)} / ${num(max)}`}</span></div>
+    <div class="track" role="meter" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="${max || 0}" aria-valuenow="${value || 0}">
+    <div class="bar" style="width:${pct}%"></div></div></div>`;
+}
+const tile = (k, v) => `<div class="tile"><div class="v">${v}</div><div class="k">${esc(k)}</div></div>`;
+
+function renderTop(d) {
+  const llm = d.llm, emb = d.embedding_server, solr = d.solr;
+  const judges = Object.entries(llm.judges || {}).map(([k, v]) => `${k}: ${(v || []).join(", ")}`).join(" · ");
+  const loaded = (emb.loaded || []).map(m => `${m.name} on ${m.processor}`).join(", ") || "none loaded";
+  const lowRoot = (d.disk_free_gb["/"] ?? 99) < 0.5;
+  const cores = Object.entries(solr.cores || {}).filter(([n]) => !n.endsWith("_previous"));
+  document.getElementById("top").innerHTML = `
+    <div class="card"><h2>LLM</h2><dl class="kv" style="margin-top:8px">
+      <dt>Pinned</dt><dd>${llm.pinned
+        ? status(llm.config_matches_pin ? "done" : "failed", llm.config_matches_pin ? `only ${llm.pinned}` : `config also names ${llm.references.filter(r => r !== llm.pinned).join(", ")}`)
+        : status("stopped", "not pinned (ORQA_ONLY_LLM unset)")}</dd>
+      <dt>Model</dt><dd class="model">${esc(llm.model)}</dd>
+      <dt>Served as</dt><dd class="mono">${esc(llm.served_as)}</dd>
+      <dt>Endpoint</dt><dd class="mono">${esc(llm.endpoint || "–")}</dd>
+      <dt>Thinking</dt><dd>${llm.thinking == null ? "model default" : llm.thinking ? "on" : "off"}</dd>
+      <dt>Judges</dt><dd>${esc(judges || "–")}</dd>
+      <dt>Fallback</dt><dd>${esc((llm.fallback_models || []).join(", ") || "none")}</dd></dl></div>
+    <div class="card"><h2>Embeddings</h2><dl class="kv" style="margin-top:8px">
+      <dt>Server</dt><dd>${status(emb.up ? "done" : "failed", emb.up ? "Up" : "Down")} <span class="mono muted">${esc(emb.url)}</span></dd>
+      <dt>Loaded</dt><dd class="model">${esc(loaded)}</dd>
+      <dt>Available</dt><dd>${esc((emb.models || []).join(", ") || "–")}</dd>
+      <dt>Not used here</dt><dd class="muted">litellm embedding_model ${esc(llm.litellm_embedding_model)}</dd></dl></div>
+    <div class="card"><h2>Solr &amp; disk</h2><dl class="kv" style="margin-top:8px">
+      <dt>Solr</dt><dd>${status(solr.up ? "done" : "failed", solr.up ? "Up" : "Down")} <span class="mono muted">${esc(solr.url)}</span></dd>
+      <dt>Cores</dt><dd>${cores.map(([n, c]) => `${esc(n)} <span class="muted">${num(c)}</span>`).join(" · ") || "–"}</dd>
+      <dt>Free /</dt><dd class="${lowRoot ? "warn" : ""}">${d.disk_free_gb["/"] ?? "–"} GB${lowRoot ? " — root disk nearly full" : ""}</dd>
+      <dt>Free /data</dt><dd>${d.disk_free_gb["/data"] ?? "–"} GB</dd></dl></div>`;
+}
+
+function renderPortal(p, pinned) {
+  const s = p.settings, disc = p.discovery, qc = p.query_candidates, st = p.statements;
+  const proc = p.process;
+  const head = proc
+    ? status("running", `pid ${proc.pid} · ${duration(Date.now() / 1000 - proc.started)}`)
+    : p.waiting ? status("waiting", `Waiting: ${p.waiting}`)
+    : p.launched ? status(Object.values(p.steps).some(x => x.state === "failed") ? "failed" : Object.values(p.steps).every(x => x.state === "done") ? "done" : "stopped",
+                          Object.values(p.steps).every(x => x.state === "done") ? "Finished" : "Not running")
+    : status("pending", "Not launched");
+  const steps = Object.entries(p.steps).map(([name, x]) => {
+    const when = x.ended ? `${time(x.started)} → ${duration(x.ended - x.started)}` : x.started ? `since ${time(x.started)}` : "";
+    return `<div class="step ${x.state}"><div class="name">${esc(STEP_NAMES[name] || name)}</div>${status(x.state)}<div class="when">${esc(when)}</div></div>`;
+  }).join("");
+
+  const embModels = Object.entries(disc.embeddings.models || {}).map(([m, n]) => `${m} (${num(n)})`).join(", ");
+  const kinds = Object.entries(disc.candidate_kinds || {}).map(([k, n]) => `${k} ${num(n)}`).join(" · ");
+  let discovery = `
+    <h3>Discovery</h3>
+    <div class="chips"><span class="chip">embeddings: ${esc(embModels || "none yet")}</span>
+      <span class="chip">clusters: ${disc.clusters ? "built" : "not yet"}</span>
+      <span class="chip">neighbor cosine ≥ ${esc(s.neighbor_threshold)}</span></div>
+    ${disc.embeddings.batch ? meter("Embedding batches", disc.embeddings.batch[0], disc.embeddings.batch[1]) : ""}
+    ${meter("Datasets explored", disc.datasets_done, disc.max_datasets,
+            `${num(disc.datasets_done)} / ${num(disc.max_datasets)}${disc.datasets_per_hour ? ` · ${disc.datasets_per_hour}/h` : ""}`)}
+    ${meter("Task-selection tokens", disc.tokens_spent, disc.tokens_budget, `${compact(disc.tokens_spent)} / ${compact(disc.tokens_budget)}`)}
+    <div class="tiles">${tile("pairs judged", num(disc.pairs_judged))}${tile("candidates", num(disc.candidates))}${tile("query groups", num(qc.groups))}</div>
+    ${kinds ? `<div class="muted" style="font-size:12px;margin-top:4px">candidates by task: ${esc(kinds)}</div>` : ""}`;
+
+  let statements = `<h3>Statements</h3>`;
+  if (!st.started) {
+    statements += `<div class="muted">not started — targets: ${num(s.single_target)} single-table + ${num(s.multi_target)} multi-table groups</div>`;
+  } else {
+    const modes = st.modes, approved = (modes.single?.questions || 0) + (modes.multi?.questions || 0);
+    const models = Object.entries(st.models || {}).map(([m, n]) => `${m} (${num(n)})`).join(", ");
+    const statuses = Object.entries(st.statuses || {}).map(([k, n]) => `${k} ${num(n)}`).join(" · ");
+    statements += `
+      ${meter("Single-table groups", modes.single.groups, modes.single.target,
+              `${num(modes.single.groups)} / ${num(modes.single.target)}${modes.single.median_s ? ` · median ${Math.round(modes.single.median_s)} s` : ""}`)}
+      ${meter("Multi-table groups", modes.multi.groups, modes.multi.target,
+              `${num(modes.multi.groups)} / ${num(modes.multi.target)}${modes.multi.median_s ? ` · median ${Math.round(modes.multi.median_s)} s` : ""}`)}
+      <div class="tiles">${tile("questions", num(approved))}${tile("tokens", compact(st.tokens))}${tile("ETA", duration(st.eta_s))}</div>
+      <div class="muted" style="font-size:12px;margin-top:4px">model in trace: <span class="ink2">${esc(models || "–")}</span>
+        · last group ${esc(time(st.last_group_at) || "–")}${statuses ? ` · ${esc(statuses)}` : ""}</div>`;
+  }
+  const llms = p.llm_registered || [];
+  const foreign = pinned ? llms.filter(m => m !== pinned) : [];
+  const llmLine = !llms.length ? `<span class="muted">no LLM client started yet</span>`
+    : status(foreign.length ? "failed" : "done", `${llms.join(", ")}${foreign.length ? " — not the pinned model" : ""}`);
+  return `<article class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+      <h2>${esc(p.portal)} <span class="muted" style="font-weight:400;font-size:12px">core ${esc(s.solr_core)} · gate ${esc(s.gate_embedding_model)}</span></h2>${head}</div>
+    <div style="margin-top:6px;font-size:12px"><span class="muted">LLM endpoints this portal's runs registered:</span> ${llmLine}</div>
+    <div class="steps">${steps}</div>
+    ${discovery}${statements}
+    <details><summary>Log tail${p.events.length ? " and launcher events" : ""}</summary>
+      <pre>${esc([...p.events, ...p.log_tail].join("\n") || "no log yet")}</pre></details>
+  </article>`;
+}
+
+const openDetails = new Set();
+async function refresh() {
+  try {
+    const response = await fetch("api/status", {cache: "no-store"});
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const d = await response.json();
+    document.querySelectorAll("#portals details").forEach((el, i) => el.open ? openDetails.add(i) : openDetails.delete(i));
+    renderTop(d);
+    document.getElementById("portals").innerHTML = d.portals.map(p => renderPortal(p, d.llm.pinned)).join("");
+    document.querySelectorAll("#portals details").forEach((el, i) => { if (openDetails.has(i)) el.open = true; });
+    document.getElementById("updated").textContent = `updated ${new Date(d.generated_at * 1000).toLocaleTimeString()} · every 15 s`;
+  } catch (error) {
+    document.getElementById("updated").innerHTML = `<span class="warn">refresh failed: ${esc(error.message)}</span>`;
+  }
+}
+document.getElementById("theme").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  root.dataset.theme = dark ? "light" : "dark";
+});
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>

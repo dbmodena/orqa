@@ -12,8 +12,8 @@ fixes exactly those, logs each fix, and leaves everything else (a missing
 vote, an unknown alias, an empty reason) to the model's retry.
 
 Used by ``orqa.agent.llm_client.LLMClientStructured`` (every structured
-call), ``orqa.agent.agents.JudgePanel`` (every vote) and
-``orqa.agent.agents.QueryPlanner`` (every raw plan before assembly).
+call), ``orqa.agent.judges`` (every vote) and
+``orqa.agent.planning.planner`` (every raw plan before assembly).
 Measured in experiments/structured_stability (2026-11-02/03): on
 gpt-oss-120b the shapes handled here were never needed on a clean answer —
 they matter for the tail of a budget-cut answer and for weaker models.

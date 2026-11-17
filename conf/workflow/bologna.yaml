@@ -113,16 +113,22 @@ tasks:
     sm_micro_avg_threshold: 0.5
     # Embedding + clustering discovery
     top_k_neighbors: 10
-    cosine_similarity_threshold: 0.75
+    # bge-m3's cosines run higher than cohere's: 0.81 keeps the 3.73 neighbors per table
+    # cohere gave at 0.75 (measured 2026-11-07 on the same tables and clusters).
+    cosine_similarity_threshold: 0.81
     correlation_threshold: 0.5
     correlation_method: pearson
     embedding_batch_size: 64
+    # The metadata texts' model: bge-m3 on OrQA's embedding server (src/solr/embedder.py),
+    # the model of the Solr cores; null: litellm.yaml's embedding_model.
+    embedding_model: bge-m3
+    embedding_url: null     # null: http://127.0.0.1:$ORQA_OLLAMA_PORT
     target_cluster_size: 40
     cluster_overlap_margin: 0.1
     max_cluster_size: 60
     sm_matcher: coma
-    tokens_budget: 1000000
-    max_datasets_to_process: 100
+    tokens_budget: 100_000_000
+    max_datasets_to_process: 1000
   query_generation:
     kind: "SQL"
     max_response_tokens: 300
@@ -135,14 +141,9 @@ tasks:
     # "unretrievable_group" — is skipped: NO entry is written for it,
     # and its slot (st_5, ...) is refilled by the next table of the same seeded
     # order, up to 25 replacements per slot. Other failures are still recorded.
-    single_table_query_count: 150
-    multi_table_query_count: 100
+    single_table_query_count: 300
+    multi_table_query_count: 200
     languages: ["Italian"]
-    # Family-stratified sampling: no single CKAN dataset family (83% of UK
-    # gold tables belong to one with other files, median 38, max 1,426)
-    # contributes more than this many single-table candidates until every
-    # family has had a turn.
-    max_groups_per_family: 2
     # Question generation is split from planning. For each slot an agent first
     # writes a question FROM the verified retrieval keywords (the anchor found by
     # searching the index) and a gate — the retriever panel, then the question
@@ -180,21 +181,25 @@ tasks:
   # Retrieval backend — what the keyword-anchor search and the question stage's
   # retrievability gate query.
   search:
-    # solr: LakeGen's own live Solr core for this portal, queried READ-ONLY
-    # exactly as LakeGen queries it (orqa.benchmark.solr_index), so "retrievable"
-    # means retrievable by LakeGen. Keyword search: GET /<core>/select, edismax,
+    # This portal's core on OrQA's own Solr (src/solr, `python
+    # src/solr/cli.py start`), the documents LakeGen searches, queried exactly as
+    # LakeGen queries them (src/solr/index.py), so "retrievable" means
+    # retrievable by LakeGen. The step build-solr-core builds the core. Keyword search: GET /<core>/select, edismax,
     # q.op=AND, the core's own qf. Dense: KNN on table_embedding through POST
     # /<core>/query (a 1024-d vector over GET is HTTP 414, and /select's edismax
     # default silently returns 0 hits), the question embedded with
-    # cohere.embed-v4.0 at 1024 dims. Loading pings the core and checks its KNN
+    # solr.embedding_model at 1024 dims. Loading pings the core and checks its KNN
     # answers; a run fails rather than gate against anything else.
-    backend: solr
     solr:
-      core: bologna_v2        # the old `bologna` core has no vector field
-      url: null               # null: $SOLR_URL, else http://localhost:8983/solr
+      core: bologna
+      url: null               # null: OrQA's Solr, http://localhost:$ORQA_SOLR_PORT/solr
       vector_field: table_embedding
-      # LakeGen's KNN filters: only its metadata-v1 vectors of this model.
-      knn_filters: ['representation_version:"metadata-v1"', 'embedding_model:"cohere.embed-v4.0"']
+      # The vectors' model: bge-m3 on OrQA's embedding server (src/solr/embedder.py),
+      # as LakeGen embeds with it; cohere.* / ocid1.* would go through OCI.
+      embedding_model: bge-m3
+      embedding_url: null     # null: OrQA's embedding server, http://127.0.0.1:$ORQA_OLLAMA_PORT
+      # Only metadata-v1 vectors of that model (LakeGen's KNN filters).
+      knn_filters: ['representation_version:"metadata-v1"', 'embedding_model:"bge-m3"']
       embedding_dimensions: 1024  # the core's vectors; OrQA's 1536-d caches do not fit
       timeout: 30
       retries: 3
@@ -221,7 +226,7 @@ tasks:
     # PRE-planning keyword suggestion above AND the question stage's
     # retriever-panel gate. Off, no question is checked against Solr at all.
     retrieval_gate_enabled: true
-    # Retrievability contract (see orqa.agent.utility.retrievability_gate): a
+    # Retrievability contract (see orqa.retrieval.gate): a
     # question passes when a panel of retrievers majority-agrees that it finds
     # every gold table within the top K. The retrievers are LakeGen's three
     # ways of querying the core:

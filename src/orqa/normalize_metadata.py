@@ -564,8 +564,8 @@ def _repair_mojibake(text: str) -> str:
 
 # A resource "name" made only of these says nothing about the table. On
 # data.gov.uk an ArcGIS-harvested resource is named after its format, so 5,508
-# of 27,390 UK resources are called "CSV" or "CSV Download" — a field the index
-# weights as highly as the title (see orqa.benchmark.index.FIELD_WEIGHTS).
+# of 27,390 UK resources are called "CSV" or "CSV Download" — a field a keyword
+# search matches like the title.
 _FORMAT_LABELS = frozenset({
     "csv", "tsv", "xls", "xlsx", "ods", "json", "geojson", "xml", "zip", "pdf",
     "txt", "kml", "kmz", "api", "html", "htm", "rdf", "wfs", "wms", "parquet",

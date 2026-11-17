@@ -382,9 +382,13 @@ class _Table:
             return False
         if c not in self._long:
             u = self.uniques[c]
-            lengths = np.fromiter(
-                (len(v) if isinstance(v, str) else len(str(v)) for v in u), dtype=np.int64, count=len(u)
-            )
+            if isinstance(u, pd.Index) and isinstance(u.dtype, pd.StringDtype):
+                # A "str" column's values stay Arrow strings (statistics._compute).
+                lengths = u.str.len().to_numpy(dtype=np.int64, na_value=0)
+            else:
+                lengths = np.fromiter(
+                    (len(v) if isinstance(v, str) else len(str(v)) for v in u), dtype=np.int64, count=len(u)
+                )
             rows = self.counts[c][:-1]
             filled = int(rows.sum())
             self._long[c] = bool(filled) and float(lengths @ rows) / filled > _LONG_TEXT_CHARS

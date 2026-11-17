@@ -28,11 +28,21 @@ from ..utils.pipeline_logger import PipelineLogger
 logger = logging.getLogger(__name__)
 
 
+# Per-input limits of the local (Ollama) models litellm does not know. Ollama
+# runs bge-m3 with a 2,048-token context, not the model's 8,192: a longer
+# input is embedded from its first 2,048 tokens (measured, prompt_eval_count).
+LOCAL_MODEL_INPUT_TOKENS = {"bge-m3": 2048}
+
+
 def embedding_max_input_tokens(model: str, default: int = 512) -> int:
-    """Per-input token limit of ``model``, from litellm's model map.
+    """Per-input token limit of ``model``: a local model's from
+    ``LOCAL_MODEL_INPUT_TOKENS``, else litellm's model map.
 
     ``default`` (Cohere embed v3's limit) covers models litellm doesn't know.
     """
+    local = LOCAL_MODEL_INPUT_TOKENS.get(model.removesuffix(":latest"))
+    if local is not None:
+        return local
     try:
         return int(litellm.get_model_info(model)["max_input_tokens"])
     except Exception:
@@ -189,32 +199,6 @@ class EmbeddingCache:
         with open(tmp_manifest, "w") as f:
             json.dump(manifest, f)
         os.replace(tmp_manifest, self.manifest_path)
-
-    def seed_from(self, other: "EmbeddingCache") -> int:
-        """Copy every vector+manifest entry ``other`` has that this cache
-        lacks, so a second cache covering a wider record set (e.g. the
-        search-embeddings cache, which also embeds records with no local
-        file) never re-pays the API cost for vectors discovery already
-        computed. Entries this cache already has win — never overwritten —
-        so re-seeding after a partial run only fills genuine gaps.
-
-        Returns how many entries were copied. No-ops (returns 0) when
-        ``other`` has nothing cached yet.
-        """
-        vectors, manifest = self._load()
-        other_vectors, other_manifest = other._load()
-
-        missing = [dataset_id for dataset_id in other_vectors if dataset_id not in vectors]
-        if not missing:
-            return 0
-
-        for dataset_id in missing:
-            vectors[dataset_id] = other_vectors[dataset_id]
-            if dataset_id in other_manifest:
-                manifest[dataset_id] = other_manifest[dataset_id]
-
-        self._save(vectors, manifest)
-        return len(missing)
 
     def get_or_compute(
         self, texts_by_id: dict[str, str], client: EmbeddingClient

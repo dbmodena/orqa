@@ -191,14 +191,6 @@ class CandidatesDiscovery:
     # Derived paths (set by load_config)
     embeddings_cache_path: Optional[Path] = None
 
-    # A SEPARATE cache covering every normalized metadata record (not just
-    # the discovery-eligible subset embeddings_cache_path holds) — see
-    # orqa.embedding_discovery.pipeline.embed_search_metadata. Read by
-    # orqa.benchmark.index.load_index (preferred over embeddings_cache_path
-    # when present) so the retrievability gate's dense retriever scores
-    # every record, not just the ones discovery happened to embed.
-    search_embeddings_path: Optional[Path] = None
-
     # Where the cluster assignments + 2D projection are persisted (see
     # embedding_discovery.clustering.compute_cluster_projection) — the
     # dataset-id -> cluster-id mapping and scatter-plot coordinates the
@@ -236,6 +228,12 @@ class CandidatesDiscovery:
     # embedding model's own per-input token limit (see
     # embedding_discovery.embeddings.build_embedding_text).
     embedding_batch_size: int = 64
+    # The model the metadata texts are embedded with. None: litellm.yaml's
+    # embedding_model. Otherwise the Solr cores' rule (search.solr.embedding_model):
+    # cohere.* / ocid1.* through OCI, anything else (bge-m3) through Ollama at
+    # embedding_url (None: OrQA's embedding server, src/solr/embedder.py).
+    embedding_model: Optional[str] = None
+    embedding_url: Optional[str] = None
 
     # Valentine matcher used for the pair schema gate
     sm_matcher: str = "coma"
@@ -445,18 +443,11 @@ class StatementGeneration:
     # runs (and sibling workflows sharing the yaml seed) are reproducible.
     multi_table_query_count: Optional[int] = None
 
-    # Family-stratified sampling cap for single-table generation (see
-    # orqa.statement_generation._sample_single_table_datasets): no CKAN
-    # dataset family gets more than this many sampled files until every
-    # family has had a turn. None (the default) disables stratification —
-    # sampling stays plain seeded shuffling, the pre-existing behavior.
-    max_groups_per_family: Optional[int] = None
-
     # Question generation is split from planning: an agent first writes each
     # question FROM the verified retrieval keywords, and a gate (retriever
     # panel -> question judges) approves it BEFORE any plan exists; the
     # planner then plans the frozen, approved question (see
-    # orqa.agent.agents.QuestionStage). `max_question_corrections` is how many
+    # orqa.agent.question). `max_question_corrections` is how many
     # times a rejected question is rewritten before its slot is dropped
     # (default 5, see QuestionStage.MAX_QUESTION_CORRECTIONS).
     max_question_corrections: int = 5
@@ -512,45 +503,34 @@ class StatementGeneration:
                     f"multi_table_query_count must be a positive int, got {self.multi_table_query_count}"
                 )
 
-        # Validate max_groups_per_family is a positive int or None
-        if self.max_groups_per_family is not None:
-            if not isinstance(self.max_groups_per_family, int) or isinstance(self.max_groups_per_family, bool):
-                raise TypeError(
-                    f"max_groups_per_family must be a positive int or None, "
-                    f"got {type(self.max_groups_per_family).__name__}"
-                )
-            if self.max_groups_per_family <= 0:
-                raise ValueError(
-                    f"max_groups_per_family must be a positive int, got {self.max_groups_per_family}"
-                )
-
 
 # Where the yaml keys of the retired Elasticsearch backend (and the old
 # keyword_backend/solr_core detour that silently fell back to it) are explained,
 # with the steps to bring that backend back.
 LEGACY_ELASTICSEARCH_README = "legacy/elasticsearch/README.md"
 
+# The model of the cores' vectors: bge-m3 on OrQA's embedding server since
+# 2026-11-06 (LakeGen's cores carried cohere.embed-v4.0).
+SOLR_EMBEDDING_MODEL = "bge-m3"
 # LakeGen's KNN filter queries: only the documents embedded from its
-# metadata-v1 representation with cohere.embed-v4.0 are vector candidates
-# (every document of the vector cores carries both fields).
+# metadata-v1 representation with that model are vector candidates (every
+# document of the vector cores carries both fields).
 LAKEGEN_KNN_FILTERS: tuple[str, ...] = (
     'representation_version:"metadata-v1"',
-    'embedding_model:"cohere.embed-v4.0"',
+    f'embedding_model:"{SOLR_EMBEDDING_MODEL}"',
 )
 
 
 @dataclass
 class RetrievalContractConfig:
     """The retrievability contract (see
-    ``orqa.agent.utility.retrievability_gate``): a question is retrievable
+    ``orqa.retrieval.gate``): a question is retrievable
     when a panel of retrievers — lexical gate, semantic, hybrid RRF —
     majority-agrees that it finds every gold table within the top K.
     """
 
     enabled: bool = True
-    # Which retrievers vote. "dense_question" is silently skipped when the
-    # index has no dense retriever (builtin without hybrid_search_enabled; a
-    # Solr core always has its KNN); "llm_keywords" is silently skipped when
+    # Which retrievers vote. "llm_keywords" is silently skipped when
     # no LLM config is available to the caller building the panel — either
     # way min_agreement degrades to "all available".
     retrievers: tuple[str, ...] = ("lexical_question", "dense_question", "llm_keywords")
@@ -563,21 +543,15 @@ class RetrievalContractConfig:
     # The target for a SINGLE-table plan (exactly one plan table) —
     # literal rank 1 by default, deterministic rather than a window: with
     # only one target there's no reason to settle for less (see
-    # ``orqa.agent.utility.retrievability_gate.build_contract``). Multi-table
+    # ``orqa.retrieval.gate.build_contract``). Multi-table
     # plans are unaffected — they always use the top_k_per_table/max_top_k
     # window above.
     single_table_top_k: int = 1
     # How the gate and the keyword-anchor search match keywords. "all": every
-    # keyword must match — Solr ``q.op=AND``, what LakeGen sends; on the
-    # builtin index the PortalIndexView imitation of it. "any" (default):
-    # ``q.op=OR`` on Solr, additive BM25 on the builtin index, where a
-    # keyword the table lacks just adds nothing.
+    # keyword must match — Solr ``q.op=AND``, what LakeGen sends. "any"
+    # (default): ``q.op=OR``, where a keyword the table lacks just adds
+    # nothing.
     keyword_match: str = "any"
-    # Builtin backend only: the normalized-record fields the portal actually
-    # searches (any of title, resource_name, tags, columns, publisher,
-    # description), for the PortalIndexView imitation. Empty = every field.
-    # Must stay empty under backend solr, where the core's own ``qf`` decides.
-    search_fields: tuple[str, ...] = ()
     # `hybrid_rrf` (add it to `retrievers`): RRF constant and how many results
     # each side contributes before fusing — LakeGen: k=60, and each branch
     # fetches top_k 20 x candidate_multiplier 5 = 100.
@@ -585,8 +559,7 @@ class RetrievalContractConfig:
     hybrid_rrf_depth: int = 100
 
     def __post_init__(self):
-        from orqa.benchmark.index import FIELD_WEIGHTS
-        from orqa.benchmark.retrieval_panel import RETRIEVER_NAMES
+        from orqa.retrieval.panel import RETRIEVER_NAMES
 
         self.enabled = _coerce_bool(self.enabled, "retrieval_contract.enabled")
         if isinstance(self.retrievers, str):
@@ -607,16 +580,6 @@ class RetrievalContractConfig:
             raise ValueError(
                 f"retrieval_contract.keyword_match must be 'any' or 'all', got {self.keyword_match!r}"
             )
-        if isinstance(self.search_fields, str):
-            self.search_fields = (self.search_fields,)
-        else:
-            self.search_fields = tuple(self.search_fields or ())
-        unknown = set(self.search_fields) - set(FIELD_WEIGHTS)
-        if unknown:
-            raise ValueError(
-                f"retrieval_contract.search_fields has unknown field(s) {sorted(unknown)}; "
-                f"valid: {sorted(FIELD_WEIGHTS)}"
-            )
         self.hybrid_rrf_k = int(self.hybrid_rrf_k)
         self.hybrid_rrf_depth = int(self.hybrid_rrf_depth)
         if self.hybrid_rrf_k < 1 or self.hybrid_rrf_depth < 1:
@@ -633,22 +596,31 @@ class RetrievalContractConfig:
 
 @dataclass
 class SolrConfig:
-    """The portal's live Solr core (``tasks.search.solr``, backend ``solr``
-    only) — the core LakeGen queries, searched READ-ONLY by
-    ``orqa.benchmark.solr_index.SolrDatasetIndex``. The core is shared with
-    LakeGen: nothing in OrQA writes to it.
+    """The portal's Solr core (``tasks.search.solr``) on OrQA's own Solr
+    (``solr.instance``) — the documents LakeGen queries. Retrieval searches it
+    read-only (``solr.index``); the ``build-solr-core`` step builds it
+    (``solr.build``).
     """
 
-    # The core's name — LakeGen's: uk, nyc, bologna_v2, paris_v2, valencia_v2.
+    # The core's name on OrQA's Solr: the portal's target id.
     core: str = ""
-    # None: $SOLR_URL, else http://localhost:8983/solr.
+    # None: OrQA's own Solr, http://localhost:$ORQA_SOLR_PORT/solr (8984).
     url: Optional[str] = None
-    # The DenseVectorField LakeGen stores its 1024-d table embeddings in.
+    # The DenseVectorField holding the 1024-d table embeddings LakeGen searches.
     vector_field: str = "table_embedding"
     # Filter queries of every KNN query, as LakeGen sends them.
     knn_filters: tuple[str, ...] = LAKEGEN_KNN_FILTERS
+    # The model the core's vectors and the questions are embedded with, by
+    # LakeGen's rule: cohere.* / ocid1.* through OCI (litellm.yaml's
+    # embedding_model), anything else (bge-m3) through Ollama at
+    # embedding_url. It is also the vectors' embedding_model label, so the
+    # knn_filters' embedding_model must name it.
+    embedding_model: str = SOLR_EMBEDDING_MODEL
+    # Ollama URL of a non-OCI model; None: OrQA's own embedding server
+    # (src/solr/embedder.py, http://127.0.0.1:$ORQA_OLLAMA_PORT).
+    embedding_url: Optional[str] = None
     # The stored vectors' size: the question must be embedded at the same
-    # size (cohere.embed-v4.0 output_dimensions) — OrQA's local 1536-d
+    # size (bge-m3's 1024; cohere.embed-v4.0's output_dimensions) — OrQA's local 1536-d
     # embedding caches cannot query this field.
     embedding_dimensions: int = 1024
     # Seconds per request, and attempts on a connection error or a 5xx.
@@ -668,6 +640,16 @@ class SolrConfig:
             self.knn_filters = (self.knn_filters,)
         else:
             self.knn_filters = tuple(str(f) for f in (self.knn_filters or ()))
+        self.embedding_model = str(self.embedding_model or "").strip()
+        self.embedding_url = str(self.embedding_url or "").strip() or None
+        for spec in self.knn_filters:
+            field_name, _, value = spec.partition(":")
+            if field_name.strip() == "embedding_model" and value.strip().strip('"') != self.embedding_model:
+                raise ValueError(
+                    f"search.solr.knn_filters keep {value.strip()} vectors, but "
+                    f"search.solr.embedding_model is {self.embedding_model!r}: a KNN query "
+                    "would match none of the vectors it is compared with"
+                )
         self.embedding_dimensions = int(self.embedding_dimensions)
         self.timeout = float(self.timeout)
         self.retries = int(self.retries)
@@ -683,57 +665,32 @@ class SolrConfig:
 class SearchConfig:
     """
     The reverse index shared by the pre-planning keyword-anchor search
-    (orqa.agent.utility.keyword_suggestion), the retrievability gate
-    (orqa.agent.utility.retrievability_gate) and the question stage's
+    (orqa.retrieval.anchors), the retrievability gate
+    (orqa.retrieval.gate) and the question stage's
     retrieval panel.
 
-    "solr": the portal's live Solr core (``solr`` below), the retriever
-    LakeGen queries — edismax keyword search and KNN on the core's own
-    vectors (orqa.benchmark.solr_index). It must answer when the run starts,
-    or the run stops: there is no fallback. "builtin" (the default, for the
-    portals with no Solr core): a BM25 index materialized under
-    <data_path>/index/, no external service required.
+    The portal's core on OrQA's Solr (``solr`` below), the documents LakeGen
+    queries — edismax keyword search and KNN on the core's own vectors
+    (``solr.index``). It must answer when the run starts, or the run stops:
+    there is no fallback index.
     """
 
-    # Which reverse index implementation to use.
-    backend: Literal["solr", "builtin"] = "builtin"
-
-    # The Solr core (backend solr only).
+    # The Solr core.
     solr: SolrConfig = field(default_factory=SolrConfig)
 
-    # Builtin backend only: fusion of the BM25 index with the local metadata
-    # embeddings (orqa.benchmark.hybrid_index.HybridDatasetIndex). A Solr
-    # core's dense retriever is its own KNN, so it is rejected there.
-    # BM25 is normalized by the best positive score in the eligible corpus;
-    # metadata cosine is mapped from [-1, 1] to [0, 1] before weighting —
-    # ONLY when fusion_method is "weighted_score" (see below); "rrf" fuses
-    # on rank instead and ignores lexical_weight/semantic_weight entirely.
-    hybrid_search_enabled: bool = False
-    lexical_weight: float = 0.5
-    semantic_weight: float = 0.5
-    # How orqa.benchmark.hybrid_index.HybridDatasetIndex combines the
-    # lexical and semantic rankings — see that module's docstring for the
-    # full comparison. "weighted_score" (the default) is the original
-    # behavior, unchanged; "rrf" fuses on rank (Reciprocal Rank Fusion)
-    # instead of a weighted average of the two sides' scores.
-    fusion_method: Literal["weighted_score", "rrf"] = "weighted_score"
-    # RRF's own constant (LakeGen uses 60) — irrelevant when fusion_method
-    # is "weighted_score".
-    rrf_k: int = 60
-    # The dense retriever's question embedding (both backends).
-    query_embedding_input_type: Optional[str] = "search_query"
+    # LRU cache of question embeddings for the KNN branch.
     query_embedding_cache_size: int = 2048
 
     # Adaptive K for the legacy keyword-searchability check that used to
     # gate the plan judge — superseded by retrieval_contract's own
     # top_k_per_table/max_top_k below. Kept only for
     # suggest_retrievable_keywords' pre-planning vocabulary HINT (see
-    # orqa.agent.utility.keyword_suggestion): each hint search's own K =
+    # orqa.retrieval.anchors): each hint search's own K =
     # round(len(plan_tables) * this coefficient).
     keyword_search_top_k_coefficient: float = 5.0
 
     # Whether the PRE-planning retrievability check (see
-    # orqa.agent.utility.keyword_suggestion.suggest_retrievable_keywords,
+    # orqa.retrieval.anchors.suggest_retrievable_keywords,
     # run once per table group before any LLM call) is allowed to ABORT a
     # group as "unretrievable_group" when its bounded metadata-vocabulary
     # search finds no combination that surfaces every table within top-K.
@@ -761,7 +718,7 @@ class SearchConfig:
 
     # The retrievability contract (retriever-panel majority vote) — see
     # RetrievalContractConfig and
-    # orqa.agent.utility.retrievability_gate. Independent of
+    # orqa.retrieval.gate. Independent of
     # retrieval_gate_enabled above: that flag is the master kill switch for
     # BOTH mechanisms; this one only configures the contract's own knobs
     # once the gate is on.
@@ -769,62 +726,18 @@ class SearchConfig:
         default_factory=RetrievalContractConfig
     )
 
-    # Where the materialized index is stored (builtin backend only)
-    index_path: Path = field(init=False)
-    index_filepath: Path = field(init=False)
-
     def __post_init__(self):
-        if self.backend == "elasticsearch":
-            raise ValueError(
-                "tasks.search.backend 'elasticsearch' was removed: retrieval runs on the "
-                "portal's Solr core (backend: solr) or the builtin index. To bring "
-                f"Elasticsearch back, see {LEGACY_ELASTICSEARCH_README}."
-            )
-        if self.backend not in ("solr", "builtin"):
-            raise ValueError(
-                f"tasks.search.backend must be 'solr' or 'builtin', got {self.backend!r}"
-            )
-        self.hybrid_search_enabled = _coerce_bool(
-            self.hybrid_search_enabled, "hybrid_search_enabled"
-        )
-        if self.backend == "solr":
-            if not self.solr.core:
-                raise ValueError("tasks.search.backend 'solr' needs search.solr.core (the core's name)")
-            if self.retrieval_contract.search_fields:
-                raise ValueError(
-                    "tasks.search.retrieval_contract.search_fields must be empty under "
-                    "backend solr: the core's own qf decides which fields a keyword can match"
-                )
-            if self.hybrid_search_enabled:
-                raise ValueError(
-                    "tasks.search.hybrid_search_enabled fuses the builtin index with the local "
-                    "metadata embeddings; under backend solr the dense retriever is the core's "
-                    "own KNN — remove the key (or set it false)"
-                )
+        if not self.solr.core:
+            raise ValueError("tasks.search.solr.core (the portal's core on OrQA's Solr) is required")
         self.gate_unretrievable_groups = _coerce_bool(
             self.gate_unretrievable_groups, "gate_unretrievable_groups"
         )
         self.retrieval_gate_enabled = _coerce_bool(
             self.retrieval_gate_enabled, "retrieval_gate_enabled"
         )
-        self.lexical_weight = float(self.lexical_weight)
-        self.semantic_weight = float(self.semantic_weight)
-        if self.lexical_weight < 0 or self.semantic_weight < 0:
-            raise ValueError("Hybrid retrieval weights must be non-negative")
-        if self.lexical_weight + self.semantic_weight <= 0:
-            raise ValueError("At least one hybrid retrieval weight must be positive")
-        if self.fusion_method not in ("weighted_score", "rrf"):
-            raise ValueError(
-                f"fusion_method must be 'weighted_score' or 'rrf', got {self.fusion_method!r}"
-            )
-        self.rrf_k = int(self.rrf_k)
-        if self.rrf_k < 1:
-            raise ValueError("rrf_k must be >= 1")
         self.query_embedding_cache_size = int(self.query_embedding_cache_size)
         if self.query_embedding_cache_size < 1:
             raise ValueError("query_embedding_cache_size must be >= 1")
-        if self.query_embedding_input_type is not None:
-            self.query_embedding_input_type = str(self.query_embedding_input_type).strip() or None
 
 
 # How many judges each panel mode resolves to — the only two values a
@@ -838,7 +751,7 @@ JUDGE_MODE_COUNTS: dict[str, int] = {"mono": 1, "trio": 3}
 @dataclass
 class Judges:
     """How many judges vote in each panel (see
-    ``orqa.agent.agents.JudgePanel``) — independent of ``judge_profiles.plan``/
+    ``orqa.agent.judges``) — independent of ``judge_profiles.plan``/
     ``judge_profiles.code`` in the LLM yaml, which lists the CANDIDATE judge
     models; this only caps how many of them are actually used per run.
     ``"mono"`` uses just the first configured judge (a single verdict, no
@@ -982,11 +895,6 @@ class OrQAConfig:
         )
         self.write_statistics_path = self.write_path / "statistics"
 
-        self.search.index_path = self.write_path / "index"
-        self.search.index_filepath = (
-            self.search.index_path / "metadata_index.json"
-        )
-
         self.logging_path = self.write_path / "log"
         self.prompts_path = Path(os.environ["ORQA_CONF"]) / "prompts"
         self.llm_config_path =  Path(os.environ["ORQA_CONF"]) / "llm"
@@ -1018,19 +926,28 @@ def to_bytes(b: str) -> int:
 _RETIRED_SEARCH_KEYS = {
     "elasticsearch_url": "the Elasticsearch backend was removed",
     "elasticsearch_managed": "the Elasticsearch backend was removed",
+    "backend": "every portal is searched on its Solr core (search.solr); the builtin index was removed",
+    "hybrid_search_enabled": "the builtin hybrid index was removed; the dense retriever is the core's KNN",
+    "lexical_weight": "the builtin hybrid index was removed",
+    "semantic_weight": "the builtin hybrid index was removed",
+    "fusion_method": "the builtin hybrid index was removed; hybrid_rrf is retrieval_contract.hybrid_rrf_k",
+    "rrf_k": "the builtin hybrid index was removed; hybrid_rrf is retrieval_contract.hybrid_rrf_k",
+    "query_embedding_input_type": "the builtin hybrid index was removed",
 }
 _RETIRED_CONTRACT_KEYS = {
     # keyword_backend: solr fell back silently to the Elasticsearch imitation
     # whenever the backend was elasticsearch — which every Solr portal's was.
-    "keyword_backend": "the gate searches the index tasks.search.backend selects — set backend: solr",
+    "keyword_backend": "the gate searches the portal's Solr core (search.solr)",
     "solr_core": "the core is tasks.search.solr.core",
     "solr_url": "the Solr URL is tasks.search.solr.url",
+    "search_fields": "the builtin index was removed; the core's own qf decides which fields match",
 }
 
 
 def _reject_retired_search_keys(search_task: dict) -> None:
-    """Raise on a ``tasks.search`` key of the retired Elasticsearch backend or
-    of the old ``retrieval_contract`` Solr detour, naming where it went."""
+    """Raise on a ``tasks.search`` key of a retired backend (Elasticsearch,
+    the builtin index and its hybrid fusion) or of the old
+    ``retrieval_contract`` Solr detour, naming where it went."""
     contract = search_task.get("retrieval_contract") or {}
     retired = [
         f"tasks.search.{key} ({why})"
@@ -1042,9 +959,8 @@ def _reject_retired_search_keys(search_task: dict) -> None:
     if retired:
         raise ValueError(
             f"Removed search key(s): {'; '.join(retired)}. Retrieval runs on the "
-            "portal's Solr core (backend: solr, search.solr) or the builtin index; "
-            f"see {LEGACY_ELASTICSEARCH_README} for what was retired and how to bring "
-            "Elasticsearch back."
+            "portal's Solr core (tasks.search.solr); delete the key(s). For the "
+            f"retired Elasticsearch backend see {LEGACY_ELASTICSEARCH_README}."
         )
 
 
@@ -1171,7 +1087,6 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         final_candidates_path,
         matches_graph_path=matches_graph_path,
         embeddings_cache_path=cand_disc_directory / "embeddings.npz",
-        search_embeddings_path=cand_disc_directory / "search_embeddings.npz",
         clusters_path=cand_disc_directory / "clusters.json",
         **candidates_discovery_task,
     )
@@ -1185,9 +1100,6 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
     )
     multi_table_query_count = parsed["tasks"]["query_generation"].get(
         "multi_table_query_count", None
-    )
-    max_groups_per_family = parsed["tasks"]["query_generation"].get(
-        "max_groups_per_family", None
     )
     detected_languages  = parsed["tasks"]["query_generation"].get(
         "languages", ["English"]
@@ -1216,25 +1128,15 @@ def load_config(yaml_path: Path, data_path: Path) -> OrQAConfig:
         enable_single_table=enable_single_table,
         single_table_query_count=single_table_query_count,
         multi_table_query_count=multi_table_query_count,
-        max_groups_per_family=max_groups_per_family,
         max_question_corrections=max_question_corrections,
         trace=_load_trace_config(query_generation_task.get("trace"), write_path),
     )
 
-    # reverse-index backend config (defaults keep older yamls working)
+    # The portal's Solr core and the retrievability gate.
     search_task = parsed["tasks"].get("search") or {}
     _reject_retired_search_keys(search_task)
     search = SearchConfig(
-        backend=search_task.get("backend", "builtin"),
         solr=SolrConfig(**(search_task.get("solr") or {})),
-        hybrid_search_enabled=search_task.get("hybrid_search_enabled", False),
-        lexical_weight=float(search_task.get("lexical_weight", 0.5)),
-        semantic_weight=float(search_task.get("semantic_weight", 0.5)),
-        fusion_method=search_task.get("fusion_method", "weighted_score"),
-        rrf_k=int(search_task.get("rrf_k", 60)),
-        query_embedding_input_type=search_task.get(
-            "query_embedding_input_type", "search_query"
-        ),
         query_embedding_cache_size=int(
             search_task.get("query_embedding_cache_size", 2048)
         ),

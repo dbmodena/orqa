@@ -1,5 +1,6 @@
-"""LiteLLM embedding client, YAML-configured like :class:`LLMClient`, and the
-question embedder of Solr KNN retrieval (:class:`QueryEmbedder`)."""
+"""LiteLLM embedding client, YAML-configured like :class:`LLMClient`, the
+Ollama client of the Solr cores' local model (:class:`OllamaEmbeddingClient`),
+and the question embedder of Solr KNN retrieval (:class:`QueryEmbedder`)."""
 
 import logging
 import os
@@ -10,6 +11,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
+import requests
 import yaml
 from litellm import embedding as litellm_embedding
 
@@ -208,3 +210,142 @@ class QueryEmbedder:
         if not normalized:
             return np.zeros((0, self.dimensions))
         return np.stack([found[text] for text in normalized])
+
+
+# LakeGen embeds a question behind this prefix when the plain question makes
+# the model return NaN (lakegen.llm.embeddings.QUERY_NON_FINITE_FALLBACK_PREFIX).
+QUERY_NON_FINITE_FALLBACK_PREFIX = "Represent this question for dataset retrieval. "
+_NAN_MARKERS = ("unsupported value: nan", "non-finite", "zero-norm")
+
+
+class EmbeddingError(RuntimeError):
+    """The embedding server gave no usable vector."""
+
+
+class OllamaEmbeddingClient:
+    """An Ollama embedding model (``bge-m3``) called exactly as LakeGen
+    calls it (``lakegen.llm.embeddings.OllamaMultilingualEmbedding``, through
+    llama-index's ``OllamaEmbedding``): ``POST /api/embed`` with each text
+    stripped and no options. Documents go ``batch_size`` (LakeGen: 16) per
+    request; a question goes alone and, when the model returns NaN for it,
+    once more behind LakeGen's retrieval prefix.
+
+    Same ``embed`` signature as :class:`EmbeddingClient`, so
+    :class:`QueryEmbedder` and the Solr build take either: ``input_type``
+    ``search_query`` selects the question path, ``output_dimensions`` is
+    checked (the model has one size), ``truncate`` is Ollama's own (it cuts
+    an over-long text to the model's context).
+
+    Args:
+        model: The Ollama model, also the vectors' ``embedding_model`` label.
+        base_url: The Ollama server.
+        batch_size: Documents per request.
+        options: Ollama options of document requests only (``num_thread`` to
+            re-embed faster); questions always go without, like LakeGen's.
+        timeout: Seconds per request.
+        retries: Attempts per request on a connection error or HTTP 5xx.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        *,
+        batch_size: int = 16,
+        options: dict | None = None,
+        timeout: float = 600.0,
+        retries: int = 3,
+    ):
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.batch_size = max(1, int(batch_size))
+        self.options = dict(options or {})
+        self.timeout = timeout
+        self.retries = max(1, int(retries))
+        self._session = requests.Session()
+
+    def _request(self, texts: list[str], options: dict) -> list[list[float]]:
+        body = {"model": self.model, "input": [text.strip() for text in texts]}
+        if options:
+            body["options"] = options
+        last = ""
+        for attempt in range(self.retries):
+            if attempt:
+                time.sleep(2 ** attempt)
+            try:
+                response = self._session.post(f"{self.base_url}/api/embed", json=body, timeout=self.timeout)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last = f"{type(exc).__name__}: {exc}"
+                continue
+            if response.status_code == 200:
+                vectors = response.json().get("embeddings") or []
+                if len(vectors) != len(texts):
+                    raise EmbeddingError(f"{self.model} returned {len(vectors)} vectors for {len(texts)} texts")
+                return vectors
+            last = f"HTTP {response.status_code}: {response.text[:300]}"
+            if response.status_code < 500 or any(m in last.casefold() for m in _NAN_MARKERS):
+                break
+        raise EmbeddingError(f"Ollama {self.base_url} {self.model}: {last}")
+
+    @staticmethod
+    def _check(vector: list[float], dimensions: int | None) -> list[float]:
+        values = [float(v) for v in vector]
+        if not values or not all(np.isfinite(values)):
+            raise EmbeddingError("non-finite vector")
+        if dimensions is not None and len(values) != int(dimensions):
+            raise EmbeddingError(f"{len(values)}-dimensional vector, {dimensions} expected")
+        if not np.linalg.norm(values) > 1e-12:
+            raise EmbeddingError("zero-norm vector")
+        return values
+
+    def _query(self, text: str, dimensions: int | None) -> list[float]:
+        try:
+            return self._check(self._request([text], {})[0], dimensions)
+        except EmbeddingError as exc:
+            if not any(m in str(exc).casefold() for m in _NAN_MARKERS):
+                raise
+        return self._check(self._request([QUERY_NON_FINITE_FALLBACK_PREFIX + text], {})[0], dimensions)
+
+    def embed(
+        self,
+        texts: list[str],
+        input_type: str | None = None,
+        *,
+        output_dimensions: int | None = None,
+        truncate: str | None = None,
+    ) -> list[list[float]]:
+        if input_type == "search_query":
+            return [self._query(text, output_dimensions) for text in texts]
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), self.batch_size):
+            batch = texts[start : start + self.batch_size]
+            vectors.extend(self._check(v, output_dimensions) for v in self._request(batch, self.options))
+        return vectors
+
+
+def solr_embedding_client(
+    model: str,
+    url: str | None,
+    llm_config_path: Path,
+    *,
+    batch_size: int = 16,
+    options: dict | None = None,
+):
+    """The client of the model a Solr core's vectors come from, by LakeGen's
+    rule (``lakegen.llm.embeddings.get_embedding_model``): a ``cohere.`` or
+    ``ocid1.`` model through OCI (litellm.yaml's ``embedding_model``, which
+    must be it), anything else through Ollama at ``url`` (None: OrQA's own
+    embedding server, ``solr.embedder``)."""
+    if model.startswith(("cohere.", "ocid1.")):
+        client = EmbeddingClient(llm_config_path / "litellm.yaml", batch_size=batch_size)
+        if client.model.rsplit("/", 1)[-1] != model:
+            raise ValueError(
+                f"litellm.yaml embeds with {client.model!r}, but the Solr vectors are {model!r}: "
+                "set its embedding_model to it"
+            )
+        return client
+    if url is None:
+        from solr.embedder import default_url
+
+        url = default_url()
+    return OllamaEmbeddingClient(model, url, batch_size=batch_size, options=options)

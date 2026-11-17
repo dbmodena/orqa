@@ -1,16 +1,6 @@
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Dict, List, Literal, Union
+from typing import Dict, List, Literal
 from enum import Enum
-
-class DatasetAnalysisResult(BaseModel):
-    """Result of dataset analysis with UNION and JOIN suggestions"""
-
-    UNION: List[str] = Field(
-        description="List of column names that should be combined using UNION (similar columns across datasets)"
-    )
-    JOIN: List[str] = Field(
-        description="List of column names that can be used as JOIN keys (common identifiers)"
-    )
 
 
 class TableAnalysis(BaseModel):
@@ -210,7 +200,6 @@ class TaskJoinCorrelation(BaseModel):
         description="Column name that correlates with the join key "
         "(e.g., a metric or value associated with the identifier)"
     )
-
 
 
 class Result(BaseModel):
@@ -441,8 +430,6 @@ class Table(BaseModel):
         return unique_keywords
 
 
-
-
 class Query(BaseModel):
     """
     A structured query (SQL or Pandas) paired with a natural language question
@@ -570,11 +557,11 @@ class QuerySet(BaseModel):
     )
 
 
-# ── Search keywords (orqa.agent.agents.SearchKeywords) ──────────────────────
+# ── Search keywords (orqa.retrieval.search_keywords) ──────────────────────
 #
 # The retrievability gate's ``llm_keywords`` retriever: given ONLY a
 # question (never the table it came from), the keywords a portal user
-# would search with (see orqa.benchmark.retrieval_panel).
+# would search with (see orqa.retrieval.panel).
 
 class SearchKeywords(BaseModel):
     """Retrieval keywords extracted from a benchmark question."""
@@ -614,7 +601,7 @@ class SearchKeywords(BaseModel):
 class PlanJudgment(BaseModel):
     """Verdict of one panel judge on a query plan whose QUESTION is frozen —
     the question was written and approved upstream
-    (``orqa.agent.agents.QuestionStage``: retrievability, readability, topic
+    (``orqa.agent.question``: retrievability, readability, topic
     linkage, grounding, table necessity), so none of that is asked here. Four
     layers, majority-aggregated one by one (``JudgePanel._aggregate`` with
     ``vote_fields``): ``plan_approval`` (the steps produce exactly what the
@@ -746,11 +733,11 @@ class QuestionTableReason(BaseModel):
 
 
 class QuestionDraft(BaseModel):
-    """One candidate question for one slot — see ``orqa.agent.agents.
-    QuestionGenerator``. Deliberately just the question and why it needs each
+    """One candidate question for one slot — see
+    ``orqa.agent.question.QuestionGeneratorAgent``. Deliberately just the question and why it needs each
     table: no steps, no result shape, no keyword list. The retrieval keywords
     are the verified anchor the question was BUILT FROM, recomputed
-    deterministically from the final text (``question_gate.covered_terms``),
+    deterministically from the final text (``gate.covered_terms``),
     never authored here. ``table_reasons`` go to the question judge with the
     question (they are not passed on to the planner)."""
 
@@ -811,7 +798,7 @@ class QuestionJudgment(BaseModel):
     ground it, whether it needs every table, and whether it demands about as
     much analysis as its slot's target difficulty. Retrievability is NOT voted
     here: it is measured against the real retriever panel before the judges
-    are ever called (``orqa.agent.utility.question_gate``). Step alignment,
+    are ever called (``orqa.retrieval.gate``). Step alignment,
     result coherence and metric soundness are the PLAN judge's, later.
 
     Voted in five independent layers and majority-aggregated per layer (see

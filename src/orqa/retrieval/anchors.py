@@ -1,8 +1,8 @@
 """Deterministic keyword suggestion for a table group's retrievability.
 
 The question stage's retrievability gate (see
-``orqa.agent.utility.question_gate`` and
-``orqa.agent.utility.retrievability_gate``) verifies a QUESTION AFTER the
+``orqa.retrieval.gate`` and
+``orqa.retrieval.gate``) verifies a QUESTION AFTER the
 question writer has already written it — a rejected question only learns it
 guessed wrong, then guesses again, burning an LLM correction round each
 time (see ``QuestionStage``).
@@ -66,7 +66,7 @@ import math
 import re
 from typing import Any, Optional
 
-from orqa.benchmark.index import tokenize, _record_field_texts
+from orqa.retrieval.text import record_field_texts, tokenize
 
 # Generic connective words that are almost never what makes a dataset
 # distinguishable (unlike the domain-specific terms in a title/tag) — kept
@@ -244,7 +244,7 @@ def _candidate_pools(
     publish no column schema at all even though the downloaded table has
     one.
     """
-    fields = _record_field_texts(record)
+    fields = record_field_texts(record)
     metadata = _terms_from_text(
         fields["title"], fields["resource_name"], fields["tags"], fields["publisher"]
     )
@@ -409,10 +409,10 @@ def suggest_retrievable_keywords(
             seeds the search (see the warm start below). When no caller
             supplies it, the column names the tables literally share stand
             in for it.
-        index: A ``DatasetIndex``/``SolrDatasetIndex`` (or ``None`` when
-            unavailable for this portal — no-ops to an empty, unachieved
+        index: The portal's ``SolrDatasetIndex`` (or ``None`` when
+            the gate is off — no-ops to an empty, unachieved
             result rather than raising, same degradation convention as
-            ``retrievability_gate.check_question_retrievability``).
+            ``gate.check_question_retrievability``).
         top_k: The target window every table must land inside.
         max_iterations: Cap on the greedy climb's add/remove steps — so a
             table group with no good shared vocabulary fails fast rather
@@ -439,8 +439,8 @@ def suggest_retrievable_keywords(
             paste those, and the lexical gate then falls back to the
             question's own words for that table.
 
-    When ``index`` sets ``restricts_candidates`` (a ``SolrDatasetIndex``, or a
-    ``PortalIndexView`` imitating one), candidates are also restricted to terms
+    When ``index`` sets ``restricts_candidates`` (a ``SolrDatasetIndex``),
+    candidates are also restricted to terms
     it can actually match on the table's record — ``index.searchable_terms`` —
     and the candidate vocabulary is read from ``index.candidate_record`` (the
     document the search engine really holds) when it has one, else ``get``.
@@ -663,9 +663,8 @@ def suggest_retrievable_keywords(
         # here is decided by the real index, not by which field it came
         # from. Metadata terms are merely laid out first, across all
         # missing aliases, so that the strictly-greater comparison below
-        # keeps the metadata candidate when two are EXACTLY as good — the
-        # index weights title/tags above columns (see FIELD_WEIGHTS), and
-        # a title term reads more naturally in the question the writer
+        # keeps the metadata candidate when two are EXACTLY as good — a
+        # title term reads more naturally in the question the writer
         # then has to weave it into.
         # At the budget the climb can no longer grow, but it can still
         # SWAP: the removal sweep below drops a term that is carrying its

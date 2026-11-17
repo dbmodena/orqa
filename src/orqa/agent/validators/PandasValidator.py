@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from .QueryValidator import QueryValidator
-from ..utility.undecodable_names import escaped_literal, is_undecodable, undecodable_matches
+from orqa.utils.undecodable_names import escaped_literal, is_undecodable, undecodable_matches
 from ...utils import summarize_large_value
 
 # --- The benchmark's static policy (mirrors LakeGen reference_execution) ---
@@ -261,6 +261,18 @@ QUERY_STRING_HINT = (
     "literals, and reference Python variables with @name. Plain boolean indexing "
     "(`df[df['col'] == value]`) is the safer form."
 )
+
+# A reduction over a text column of the "str" dtype (orqa/__init__): Series
+# reductions and groupby aggregations word it differently; the verb is the group.
+_STR_REDUCTION = re.compile(
+    r"Cannot perform reduction '(\w+)' with string dtype"
+    r"|dtype '(?:str|string)' does not support operation '(\w+)'"
+    r"|Function '(\w+?)(?:_checked)?' has no kernel matching input types \((?:large_)?string"
+)
+# pandas' operator names in "operation 'sub' not supported for dtype 'str'" ('r' prefix stripped).
+_OPERATOR_SYMBOLS = {
+    "add": "+", "sub": "-", "mul": "*", "truediv": "/", "floordiv": "//", "mod": "%", "pow": "**",
+}
 
 _STR_METHODS = {
     "lower", "upper", "strip", "lstrip", "rstrip", "replace", "contains", "startswith",
@@ -1058,20 +1070,55 @@ class PandasValidator(QueryValidator):
 
     @staticmethod
     def _aggregation_on_text(raw: str, full: str) -> ValueError:
-        how = re.search(r"how->(\w+)", full)
-        verb = how.group(1) if how else "the aggregation"
+        how = re.search(r"how->(\w+)", full) or _STR_REDUCTION.search(full)
+        verb = next((g for g in how.groups() if g), None) if how else None
+        verb = verb or "the aggregation"
         return ValueError(
-            f"{raw}\n`{verb}` ran over a TEXT (object) column. Aggregate only the numeric columns "
+            f"{raw}\n`{verb}` ran over a TEXT column. Aggregate only the numeric columns "
             "— select them explicitly (`df[['a', 'b']]`, `['col'].mean()`) — and cast a column "
             f"stored as number text first. {NUMBER_TEXT_HINT}"
+        )
+
+    @staticmethod
+    def _arithmetic_on_text(raw: str, op: str) -> str:
+        return (
+            f"{raw}\nArithmetic ('{op}') on a TEXT column. For numbers: {NUMBER_TEXT_HINT} "
+            "For a difference of two date columns: parse both with pd.to_datetime and "
+            "the format their `date text` facts show (errors='coerce'), then subtract "
+            "and take `.dt.days`."
         )
 
     def _type_error(self, raw: str, msg: str, e: Exception, source: str) -> TypeError:
         full = str(e)
         if _is_tz_mismatch(msg):
             return TypeError(_tz_mismatch_message(raw))
-        if "agg function failed" in msg:
+        if "agg function failed" in msg or _STR_REDUCTION.search(full):
             return TypeError(str(self._aggregation_on_text(raw, full)))
+        str_cmp = re.search(r"Invalid comparison between dtype=(?:str|string) and (\w+)", full)
+        if str_cmp:
+            # pandas' "str" dtype (orqa/__init__) names the other side's type, not the operator.
+            other = str_cmp.group(1)
+            if other in ("Timestamp", "datetime", "date") or other.startswith("datetime64"):
+                return TypeError(
+                    f"{raw}\nA TEXT column was compared with a parsed date. Parse the date-text "
+                    "column with pd.to_datetime and the format its `date text` fact shows "
+                    "(errors='coerce') before comparing it with `pd.Timestamp('YYYY-MM-DD')`."
+                )
+            if other in ("int", "float", "Decimal") or other.startswith(("int", "uint", "float")):
+                return TypeError(
+                    f"{raw}\nA TEXT column was compared with a number. {NUMBER_TEXT_HINT} "
+                    "(A `date text` column is parsed with pd.to_datetime and its shown format "
+                    "instead, then compared with pd.Timestamp.)"
+                )
+            return TypeError(
+                f"{raw}\nA TEXT column was compared with a {other}: the two sides are stored as "
+                "different kinds of value. Cast the column to the kind the comparison needs "
+                "(Column Statistics shows how it is stored) before comparing."
+            )
+        str_op = re.search(r"operation '(\w+)' not supported for dtype '(?:str|string)'", full)
+        if str_op or "can only string multiply" in msg:
+            name = str_op.group(1) if str_op else "mul"
+            return TypeError(self._arithmetic_on_text(raw, _OPERATOR_SYMBOLS.get(name.removeprefix("r"), name)))
         cmp = re.search(r"'([<>=!]+)' not supported between instances of '(\w+)' and '(\w+)'", full)
         if cmp:
             op, t1, t2 = cmp.groups()
@@ -1097,12 +1144,7 @@ class PandasValidator(QueryValidator):
         if ops or concat:
             op, t1, t2 = ops.groups() if ops else ("+", "str", "?")
             if "str" in (t1, t2):
-                return TypeError(
-                    f"{raw}\nArithmetic ('{op}') on a TEXT column. For numbers: {NUMBER_TEXT_HINT} "
-                    "For a difference of two date columns: parse both with pd.to_datetime and "
-                    "the format their `date text` facts show (errors='coerce'), then subtract "
-                    "and take `.dt.days`."
-                )
+                return TypeError(self._arithmetic_on_text(raw, op))
             if "NoneType" in (t1, t2):
                 return TypeError(
                     f"{raw}\nOne operand is None: a method called with inplace=True, or a lookup "
@@ -1220,6 +1262,11 @@ class PandasValidator(QueryValidator):
         named = self._pandas_named_error(type(e).__name__, raw, msg)
         if named is not None:
             return named
+
+        if "has no kernel matching input types" in msg and "string" in msg:
+            # A numeric function over a "str" column reaches pyarrow, which
+            # raises ArrowNotImplementedError (a NotImplementedError).
+            return TypeError(str(self._aggregation_on_text(raw, raw_full)))
 
         if isinstance(e, ValueError):
             return self._value_error(raw, msg, e, source)

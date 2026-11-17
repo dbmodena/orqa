@@ -11,7 +11,7 @@ from typing import Any, Generic, List, Optional, Sequence, TypeVar, Union, get_a
 
 import numpy as np
 
-from ..utility.undecodable_names import escaped_literal, is_undecodable
+from orqa.utils.undecodable_names import escaped_literal, is_undecodable
 from .models import ColumnStat, PandasQueryPlan, SQLQueryPlan, TableStats
 from .text_profile import CUT_KEEP, CUT_LONG
 
@@ -488,7 +488,7 @@ class TableAnalyzerBatchPrompt(Prompt):
         return self._update(aliases=aliases, languages=languages, tables=tables)
 
 
-# ── Search keywords prompt (orqa.agent.agents.SearchKeywords) ──────────────
+# ── Search keywords prompt (orqa.retrieval.search_keywords) ──────────────
 
 class BenchmarkSearchKeywordsPrompt(Prompt):
     """Question -> retrieval keywords, in the question's own language."""
@@ -498,7 +498,7 @@ class BenchmarkSearchKeywordsPrompt(Prompt):
         return self._update(question=question)
 
 
-# ── Question stage (orqa.agent.agents.QuestionGenerator / QuestionStage) ────
+# ── Question stage (orqa.agent.question / QuestionStage) ────
 
 class QuestionGeneratorPrompt(Prompt):
     """Verified retrieval anchor + table context -> one question per slot,
@@ -1266,6 +1266,12 @@ def _table_header(table: TableStats) -> str:
     s = table.structure
     # `1 row`: 9 of 1029 sampled real tables have one row (Paris plub_senat).
     facts = [f"{table.alias}: {_count(table.num_rows, 'row')}"]
+    if table.sampled_from is not None:
+        # The counts below are the sample's; the code runs on every row.
+        facts = [
+            f"{table.alias}: {_count(table.sampled_from, 'row')}",
+            f"the facts below come from a uniform sample of {table.num_rows} of them",
+        ]
     if s.get("row_key_col") is not None:
         # What a row is, first: the one column whose identifier evidence is a
         # sequence or uniqueness (A); a multi-column key is `one row per (a, b)`.

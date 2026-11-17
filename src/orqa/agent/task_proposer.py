@@ -3,8 +3,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..llm_client.LLMClientStructured import LLMClientStructured
-from ..utility.message_builder import sanitize_messages
+from orqa.agent.llm_client.LLMClientStructured import LLMClientStructured
+from orqa.agent.llm_client.messages import sanitize_messages
 from pydantic import ValidationError
 
 import logging

@@ -2,7 +2,7 @@
 
 This module defines the structured-plan and column-statistics models used by the
 query planner and column-statistics component. ``QueryLink`` is reused from
-:mod:`orqa.agent.utility.structured_outputs` rather than redefined so the
+:mod:`orqa.agent.structured_outputs` rather than redefined so the
 existing plan-link contract is preserved.
 """
 
@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field
 
-from ..utility.column_provenance import SOURCE_FREE_OPERATIONS
-from ..utility.structured_outputs import QueryLink, Table
+from orqa.agent.planning.provenance import SOURCE_FREE_OPERATIONS
+from orqa.agent.structured_outputs import QueryLink, Table
 
 
 # Ops available to every plan (SQL and Pandas alike): plain relational/derive
@@ -471,6 +471,10 @@ class TableStats(BaseModel):
     num_rows: int
     columns: List[ColumnStat]
     structure: Dict[str, Any] = {}
+    # The table's row count when the facts come from a uniform sample of
+    # ``num_rows`` of its rows (statistics.compute_from_parquet, the largest
+    # tables); None: every row.
+    sampled_from: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------

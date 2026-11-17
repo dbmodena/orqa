@@ -1,6 +1,8 @@
 *.zip
 *.db
 *.txt
+# Solr's word lists (stopwords, synonyms, lang/) are part of the configset.
+!conf/solr/portal/**/*.txt
 *.o
 *.e
 job*.sh
@@ -27,12 +29,10 @@ _orqa
 !tests/
 tests/*
 !tests/test_main_cli.py
-!tests/test_families.py
 !tests/test_retrieval_panel.py
 !tests/test_retrievability_gate.py
 !tests/test_sampling.py
 !tests/test_keyword_suggestion.py
-!tests/test_hybrid_index.py
 !tests/test_pandas_validator_errors.py
 !tests/test_normalize_metadata.py
 !tests/test_structured_client.py
@@ -69,4 +69,8 @@ doom.py
 ponytail.md
 AGENTS.MD
 paper
+tests
+.ruff_cache
+legacy
+src/orqa.egg-info
 tests

@@ -1,5 +1,8 @@
-"""The retrieval index of a portal with a LakeGen Solr core: the live core
-LakeGen's benchmark runs query, asked the way LakeGen asks it.
+"""The retrieval index of a portal: its core on OrQA's own Solr
+(``solr.instance``), asked the way LakeGen asks it. The cores were copied
+unchanged from LakeGen's live ones on 2026-11-06 and are rebuilt from OrQA's
+data by ``build-solr-core`` (``solr.build``); LakeGen queries the same
+documents. :func:`load_index` opens a portal's core for a run.
 
 OrQA builds the benchmark LakeGen is scored on, so a question is only fair if
 LakeGen's own retrievers can find its tables. Imitating them drifts — the
@@ -33,7 +36,8 @@ file comes from a directory listing (``local_files``). A core document with
 no local file is still a competitor (it is in :meth:`resource_ids`); a local
 file the core lacks can never be retrieved.
 
-Read-only: the instance is shared with LakeGen (see ``solr.client``).
+Read-only: retrieval never writes; only ``solr.instance`` does, and only to
+OrQA's own server.
 """
 
 from __future__ import annotations
@@ -42,28 +46,53 @@ import copy
 import json
 import logging
 import math
-import os
 import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
 
+# LakeGen's SemanticRetriever filters: only vectors of the metadata-v1
+# representation and the question's model are comparable with it.
+from conf.config import LAKEGEN_KNN_FILTERS
+from orqa.retrieval.text import tokenize
 from orqa.utils import dataset_id_to_resource_id
-
-from .index import SearchResult, tokenize
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SOLR_URL = "http://localhost:8983/solr"
 
-# LakeGen's SemanticRetriever filters: only vectors of this representation and
-# model are comparable with a cohere.embed-v4.0 metadata-v1 question vector.
-LAKEGEN_KNN_FILTERS = (
-    'representation_version:"metadata-v1"',
-    'embedding_model:"cohere.embed-v4.0"',
-)
+@dataclass
+class SearchResult:
+    """One hit of a keyword or KNN search."""
+
+    resource_id: str
+    dataset_id: str
+    title: str
+    publisher: Optional[str]
+    tags: list[str]
+    score: float
+    matched_terms: list[str]
+    csv_path: str
+    csv_exists: bool
+    dataset_url: Optional[str]
+    source: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "resource_id": self.resource_id,
+            "dataset_id": self.dataset_id,
+            "title": self.title,
+            "publisher": self.publisher,
+            "tags": self.tags,
+            "score": round(self.score, 4),
+            "matched_terms": self.matched_terms,
+            "csv_path": self.csv_path,
+            "csv_exists": self.csv_exists,
+            "dataset_url": self.dataset_url,
+            "source": self.source,
+        }
 
 # Words per keyword query. maxClauseCount (1024) is spent per word per qf
 # field (19 on every LakeGen core): AND queries failed with HTTP 500 at 55-59
@@ -197,7 +226,7 @@ class SolrDatasetIndex:
             (``QueryEmbedder``); only :meth:`semantic_search_many` needs it.
     """
 
-    # keyword_suggestion: candidate terms must be ones this index can match.
+    # orqa.retrieval.anchors: candidate terms must be ones this index can match.
     restricts_candidates = True
     # Threads of search_many / semantic_search_many; Solr answers in ~1 ms.
     max_workers = 8
@@ -251,28 +280,28 @@ class SolrDatasetIndex:
                 if str(model).rsplit("/", 1)[-1] != expected:
                     raise ValueError(
                         f"the query embedder uses {model!r}, but the core's vectors are "
-                        f"filtered to {expected!r}: set litellm.yaml embedding_model to it"
+                        f"filtered to {expected!r}: set tasks.search.solr.embedding_model to it"
                     )
 
     @classmethod
     def from_config(cls, cfg: Any, embedder: Optional[Callable[[List[str]], np.ndarray]] = None) -> "SolrDatasetIndex":
         """The index ``tasks.search.solr`` describes. The URL is
-        ``search.solr.url``, else ``$SOLR_URL``, else the local default;
+        ``search.solr.url``, else OrQA's own Solr (``$ORQA_SOLR_PORT``);
         ``match`` is ``retrieval_contract.keyword_match``. Without an
-        ``embedder``, a ``QueryEmbedder`` over litellm.yaml's
-        ``embedding_model`` is built (no provider call until a question is
-        ranked). Makes no Solr request: call :meth:`ping` and
+        ``embedder``, a ``QueryEmbedder`` over ``search.solr.embedding_model``
+        is built (no provider call until a question is ranked). Makes no Solr request: call :meth:`ping` and
         :meth:`check_knn` to fail early."""
         from solr.client import LocalSolrClient
+        from solr.instance import default_url
 
         solr = cfg.search.solr
-        url = solr.url or os.environ.get("SOLR_URL") or DEFAULT_SOLR_URL
+        url = solr.url or default_url()
         if embedder is None:
-            from orqa.agent.llm_client.EmbeddingClient import EmbeddingClient, QueryEmbedder
+            from orqa.agent.llm_client.EmbeddingClient import QueryEmbedder, solr_embedding_client
 
             embedder = QueryEmbedder(
-                EmbeddingClient(
-                    cfg.llm_config_path / "litellm.yaml",
+                solr_embedding_client(
+                    solr.embedding_model, solr.embedding_url, cfg.llm_config_path,
                     batch_size=cfg.candidates_discovery.embedding_batch_size,
                 ),
                 dimensions=solr.embedding_dimensions,
@@ -316,8 +345,8 @@ class SolrDatasetIndex:
             count = int(response["response"]["numFound"])
         except Exception as exc:
             raise SolrUnavailable(
-                f"Solr core {self.core!r} is not answering ({exc}). Start Solr, or fix "
-                f"tasks.search.solr.core / url ($SOLR_URL)."
+                f"Solr core {self.core!r} is not answering ({exc}). Start OrQA's Solr "
+                f"(python src/solr/cli.py start), or fix tasks.search.solr.core / url."
             ) from exc
         if count == 0:
             raise SolrUnavailable(f"Solr core {self.core!r} holds no documents.")
@@ -411,7 +440,7 @@ class SolrDatasetIndex:
         only_available: bool = False,
     ) -> list[list[SearchResult]]:
         """:meth:`search` for each query, concurrently, in order — how
-        ``keyword_suggestion`` evaluates a round of trials."""
+        ``orqa.retrieval.anchors`` evaluates a round of trials."""
         return self._map(lambda q: self.search(q, top_k, only_available), list(queries))
 
     def _knn(self, vector: Sequence[float], top_k: int) -> list[SearchResult]:
@@ -496,7 +525,7 @@ class SolrDatasetIndex:
 
     def candidate_record(self, resource_id: str) -> Optional[dict]:
         """The document as the core holds it, shaped like a normalized
-        record so ``keyword_suggestion`` can draw candidate terms from it.
+        record so ``orqa.retrieval.anchors`` can draw candidate terms from it.
         ``title`` is what the core indexes as title (on ``uk`` the FILE's
         name; the dataset title is not indexed there), ``resource_name`` is
         empty, the columns are the core's. ``None`` if the core has no such
@@ -578,3 +607,23 @@ class SolrDatasetIndex:
     def __len__(self) -> int:
         """The core's document count (not the local files')."""
         return self._shared.count if self._shared.count is not None else self.ping()
+
+
+def load_index(cfg: Any) -> SolrDatasetIndex:
+    """The portal's core (``tasks.search.solr``), checked before it is handed
+    out: it must answer, and a KNN query with one of its own stored vectors
+    must return hits (a KNN query the core misreads returns 0 hits and no
+    error, which would make every dense vote fail without a word). Anything
+    wrong RAISES: there is no fallback index.
+
+    Shared by generate-statements (the anchor search and the retrievability
+    gate) and the web app.
+    """
+    index = SolrDatasetIndex.from_config(cfg)
+    documents = index.ping()
+    index.check_knn()
+    print(
+        f"[index] Solr core {cfg.search.solr.core!r} ({documents} documents, "
+        f"KNN on {cfg.search.solr.vector_field}) — index ready.", flush=True,
+    )
+    return index

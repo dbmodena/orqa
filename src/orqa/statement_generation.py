@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import math
 import random
@@ -8,13 +7,12 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Callable, Iterator, Optional
 
 from .agent.agent import TableAnalysisAgent
-from .agent.agents.StatementAgent import StatementAgent
-from .agent.agents.SingleStatementAgent import SingleStatementAgent
-from .utils.families import FamilyIndex
+from orqa.agent.agent import StatementAgent
+from orqa.agent.agent import SingleStatementAgent
+from .utils import memory_guard
 from .utils.generation_trace import open_trace, trace_group
-from .benchmark.index import load_index, portal_view
 from .utils.questions import META_KEY, SECTION_SINGLE, get_entry, store_entry
-from .benchmark.retrieval_panel import RetrieverPanel, make_llm_keyword_extractor
+from .retrieval.panel import RetrieverPanel, make_llm_keyword_extractor
 from .utils import (
     dataset_id_to_resource_id,
     dataset_index_shape,
@@ -23,120 +21,52 @@ from .utils import (
     load_json,
 )
 from conf import OrQAConfig, JUDGE_MODE_COUNTS
+from solr.index import load_index
 from dataclasses import asdict, dataclass, field
 
 logger = logging.getLogger(__name__)
 
 
-def _build_family_index(cfg: OrQAConfig) -> Optional[FamilyIndex]:
-    """The CKAN family index, shared by family-stratified sampling and the
-    retrieval contract. ``None`` (never raises) when the normalized
-    metadata can't be read — both features then simply degrade to their
-    pre-existing unstratified/ungated behavior.
-    """
-    try:
-        with open(cfg.normalized_metadata_filepath, encoding="utf-8") as file:
-            raw_records = json.load(file)
-        return FamilyIndex(raw_records, cfg.datasets_path)
-    except Exception:
-        logger.warning(
-            "Could not build the CKAN family index; family-stratified "
-            "sampling and the retrieval contract are both unavailable "
-            "for this run.",
-            exc_info=True,
-        )
-        return None
-
-
 def _build_gate_index(cfg: OrQAConfig, search_index: Any) -> Any:
-    """The index the gate's KEYWORD search and the anchor search run on.
-
-    ``backend: solr`` -> the Solr index itself, matching per
-    ``retrieval_contract.keyword_match`` (``all`` = ``q.op=AND``, what LakeGen
-    sends): the gate verifies against the retriever LakeGen queries, not an
-    approximation of it. ``builtin`` -> the ``PortalIndexView`` imitation
-    configured by ``keyword_match``/``search_fields``, or the plain BM25 index.
+    """The index the gate's KEYWORD search and the anchor search run on: the
+    portal's Solr core, matching per ``retrieval_contract.keyword_match``
+    (``all`` = ``q.op=AND``, what LakeGen sends), so the gate verifies against
+    the retriever LakeGen queries, not an approximation of it.
     """
     if search_index is None:
         return None
     contract = cfg.search.retrieval_contract
-    if cfg.search.backend == "solr":
-        gate = search_index.with_match(contract.keyword_match)
-        print(
-            f"[gate] keyword search: Solr core {cfg.search.solr.core!r}, "
-            f"q.op={'AND' if contract.keyword_match == 'all' else 'OR'}, "
-            f"retrievers={list(contract.retrievers)}.", flush=True,
-        )
-        return gate
-    gate = portal_view(search_index, contract.keyword_match, contract.search_fields)
-    # The KEYWORD search is the lexical half. ``portal_view`` already unwraps a
-    # hybrid index when it builds an AND / field-restricted view, but with plain
-    # BM25 (``any``, all fields) it hands the index back untouched — and a hybrid
-    # index fuses BM25 with a semantic ranking, so the anchor search and the
-    # keyword retriever would silently verify against that fusion instead.
-    lexical = getattr(gate, "lexical_index", None)
-    if lexical is not None:
-        gate = lexical
+    gate = search_index.with_match(contract.keyword_match)
     print(
-        f"[gate] keyword search: {type(getattr(gate, '_index', gate)).__name__}, "
-        f"match={contract.keyword_match}, fields={list(contract.search_fields) or 'all'}, "
+        f"[gate] keyword search: Solr core {cfg.search.solr.core!r}, "
+        f"q.op={'AND' if contract.keyword_match == 'all' else 'OR'}, "
         f"retrievers={list(contract.retrievers)}.", flush=True,
     )
     return gate
-
-
-def _require_index(cfg: OrQAConfig, search_index: Any) -> None:
-    """Refuse to run the retrieval gate without an index.
-
-    The builtin ``load_index`` returns ``None`` — after logging why — when the
-    reverse index cannot be built (metadata not normalized yet). Every
-    consumer then treats "no index" as "nothing to check", so a gate the
-    workflow turned ON silently became a gate that does nothing and the run
-    produced ungated questions for hours. Fail before any of that instead. (A
-    Solr core that does not answer already raised inside ``load_index``.)
-    """
-    if search_index is None and cfg.search.retrieval_gate_enabled:
-        raise RuntimeError(
-            "The retrieval gate is enabled (tasks.search.retrieval_gate_enabled) "
-            f"but the reverse index (tasks.search.backend: {cfg.search.backend!r}) "
-            "could not be built or loaded, so every question would be generated "
-            "UNGATED. The log above says why — for solr, the core "
-            "tasks.search.solr.core must answer at tasks.search.solr.url (else "
-            "$SOLR_URL, else http://localhost:8983/solr); for builtin, run "
-            "normalize-metadata first. Set retrieval_gate_enabled: false "
-            "to run without the gate on purpose."
-        )
 
 
 def _build_retrieval_panel(
     cfg: OrQAConfig,
     search_index: Any,
     keyword_index: Optional[Any] = None,
-    require_enabled: bool = True,
     with_keywords: bool = True,
 ) -> Optional[RetrieverPanel]:
     """The retriever panel behind the retrievability gate (see
-    ``orqa.agent.utility.retrievability_gate``) — ``None`` when the gate
+    ``orqa.retrieval.gate``) — ``None`` when the gate
     is disabled (``retrieval_gate_enabled`` / ``retrieval_contract.enabled``)
     or no index is available, so callers only need to check
     for ``None`` rather than re-deriving these flags themselves.
 
     ``keyword_index`` is what ``llm_keywords`` and the lexical gate search —
-    the gate index (``_build_gate_index``). The dense retriever is whatever
-    index can rank an embedded question (``semantic_search_many``): the
-    builtin ``HybridDatasetIndex`` over the local metadata embeddings, or the
-    Solr core's own KNN. An index that knows its document universe
-    (``resource_ids``, a Solr core) restricts every ranking to it.
-
-    ``require_enabled=False`` builds the panel whatever the gate switches say —
-    for a tool that MEASURES retrievability (the benchmark CLI's
-    ``--retrievability-report``) and must use exactly the retrievers the gate
-    does. ``with_keywords=False`` skips the LLM keyword extractor (and with it
-    the ``llm_keywords`` and ``hybrid_rrf`` retrievers).
+    the gate index (``_build_gate_index``). The dense retriever is the Solr
+    core's own KNN, and the core's document universe (``resource_ids``)
+    restricts every ranking. ``with_keywords=False`` skips the LLM keyword
+    extractor (and with it the ``llm_keywords`` and ``hybrid_rrf``
+    retrievers).
     """
     if search_index is None:
         return None
-    if require_enabled and (
+    if (
         not cfg.search.retrieval_gate_enabled
         or not cfg.search.retrieval_contract.enabled
     ):
@@ -166,7 +96,7 @@ def _build_retrieval_panel(
     contract = cfg.search.retrieval_contract
     return RetrieverPanel(
         lexical,
-        hybrid_index=dense,
+        dense_index=dense,
         keyword_extractor=keyword_extractor,
         retrievers=contract.retrievers,
         keyword_index=keyword_index,
@@ -188,7 +118,10 @@ def _build_retrieval_panel(
 # between groups, whereas the ~150k tokens of a single group are a burst of
 # many calls inside it, so it never paced the thing that actually trips the
 # limit. Kept small rather than zero purely to space consecutive bursts.
-_TIMEOUT_SECONDS_PER_5K_TOKENS: int = 3
+# Cut from 3 to 1 on 2026-11-07 (user's call): on the dedicated Qwen endpoint,
+# which has no tenant throttle, the 3 s rate idled ~40-55 s after each ~3 min
+# single-table group.
+_TIMEOUT_SECONDS_PER_5K_TOKENS: int = 1
 _TOKENS_PER_BUCKET: int = 5_000
 
 
@@ -204,9 +137,15 @@ def _compute_timeout(max_tokens: int) -> float:
 
 def _tokens_used(content: dict) -> int:
     """Total tokens a generation output reports (its ``token_usage`` is either
-    a usage dict or a bare number)."""
+    a usage dict or a bare number). A usage dict's ``total_tokens`` already
+    counts the prompt and completion: summing its values counted every token
+    twice (and doubled every cooldown)."""
     usage = content.get("token_usage")
-    return sum(usage.values()) if isinstance(usage, dict) else (usage or 0)
+    if not isinstance(usage, dict):
+        return usage or 0
+    if "total_tokens" in usage:
+        return usage["total_tokens"] or 0
+    return sum(v for v in usage.values() if isinstance(v, (int, float)))
 
 
 # ── Match formatting: relationship spec -> QueryLink dict ─────────────────────
@@ -351,51 +290,6 @@ def _is_single_table_candidate(match: dict) -> bool:
     return not has_relationships
 
 
-def _family_stratified_order(
-    files: list[Path],
-    family_of: Callable[[str], str],
-    seed: int,
-    max_groups_per_family: int,
-) -> list[Path]:
-    """Round-robin ``files`` across their CKAN families (``family_of``: a
-    file stem -> family id mapping), so no single family contributes more
-    than ``max_groups_per_family`` entries and every family gets an equal
-    turn before a second round draws from any of them again — a family with
-    hundreds of near-identical siblings ("Organogram of Staff Roles &
-    Salaries", 1,426 files on the UK portal) can't crowd out the rest of
-    the corpus. Both the family order and each family's own file order are
-    seeded, so the result is deterministic under ``seed``.
-    """
-    by_family: dict[str, list[Path]] = {}
-    for filepath in files:
-        by_family.setdefault(family_of(filepath.stem), []).append(filepath)
-
-    rng = random.Random(seed)
-    family_ids = sorted(by_family)
-    rng.shuffle(family_ids)
-    for family in family_ids:
-        rng.shuffle(by_family[family])
-
-    order: list[Path] = []
-    cursors = dict.fromkeys(family_ids, 0)
-    counts = dict.fromkeys(family_ids, 0)
-    progressed = True
-    while progressed:
-        progressed = False
-        for family in family_ids:
-            if counts[family] >= max_groups_per_family:
-                continue
-            idx = cursors[family]
-            members = by_family[family]
-            if idx >= len(members):
-                continue
-            order.append(members[idx])
-            cursors[family] = idx + 1
-            counts[family] += 1
-            progressed = True
-    return order
-
-
 def _sample_single_table_datasets(
     datasets_path: Path,
     count: int,
@@ -403,8 +297,6 @@ def _sample_single_table_datasets(
     seed: int = 0,
     limit_to_n_columns: int | None = None,
     scan_opts: dict | None = None,
-    family_of: Optional[Callable[[str], str]] = None,
-    max_groups_per_family: Optional[int] = None,
 ) -> list[Path]:
     """
     Return up to ``count`` randomly sampled dataset paths.
@@ -420,26 +312,15 @@ def _sample_single_table_datasets(
     this, single-table sampling reads straight off disk and a too-wide
     table would slip past every discovery-side gate into statement
     generation. An unreadable file is treated as unusable and skipped.
-
-    When ``family_of`` AND ``max_groups_per_family`` are both given, files
-    are drawn in family-stratified round-robin order (see
-    ``_family_stratified_order``) instead of a flat shuffle. Either left
-    ``None`` (the default) keeps the plain seeded-shuffle behavior.
     """
     all_files = sorted(datasets_path.glob(f"*.{extension}"))
-    stratify = family_of is not None and max_groups_per_family is not None
 
     if limit_to_n_columns is None:
-        if stratify:
-            return _family_stratified_order(all_files, family_of, seed, max_groups_per_family)[:count]
         return random.Random(seed).sample(all_files, min(count, len(all_files)))
 
     scan_opts = scan_opts or {}
-    if stratify:
-        shuffled = _family_stratified_order(all_files, family_of, seed, max_groups_per_family)
-    else:
-        shuffled = all_files[:]
-        random.Random(seed).shuffle(shuffled)
+    shuffled = all_files[:]
+    random.Random(seed).shuffle(shuffled)
 
     picked: list[Path] = []
     for filepath in shuffled:
@@ -475,8 +356,6 @@ def _iter_single_table_replacements(
     seed: int = 0,
     limit_to_n_columns: int | None = None,
     scan_opts: dict | None = None,
-    family_of: Optional[Callable[[str], str]] = None,
-    max_groups_per_family: Optional[int] = None,
 ) -> Iterator[Path]:
     """Lazily yield usable single-table candidates beyond the ones already
     sampled, in the same seeded order ``_sample_single_table_datasets`` draws
@@ -485,11 +364,8 @@ def _iter_single_table_replacements(
     the original was, and the same on every run. ``exclude``: paths to skip
     (the sampled ones, and any table a stored entry already used)."""
     all_files = sorted(datasets_path.glob(f"*.{extension}"))
-    if family_of is not None and max_groups_per_family is not None:
-        ordered = _family_stratified_order(all_files, family_of, seed, max_groups_per_family)
-    else:
-        ordered = all_files[:]
-        random.Random(seed).shuffle(ordered)
+    ordered = all_files[:]
+    random.Random(seed).shuffle(ordered)
 
     for filepath in ordered:
         if filepath in exclude:
@@ -560,8 +436,6 @@ def _cap_matches(
     all_matches: list,
     count: Optional[int],
     seed: int = 0,
-    family_of: Optional[Callable[[str], str]] = None,
-    max_groups_per_family: Optional[int] = None,
 ) -> list:
     """Cap cross-table candidate matches to ``count``, seeded like
     ``_sample_single_table_datasets`` so runs (and sibling workflows sharing
@@ -570,47 +444,10 @@ def _cap_matches(
     ``all_matches`` unchanged and in its original order — sampling would
     otherwise reshuffle it via ``random.sample``, needlessly scrambling the
     index-based resume/dedup keys the caller relies on.
-
-    When ``family_of``/``max_groups_per_family`` are both given, a match is
-    capped per family across ALL of its tables: a multi-table match counts
-    ONE slot against EVERY family any of its aliases belongs to, so a
-    family isn't undercounted just because it only appears as one alias of
-    a wider join. Either left ``None`` keeps the plain seeded-sample
-    behavior.
     """
     if count is None or count >= len(all_matches):
         return all_matches
-    if family_of is None or max_groups_per_family is None:
-        return random.Random(seed).sample(all_matches, count)
-
-    def families_of(match: dict) -> set[str]:
-        return {family_of(dataset) for dataset in (match.get("aliases") or {}).values()}
-
-    rng = random.Random(seed)
-    shuffled = all_matches[:]
-    rng.shuffle(shuffled)
-
-    picked: list = []
-    counts: dict[str, int] = {}
-    leftover: list = []
-    for match in shuffled:
-        match_families = families_of(match)
-        if any(counts.get(f, 0) >= max_groups_per_family for f in match_families):
-            leftover.append(match)
-            continue
-        picked.append(match)
-        for f in match_families:
-            counts[f] = counts.get(f, 0) + 1
-        if len(picked) >= count:
-            break
-
-    # A cap tight enough to leave fewer than `count` selectable matches
-    # (every remaining one blocked by an already-exhausted family) is
-    # filled out from whatever's left, uncapped, rather than silently
-    # returning short.
-    if len(picked) < count:
-        picked.extend(leftover[: count - len(picked)])
-    return picked
+    return random.Random(seed).sample(all_matches, count)
 
 
 def _get_formatted_match(match: dict, kind: str) -> str:
@@ -721,8 +558,6 @@ def create_statements(
     plan_judge_count: Optional[int] = None,
     code_judge_count: Optional[int] = None,
     scan_opts: dict | None = None,
-    max_groups_per_family: Optional[int] = None,
-    family_index: Optional[FamilyIndex] = None,
     retrieval_panel: Optional[RetrieverPanel] = None,
     retrieval_contract_min_agreement: int = 2,
     retrieval_contract_top_k_per_table: int = 10,
@@ -735,13 +570,8 @@ def create_statements(
     if datasets_metadata is None:
         datasets_metadata = {}
 
-    family_of = family_index.family_id_of_stem if family_index is not None else None
-
     all_matches: list = load_json(candidates_file)
-    all_matches = _cap_matches(
-        all_matches, multi_table_query_count, seed=seed,
-        family_of=family_of, max_groups_per_family=max_groups_per_family,
-    )
+    all_matches = _cap_matches(all_matches, multi_table_query_count, seed=seed)
     results = load_json(output_file) if output_file.exists() else {}
 
     # Table analyses (description + keywords) are cached per table id and
@@ -771,7 +601,6 @@ def create_statements(
             _sample_single_table_datasets(
                 csv_folder, single_table_query_count, extension=extension,
                 seed=seed, limit_to_n_columns=max_cols, scan_opts=scan_opts,
-                family_of=family_of, max_groups_per_family=max_groups_per_family,
             )
         )
     TableAnalysisAgent(
@@ -809,7 +638,6 @@ def create_statements(
         sampled = _sample_single_table_datasets(
             csv_folder, single_table_query_count, extension=extension,
             seed=seed, limit_to_n_columns=max_cols, scan_opts=scan_opts,
-            family_of=family_of, max_groups_per_family=max_groups_per_family,
         )
         single_agent = SingleStatementAgent(
             config_path, kind, bad_tokens, languages=languages, seed=seed,
@@ -841,7 +669,6 @@ def create_statements(
                 for stem in _stored_single_table_stems(results, kind)
             },
             extension=extension, seed=seed, limit_to_n_columns=max_cols, scan_opts=scan_opts,
-            family_of=family_of, max_groups_per_family=max_groups_per_family,
         )
 
         for st_idx, csv_path in enumerate(sampled):
@@ -879,12 +706,19 @@ def create_statements(
 
             try:
                 slot = _generate_single_table_slot(csv_path, replacements, _generate, on_skip=_on_skip)
+            except memory_guard.InsufficientMemoryError as exc:
+                print(f"[st_{st_idx}] Skipped, too large for the memory free: {exc} — no entry written; a later run retries it.")
+                continue
             except Exception:
                 logger.exception(
                     "[st_%d] %s failed to generate — no entry written; skipping.",
                     st_idx, csv_path.stem,
                 )
                 continue
+            finally:
+                # The group's tables are gone: hand their memory back (Arrow's
+                # allocator keeps it otherwise, ~40 GB after a taxi table).
+                memory_guard.release_unused()
             if slot.path is None:
                 print(
                     f"[st_{st_idx}] No table found within the top "
@@ -935,12 +769,17 @@ def create_statements(
                     max_cols, sample_size=5
                 )
                 group.finish(content, stored=True)
+        except memory_guard.InsufficientMemoryError as exc:
+            print(f"[{idx}] Skipped, too large for the memory free: {exc} — no entry written; a later run retries it.")
+            continue
         except Exception:
             logger.exception(
                 "[%d] %s failed to generate — no entry written; skipping.",
                 idx, ", ".join(aliases.values()),
             )
             continue
+        finally:
+            memory_guard.release_unused()
 
         generation_time = __import__("time").perf_counter() - start
 
@@ -948,7 +787,7 @@ def create_statements(
         save_json(results, output_file)
         sys.stdout.flush()
 
-        actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
+        actual_tokens = _tokens_used(content)
         cooldown = _compute_timeout(actual_tokens)
         print(f"[{idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
         __import__("time").sleep(cooldown)
@@ -993,16 +832,8 @@ async def stream_generate_statements(
         all_matches: list = await loop.run_in_executor(
             None, load_json, cfg.statement_generation.query_candidates_path
         )
-        # Family-stratified sampling (see _sample_single_table_datasets)
-        # applies here too — orthogonal to the retrieval gate itself, which
-        # this streaming path doesn't wire up (no search_index is passed to
-        # either agent below).
-        family_index = await loop.run_in_executor(None, _build_family_index, cfg)
-        family_of = family_index.family_id_of_stem if family_index is not None else None
-        max_groups_per_family = cfg.statement_generation.max_groups_per_family
         all_matches = _cap_matches(
             all_matches, cfg.statement_generation.multi_table_query_count, seed=cfg.seed,
-            family_of=family_of, max_groups_per_family=max_groups_per_family,
         )
     except Exception as exc:
         yield {"type": "error", "message": str(exc)}
@@ -1037,7 +868,6 @@ async def stream_generate_statements(
                     cfg.datasets_path, single_table_query_count, cfg.datasets_format,
                     cfg.seed, cfg.candidates_discovery.limit_to_n_columns,
                     cfg.polars_opts.scan,
-                    family_of=family_of, max_groups_per_family=max_groups_per_family,
                 )
             )
         TableAnalysisAgent(
@@ -1064,7 +894,6 @@ async def stream_generate_statements(
             lambda: _sample_single_table_datasets(
                 cfg.datasets_path, single_table_query_count, cfg.datasets_format, cfg.seed,
                 cfg.candidates_discovery.limit_to_n_columns, cfg.polars_opts.scan,
-                family_of=family_of, max_groups_per_family=max_groups_per_family,
             ),
         )
         st_total = len(sampled)
@@ -1109,7 +938,7 @@ async def stream_generate_statements(
 
             await loop.run_in_executor(None, save_json, results, output_file)
 
-            actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
+            actual_tokens = _tokens_used(content)
             cooldown = _compute_timeout(actual_tokens)
             print(f"[st_{st_idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
             await asyncio.sleep(cooldown)
@@ -1174,7 +1003,7 @@ async def stream_generate_statements(
 
         await loop.run_in_executor(None, save_json, results, output_file)
 
-        actual_tokens = sum(content["token_usage"].values()) if isinstance(content["token_usage"], dict) else content["token_usage"]
+        actual_tokens = _tokens_used(content)
         cooldown = _compute_timeout(actual_tokens)
         print(f"[{idx}] Consumed {actual_tokens} tokens — cooling down for {cooldown}s.")
         await asyncio.sleep(cooldown)
@@ -1234,20 +1063,17 @@ def _generate_statements(cfg: OrQAConfig) -> None:
     metadata = load_normalized_datasets_metadata(cfg.normalized_metadata_filepath)
     # Built once, shared by every plan judge panel this run spins up: the
     # SAME reverse index tasks.search points at, so the plan judge's
-    # retrievability check (see orqa.agent.utility.retrievability_gate)
+    # retrievability check (see orqa.retrieval.gate)
     # verifies against the exact index a downstream retrieval agent would
     # actually search. Not loaded at all with the gate off — nothing else
     # uses it, and a Solr core that does not answer would otherwise stop a
     # run that asked for no gate.
     search_index = load_index(cfg) if cfg.search.retrieval_gate_enabled else None
-    _require_index(cfg, search_index)
-    # The CKAN family index (family-stratified sampling — see FamilyIndex),
-    # and the retriever panel behind the retrievability gate (None when the
-    # gate is off or unbuildable) — built ONCE and shared across every
-    # generation call below, same lifetime as search_index.
-    family_index = _build_family_index(cfg)
+    # The retriever panel behind the retrievability gate (None when the gate
+    # is off) is built ONCE and shared across every generation call below,
+    # same lifetime as search_index.
     # The index as the PORTAL searches it (the Solr core with q.op per
-    # keyword_match, or the builtin AND imitation) — used for the
+    # keyword_match) — used for the
     # keyword-anchor search and the panel's keyword retriever, so "found"
     # means what it means to the portal. search_index itself backs the dense
     # retriever.
@@ -1276,8 +1102,6 @@ def _generate_statements(cfg: OrQAConfig) -> None:
             plan_judge_count=JUDGE_MODE_COUNTS[cfg.judges.plan_mode],
             code_judge_count=JUDGE_MODE_COUNTS[cfg.judges.code_mode],
             scan_opts=cfg.polars_opts.scan,
-            max_groups_per_family=cfg.statement_generation.max_groups_per_family,
-            family_index=family_index,
             retrieval_panel=retrieval_panel,
             retrieval_contract_min_agreement=cfg.search.retrieval_contract.min_agreement,
             retrieval_contract_top_k_per_table=cfg.search.retrieval_contract.top_k_per_table,

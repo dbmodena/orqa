@@ -1,6 +1,6 @@
 """Search-keywords agent — the LLM keyword extraction behind the
 retrievability gate's ``llm_keywords`` retriever
-(orqa.benchmark.retrieval_panel.make_llm_keyword_extractor).
+(orqa.retrieval.panel.make_llm_keyword_extractor).
 
 One single-shot call: given a question ALONE (never the table it came
 from), extract the keywords a portal user would search with, in the
@@ -8,8 +8,8 @@ question's own language.
 """
 from pathlib import Path
 
-from ..llm_client.LLMClientStructured import LLMClientStructured
-from ..prompting import BenchmarkSearchKeywordsPrompt
+from orqa.agent.llm_client.LLMClientStructured import LLMClientStructured
+from orqa.agent.prompting import BenchmarkSearchKeywordsPrompt
 
 
 class _SearchKeywordsClient(LLMClientStructured):

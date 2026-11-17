@@ -23,7 +23,7 @@ The generate-statements step stores its output in
 `_meta` is a reserved key at the query-id level holding what describes the
 whole generation run of that candidate (model, status, token usage, table
 aliases, errors, timing); the numbered keys are the individual questions
-(see Query/Table in orqa.agent.utility.structured_outputs).
+(see Query/Table in orqa.agent.structured_outputs).
 """
 
 from __future__ import annotations

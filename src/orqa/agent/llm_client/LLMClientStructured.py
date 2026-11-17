@@ -16,7 +16,7 @@ What the loop does on every attempt (measured in
   (:func:`budget_exhausted`): a cut answer is retried with twice the
   budget, up to ``budget_ceiling``, never by re-sending the same prompt with
   a "fix your JSON" note.
-* **Shape coercion before failing** (:mod:`~orqa.agent.utility.structured_coercion`):
+* **Shape coercion before failing** (:mod:`~orqa.agent.llm_client.coercion`):
   the missing tail fields of a cut answer and the shape slips of a weaker
   model validate without a second call; content is never invented.
 * **One short repair call** before the full re-prompt: the model is shown
@@ -44,8 +44,8 @@ from pydantic import BaseModel, ValidationError
 
 from .LLMClient import LLMClient
 from ...utils.generation_trace import trace_llm_call
-from ..utility.message_builder import sanitize_messages
-from ..utility.structured_coercion import errors_brief, salvage_items, validate_leniently, validated_empty
+from orqa.agent.llm_client.messages import sanitize_messages
+from orqa.agent.llm_client.coercion import errors_brief, salvage_items, validate_leniently, validated_empty
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +315,7 @@ class LLMClientStructured(LLMClient):
         try:
             # Anchored to the fixed "orqa.agent" package rather than
             # __package__: response-model module paths in the YAML config
-            # (e.g. "utility.structured_outputs") are always relative to
+            # (e.g. "structured_outputs") are always relative to
             # orqa.agent regardless of which subpackage this class itself
             # lives in, so resolution must not depend on this file's own
             # location.

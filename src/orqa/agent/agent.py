@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional, Union
 from .. import utils
+from ..utils import memory_guard
 import json
 import uuid
 import logging
@@ -10,23 +11,24 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from ..queries.query_execution import QueryExecutor
-from .utility.generation_coordinator import GenerationCoordinator
-from .utility.plan_code_alignment import alignment_warning
-from .utility.keyword_suggestion import suggest_retrievable_keywords
-from .utility.retrievability_gate import (
+from .validators.QueryValidator import QueryValidator, run_in_sandbox
+from orqa.agent.codegen.generator import GenerationCoordinator
+from orqa.agent.planning.alignment import alignment_warning
+from orqa.retrieval.anchors import suggest_retrievable_keywords
+from orqa.retrieval.gate import (
     RetrievalContract,
     build_contract,
 )
-from .agents.TaskProposer import PairTaskSelectorLLMClient, TaskProposerLLMClient
-from .agents.StatementJudge import LLMStatementJudge
-from .agents.JudgePanel import JudgePanel
-from .agents.QueryPlanner import (
+from orqa.agent.task_proposer import PairTaskSelectorLLMClient, TaskProposerLLMClient
+from orqa.agent.judges import LLMStatementJudge
+from orqa.agent.judges import JudgePanel
+from orqa.agent.planning.planner import (
     QueryPlanner,
     _question_copies_column_header,
     _question_leaks_implementation,
 )
-from .agents.QuestionGenerator import QuestionGeneratorAgent
-from .agents.QuestionStage import (
+from orqa.agent.question import QuestionGeneratorAgent
+from orqa.agent.question import (
     MAX_QUESTION_CORRECTIONS,
     MAX_QUESTION_REPLANS,
     QuestionStage,
@@ -35,9 +37,9 @@ from .agents.QuestionStage import (
     tiers_for,
     build_question_tables_context,
 )
-from .agents.StatementClient import LLMClientStatementGenerator
-from .agents.StatementValidator import LLMStatementValidator
-from .agents.table_analyzer import (
+from orqa.agent.codegen.generator import LLMClientStatementGenerator
+from orqa.agent.codegen.validator import LLMStatementValidator
+from ..utils.table_analyzer import (
     TableAnalyzer,
     portal_metadata,
     prompt_metadata,
@@ -62,6 +64,8 @@ from .prompting import (
     SQLStatementGenerationPrompt,
 )
 from .prompting.prompts import render_column_statistics
+from .prompting.profile_input import select_parquet_columns
+from .prompting.statistics import matches_frame, stats_from_file
 from .prompting.models import (
     ExecutionTrace,
     JudgeTrace,
@@ -441,6 +445,32 @@ def _execution_row_count(executed: Optional[dict]) -> Optional[int]:
         return None
 
 
+def _execute_head(executor: QueryExecutor, query: dict, kind: str, dataframes: dict, rows: int):
+    """The first ``rows`` rows of a query's result: what the judge reads and
+    the sandbox ships back (a small frame, not the whole result)."""
+    return executor.execute_prepared(query, kind, dataframes).head(rows)
+
+
+def _execution_frames(aliases: dict, dfs: list, max_rows: Optional[int], executor: QueryExecutor) -> dict:
+    """``{alias: frame}`` the generated code runs on: every row of each
+    table, the columns the Phase-1 view showed.
+
+    Without a row cap the Phase-1 frames ARE those tables (same read, same
+    clean_columns, every row, the allow-listed columns) and are reused:
+    reloading put a second copy of a 135M-row table next to the first and the
+    run was OOM-killed (nyc uwyp-dntv, 2026-11-10). They also carry the load
+    time the LakeGen time budget subtracts (df.attrs["orqa_load_seconds"]).
+    Only a row-capped view sends execution back to the files.
+    """
+    if max_rows is None:
+        return dict(zip(aliases, dfs))
+    column_allow_list = {alias: list(view_df.columns) for alias, view_df in zip(aliases, dfs)}
+    return {
+        alias: df[[c for c in column_allow_list.get(alias, df.columns) if c in df.columns]]
+        for alias, df in executor.load_tables(aliases).items()
+    }
+
+
 class JudgementResponseAgent:
     def __init__(
         self,
@@ -736,9 +766,15 @@ class JudgementResponseAgent:
                 table["facts"] = self._table_facts_for(table.get("name"), dataframes)
 
             try:
-                df_result = self.executor.execute_prepared(
-                    sanitized, self.kind, dataframes
-                ).head(8)
+                # In a forked child, like the validator's run: code that copies
+                # a 45 GB table (nyc taxi trips: `df = Table_0.copy()`) made
+                # the run itself the OOM killer's victim when it ran in-process
+                # (2026-11-10). Same time budget as the validator.
+                df_result = run_in_sandbox(
+                    _execute_head,
+                    (self.executor, sanitized, self.kind, dataframes, 8),
+                    timeout=QueryValidator._lakegen_timeout(list(dataframes.values())),
+                )
                 executed.append({
                     "id": qid,
                     # Preserve the opaque echoed client_id (task 8) so judging can
@@ -755,10 +791,10 @@ class JudgementResponseAgent:
                     "_original_query": copy.deepcopy(query),
                 })
             except (Exception, SystemExit) as exc:
-                # SystemExit too: judge-time execution runs the generated code
-                # with a plain in-process exec (QueryExecutor._execute_pandas),
-                # so a generated `raise SystemExit` would otherwise terminate
-                # the whole pipeline instead of failing this one query.
+                # SystemExit too: kept from when judge-time execution ran the
+                # generated code in-process, where a generated `raise
+                # SystemExit` would have terminated the whole pipeline; the
+                # sandbox reports it as a RuntimeError now.
                 failures.append({
                     "id": qid,
                     "error": str(exc) or type(exc).__name__,
@@ -932,7 +968,7 @@ class JudgementResponseAgent:
         # The payload is built exactly like LLMStatementJudge.complete's so
         # both paths show the judges the identical evaluation content.
         if self._code_panel.is_configured:
-            # Deterministic, code-computed signal (see plan_code_alignment.py)
+            # Deterministic, code-computed signal (see planning/alignment.py)
             # folded into the payload text itself — cheaper and more visible
             # to the judge than a separate field it has no instruction to
             # read.
@@ -1038,7 +1074,7 @@ class StatementOrchestrator:
     preserve the two legacy positional signatures and map them onto ``_run``
     without swapping the match/metadata arguments. The mode-specific entry
     points ``StatementAgent`` / ``SingleStatementAgent``
-    (``orqa.agent.agents.StatementAgent`` / ``orqa.agent.agents.SingleStatementAgent``)
+    (``orqa.agent.agent`` / ``orqa.agent.agent``)
     subclass this orchestrator and each pin ``generate_statements`` to the
     positional signature ``statement_generation.py`` calls.
 
@@ -1094,11 +1130,11 @@ class StatementOrchestrator:
         self.config_path = config_path
         self.kind = kind
         self.bad_tokens = bad_tokens
-        # Reverse index (DatasetIndex/SolrDatasetIndex, or None when
-        # unavailable) the pre-planning keyword search runs on to find the
+        # Reverse index (the portal's SolrDatasetIndex, or None when
+        # the gate is off) the pre-planning keyword search runs on to find the
         # anchor a question is written from (see _run). The question stage's
-        # own retrievability gate — orqa.agent.utility.question_gate, via
-        # retrievability_gate.check_question_retrievability — votes the
+        # own retrievability gate — orqa.retrieval.gate, via
+        # gate.check_question_retrievability — votes the
         # question across the retrieval_panel below.
         # `retrieval_gate_enabled=False` (tasks.search.
         # retrieval_gate_enabled in the workflow yaml) is the master off
@@ -1122,7 +1158,7 @@ class StatementOrchestrator:
         # is found — only the abort-on-failure half is gated.
         self._gate_unretrievable_groups = gate_unretrievable_groups
         # The retrievability CONTRACT (see
-        # orqa.agent.utility.retrievability_gate): the
+        # orqa.retrieval.gate): the
         # retrieval_panel is None exactly when the contract is unavailable
         # or disabled (tasks.search.retrieval_contract.enabled, or the
         # master retrieval_gate_enabled switch) — same "None means off"
@@ -1218,8 +1254,8 @@ class StatementOrchestrator:
 
     def _portal_and_mode(self) -> bool:
         """True when the gate searches the way the portal does — AND matching,
-        via the portal's own Solr core (``orqa.benchmark.solr_index``) or an
-        imitation of it (``orqa.benchmark.index.PortalIndexView``). Under it
+        via the portal's own Solr core (``solr.index``) with
+        ``keyword_match: all``. Under it
         no single keyword query surfaces a multi-table group, so multi-table
         anchors are per table and retrieval is voted per table."""
         view = self._search_index
@@ -1232,7 +1268,7 @@ class StatementOrchestrator:
 
         ``columns`` is the schema already loaded during preparation: column
         names compete with title/tags/publisher as keyword candidates (see
-        ``keyword_suggestion._candidate_pools``), and are the only schema
+        ``anchors._candidate_pools``), and are the only schema
         vocabulary available at all when CKAN normalized metadata has
         ``columns: []``. ``link_columns`` are the columns this group is
         joined/unioned on, from the upstream match constraint — prioritized as
@@ -1298,7 +1334,7 @@ class StatementOrchestrator:
         Single-table plans target literal RANK 1, not a window — with only
         one target, "near the top" has no reason to settle for less, and a
         greedy search over a table's own real vocabulary reaching rank 1
-        costs no more than reaching rank 9 (see keyword_suggestion.py's
+        costs no more than reaching rank 9 (see anchors.py's
         module docstring on why this fitness search is correct by
         construction, not a heuristic estimate).
 
@@ -1481,6 +1517,20 @@ class StatementOrchestrator:
 
             for idx, dataset_path in enumerate(dataset_paths):
                 cols = involved_cols.get(f"Table_{idx}", [])
+                # Refused before its file statistics (minutes on 100M+ rows)
+                # when the table would not fit in the memory left.
+                memory_guard.check_load(Path(dataset_path))
+                # The largest parquet tables get their statistics from the
+                # file before the frame is loaded: the two together did not
+                # fit in memory (nyc taxi trips, 169M rows).
+                file_stats = None
+                if max_rows is None and stats_from_file(dataset_path):
+                    file_stats = ColumnStatistics.compute_from_parquet(
+                        dataset_path,
+                        select_parquet_columns(dataset_path, max_cols, cols),
+                        alias=f"Table_{idx}",
+                        bad_tokens=self.bad_tokens,
+                    )
                 df, dataset_info = utils.prepare_dataset(
                     dataset_path,
                     cols,
@@ -1496,14 +1546,23 @@ class StatementOrchestrator:
                 # the table's structure, for the planner's `clean` step and the code.
                 # ``source``: a parquet table of 1M+ rows gets its frequency
                 # tables through Arrow (same facts, 1.6x faster on 113M rows).
+                if file_stats is not None and not matches_frame(file_stats, df):
+                    logger.warning(
+                        "Column statistics of %s from the file do not match its frame; computing them on the frame",
+                        Path(dataset_path).name,
+                    )
+                    file_stats = None
                 stats.append(
-                    ColumnStatistics.compute(
+                    file_stats
+                    if file_stats is not None
+                    else ColumnStatistics.compute(
                         df,
                         alias=f"Table_{idx}",
                         bad_tokens=self.bad_tokens,
                         source=dataset_path,
                     )
                 )
+                del file_stats
                 total_columns += len(df.columns)
                 columns_by_table.append(
                     {
@@ -1553,7 +1612,7 @@ class StatementOrchestrator:
             # ── Pre-planning retrievability check ───────────────────────────
             # Runs before ANY LLM call (table analysis, planning): given the
             # exact table group this run is fixed to (see
-            # orqa.agent.utility.keyword_suggestion), empirically search for
+            # orqa.retrieval.anchors), empirically search for
             # a keyword set that surfaces every one of these tables within
             # the adaptive top-K (see _adaptive_top_k) — not a guess, a
             # verified result from the real reverse index. Two outcomes:
@@ -1655,13 +1714,13 @@ class StatementOrchestrator:
 
             # ── Retrieval contract ─────────────────────────────────────────
             # The window (K) and the majority a question is voted against —
-            # see orqa.agent.utility.retrievability_gate. Built once per
+            # see orqa.retrieval.gate. Built once per
             # table group, from the SAME plan_tables list above. Independent
             # of the keyword-suggestion anchor computed just above: that
             # anchor is the vocabulary a question is WRITTEN from (see
             # QuestionGeneratorAgent) — THIS contract is what actually gates
             # the question, deterministically, in the question stage
-            # (question_gate.gate_question) before any plan exists.
+            # (gate.gate_question) before any plan exists.
             retrieval_contract: Optional[RetrievalContract] = None
             if self._retrieval_panel is not None and self._search_index is not None:
                 retrieval_contract = build_contract(
@@ -1686,7 +1745,7 @@ class StatementOrchestrator:
             # question's wording.
             single_table_anchors: dict[str, list[str]] = {}
             # Anchor terms a person would never type as written (see
-            # keyword_suggestion.is_speakable_term): the writer is told to say
+            # anchors.is_speakable_term): the writer is told to say
             # what they mean, never to paste them.
             anchor_code_terms: dict[str, list[str]] = {}
             if mode == MULTI and self._search_index is not None:
@@ -2009,14 +2068,7 @@ class StatementOrchestrator:
             # name now lands as a KeyError -> correction instead of silently
             # resolving to unvetted data. Derived columns are created by the
             # generated code at runtime, not loaded, so they are unaffected.
-            column_allow_list = {
-                alias: list(view_df.columns)
-                for alias, view_df in zip(aliases, dfs)
-            }
-            execution_dataframes = {
-                alias: df[[c for c in column_allow_list.get(alias, df.columns) if c in df.columns]]
-                for alias, df in executor.load_tables(aliases).items()
-            }
+            execution_dataframes = _execution_frames(aliases, dfs, max_rows, executor)
             prepared_dataframes = execution_dataframes
             execution_dfs = [execution_dataframes[a] for a in aliases]
             # Divergence: set the judge single_table flag in single mode (Req 1.5).
@@ -2104,6 +2156,8 @@ class StatementOrchestrator:
         except FileNotFoundError as exc:
             logger.error("Dataset not found: %s", exc)
             raise
+        except memory_guard.InsufficientMemoryError:
+            raise  # the caller reports it in one line
         except Exception:
             logger.exception("Unified statement generation failed")
             raise
@@ -2271,7 +2325,7 @@ class StatementOrchestrator:
         is then gated per table (a lexical gate with one keyword check per
         table — does the question contain words that find it within
         ``retrieval_contract_top_k_per_table``? — counted as ONE vote next to
-        the semantic and hybrid retrievers, see ``retrievability_gate.
+        the semantic and hybrid retrievers, see ``gate.
         _question_terms_vote``) rather than as one search that must surface
         every table together — the searcher refines its query step by step,
         so what the question owes it is each table's vocabulary, not a single
@@ -4184,3 +4238,70 @@ class StatementOrchestrator:
             return
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             total[key] += partial.get(key, 0)
+
+
+# ── Multi-table entry point ───────────────────────────────────────────────────
+# Multi-table statement-generation agent.
+
+class StatementAgent(StatementOrchestrator):
+    """Multi-table entry point for the statement-generation orchestrator.
+
+    Its ``generate_statements`` keeps the multi-table positional signature and
+    delegates to the orchestrator's multi-table adapter (``_run(mode="multi", ...)``).
+    """
+
+    def generate_statements(
+        self,
+        dataset_paths,
+        aliases,
+        kind,
+        match,
+        involved_cols,
+        metadatas,
+        max_cols: int = 10,
+        sample_size: int = 5,
+    ):
+        return self._run(
+            mode=MULTI,
+            dataset_paths=dataset_paths,
+            aliases=aliases,
+            kind=kind,
+            match=match,
+            involved_cols=involved_cols,
+            metadata=metadatas,
+            max_cols=max_cols,
+            sample_size=sample_size,
+        )
+
+
+# ── Single-table entry point ──────────────────────────────────────────────────
+# Single-table statement-generation agent.
+
+class SingleStatementAgent(StatementOrchestrator):
+    """Single-table entry point for the statement-generation orchestrator.
+
+    IMPORTANT: the single-table call site invokes
+    ``generate_statements(csv_path, aliases, kind, metadata, max_cols, sample_size)``,
+    so this class's ``generate_statements`` MUST accept the SINGLE-table
+    positional signature ``(dataset_path, alias, kind, metadata, ...)`` — NOT the
+    multi-table one — and forward to the orchestrator's single-table adapter
+    (``generate_statements_single`` -> ``_run(mode="single", ...)``).
+    """
+
+    def generate_statements(
+        self,
+        dataset_path,
+        alias,
+        kind,
+        metadata,
+        max_cols: int = 10,
+        sample_size: int = 5,
+    ):
+        return self.generate_statements_single(
+            dataset_path,
+            alias,
+            kind,
+            metadata,
+            max_cols=max_cols,
+            sample_size=sample_size,
+        )

@@ -43,7 +43,7 @@ import difflib
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from .undecodable_names import escaped_literal, is_undecodable
+from orqa.utils.undecodable_names import escaped_literal, is_undecodable
 
 __all__ = [
     "SOURCE_FREE_OPERATIONS",
