@@ -159,32 +159,6 @@ def inline_refs(schema: dict) -> dict:
     return resolve(schema)
 
 
-def served_by_fallback(response: Any, primary_model: str, primary_id: Optional[str] = None) -> bool:
-    """True when the Router answered from a FALLBACK deployment rather than
-    the configured primary — a different, weaker model answering a
-    structured call without anything else in the pipeline saying so.
-
-    Decided on the Router's deployment id when the response carries one
-    (``_hidden_params["model_id"]``, set from the ``model_info.id`` the
-    client gives every Router entry), since the model name a provider
-    echoes back need not be the configured string — OCI answers a dedicated
-    endpoint with the base model's OCID. Without an id, the names are
-    compared as before.
-    """
-    hidden = getattr(response, "_hidden_params", None)
-    served_id = hidden.get("model_id") if isinstance(hidden, dict) else None
-    if primary_id and served_id:
-        return str(served_id) != str(primary_id)
-    try:
-        served = str(response.get("model") or "")
-    except Exception:  # noqa: BLE001 — a response object without .get
-        return False
-    if not served:
-        return False
-    primary = primary_model.split("/", 1)[-1]
-    return served.split("/", 1)[-1] != primary and primary not in served
-
-
 def _looks_like_format_rejection(exc: BaseException) -> bool:
     text = str(exc).lower()
     return any(s in text for s in (
@@ -704,7 +678,7 @@ class LLMClientStructured(LLMClient):
 
     def _call(self, messages: list[dict], native: bool, _record: Optional[dict] = None,
               **kwargs) -> tuple[Any, bool]:
-        """One router call. Returns ``(response, native_used)``; a provider
+        """One model call. Returns ``(response, native_used)``; a provider
         that rejects ``response_format`` turns native mode off for good.
 
         ``_record`` (the attempt's call record) receives what is sent, as
@@ -841,7 +815,7 @@ class LLMClientStructured(LLMClient):
         ``pre_validate`` is applied to the parsed, normalized JSON before
         validation (the statement corrector backfills the unchanged fields of
         the source query there, so a lean answer carrying only the fixed
-        ``code`` validates). Remaining ``kwargs`` go to the router call
+        ``code`` validates). Remaining ``kwargs`` go to the model call
         (``max_tokens`` — defaulted to ``default_max_tokens`` — and the like).
 
         Returns ``(result_dict, usage_total)`` on success; ``({}, usage_total)``
@@ -879,13 +853,6 @@ class LLMClientStructured(LLMClient):
                 response, native_used = self._call(messages, native, _record=record, **call_kwargs)
                 record["native_schema"] = native_used
                 record["model"] = response.get("model")
-                # Only a configured fallback deployment can answer in the
-                # primary's place; with none, the served name is whatever
-                # the provider echoes (an OCID on a dedicated OCI endpoint).
-                if self.fallback_names and served_by_fallback(response, self.primary_model, "primary"):
-                    record["fallback_model"] = True
-                    logger.warning("%s: answer served by fallback model %s (primary %s)",
-                                   self._label, record["model"], self.primary_label)
                 usage = _usage_of(response)
                 _add_usage(usage_total, usage)
                 choice = response["choices"][0]

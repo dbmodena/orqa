@@ -63,9 +63,11 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _MARKER = re.compile(r"^\[run_portal\] (\S+) step (\S+) (start|exit)(?: (-?\d+))?")
 _BUDGET = re.compile(r"budget — tokens left: ([\d,-]+), datasets left: (-?\d+)")
 _BATCH = re.compile(r"batch (\d+)/(\d+)")
-# litellm's line for each model a process's Router registers.
-_REGISTERED = re.compile(r"register_model: model=(\S+)")
-_ROUTER_ALIAS = re.compile(r"^(primary|fallback_\d+|\w+_judge_\d+)$")
+# The line an LLM client prints for each model it addresses
+# (LLMClient._register_target); runs from before the LiteLLM Router was
+# dropped have litellm's own ``register_model`` line instead.
+_REGISTERED = re.compile(r"(?:LLM target|register_model): model=(\S+)")
+_ROUTER_ALIAS = re.compile(r"^(primary|\w+_judge_\d+)$")
 
 
 # ------------------------------------------------------------------ files
@@ -161,8 +163,8 @@ def _short(model: str) -> str:
 
 
 def _references(config: dict) -> list[str]:
-    """Every model reference of the LLM config: primary, fallbacks, judges."""
-    refs = [config.get("model")] + list(config.get("fallback_models") or [])
+    """Every model reference of the LLM config: primary and judges."""
+    refs = [config.get("model")]
     for judges in (config.get("judge_profiles") or {}).values():
         refs += [j.get("model") if isinstance(j, dict) else j for j in judges or []]
     return [str(r) for r in refs if r]
@@ -198,7 +200,6 @@ def llm_status() -> dict[str, Any]:
         "endpoint": re.sub(r"^https?://([^/]+).*$", r"\1", base) if base else None,
         "thinking": None if thinking is None else bool(thinking),
         "judges": config.get("judge_profiles") or {},
-        "fallback_models": config.get("fallback_models") or [],
         "litellm_embedding_model": config.get("embedding_model"),
         "pinned": pinned,
         "references": sorted(set(references)),
@@ -329,7 +330,7 @@ def _fold_launcher(state: dict, line: str) -> None:
             state["waiting"] = line.split(" waiting: ", 1)[1]
         return
     registered = _REGISTERED.search(line)
-    # The Router's own aliases (primary, fallback_N, plan_judge_N) name no model.
+    # The former Router's own aliases (primary, plan_judge_N) name no model.
     if registered and not _ROUTER_ALIAS.match(registered.group(1)):
         state["registered"].add(registered.group(1))
     discovery = state.get("discovery")

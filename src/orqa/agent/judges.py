@@ -17,7 +17,7 @@ own reasoning style), and majority voting only helps when the judges' errors
 are decorrelated — so profiles should mix model families, not sizes of one.
 
 Each ``judge_profiles.<panel>`` entry is a model reference exactly like the
-primary/fallback models (``LLMClient._resolve_model_spec``): a LiteLLM model
+primary model (``LLMClient._resolve_model_spec``): a LiteLLM model
 string, the name of a ``deployments`` entry (e.g. a dedicated OCI endpoint),
 or a mapping with a ``model`` key plus per-judge litellm overrides; provider
 params are fetched from ``provider_params`` by the resolved model's provider
@@ -33,7 +33,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, List, Optional
 
-from litellm import Router
 from pydantic import ValidationError
 
 from orqa.agent.llm_client.LLMClientStructured import (
@@ -50,6 +49,9 @@ from orqa.agent.llm_client.coercion import errors_brief, validate_leniently
 
 logger = logging.getLogger(__name__)
 
+# Seconds a vote may take when the judge's own params set no ``timeout``.
+JUDGE_TIMEOUT = 120
+
 
 class JudgePanel(LLMClientStructured):
     """N-model majority-vote judge panel over one response schema.
@@ -63,7 +65,7 @@ class JudgePanel(LLMClientStructured):
 
     The panel reuses the shared JSON-repair / Pydantic validation pipeline of
     :class:`LLMClientStructured`, but routes each vote to its own judge model
-    via a dedicated router with NO fallback chain — a judge that fails after
+    as its own call target — a judge that fails after
     the configured retries is a failed vote by design, never silently served
     by a different model (that would collapse the panel's independence).
 
@@ -99,7 +101,7 @@ class JudgePanel(LLMClientStructured):
         super().__init__(config_path, response_model)
         self.panel = panel
         self._root_key = root_key
-        # Native JSON-schema decoding is per judge ENTRY (router_name): a
+        # Native JSON-schema decoding is per judge ENTRY (target): a
         # provider that rejects the parameter turns it off for that judge
         # only — two judges may share a model name on different endpoints.
         self._native_ok_by_judge: dict[str, bool] = {}
@@ -120,7 +122,6 @@ class JudgePanel(LLMClientStructured):
             if self.response_model is not None
             else []
         )
-        self.panel_router = self._build_panel_router() if self.judges else None
 
     # ------------------------------------------------------------------
     # Configuration
@@ -137,8 +138,9 @@ class JudgePanel(LLMClientStructured):
         Accepts a plain model string, a deployment name, or a mapping
         carrying ``model`` plus per-judge litellm overrides. Each descriptor
         carries ``model`` (the label the votes and logs name the judge by —
-        the deployment name when one was used), ``litellm_model`` (what the
-        Router calls), ``params`` (provider params + deployment params +
+        the deployment name when one was used), ``litellm_model`` (the model
+        string that is called), ``target`` (the name its calls pass as
+        ``model``), ``params`` (provider params + deployment params +
         overrides) and ``max_output_tokens`` (the deployment's cap, if any).
         Invalid entries are skipped with a log.
         """
@@ -161,13 +163,13 @@ class JudgePanel(LLMClientStructured):
                     self.panel, idx, entry, exc,
                 )
                 continue
-            self._register_router_entry(f"{self.panel}_judge_{idx}", spec)
+            self._register_target(f"{self.panel}_judge_{idx}", spec, default_timeout=JUDGE_TIMEOUT)
             judges.append(
                 {
                     "index": idx,
                     "model": spec["label"],
                     "litellm_model": spec["model"],
-                    "router_name": f"{self.panel}_judge_{idx}",
+                    "target": f"{self.panel}_judge_{idx}",
                     "params": spec["params"],
                     # Alias kept for subclasses written against the former
                     # descriptor (experiments/structured_stability).
@@ -177,91 +179,16 @@ class JudgePanel(LLMClientStructured):
             )
         return judges
 
-    def _build_panel_router(self) -> Router:
-        """One router entry per judge; provider params resolved by prefix.
-
-        No fallback chain: each vote must come from its own judge model or
-        count as failed.
-        """
-        model_list = []
-        for judge in self.judges:
-            model_list.append(
-                {
-                    "model_name": judge["router_name"],
-                    "litellm_params": {"model": judge["litellm_model"], **judge["params"]},
-                    "model_info": {"id": judge["router_name"]},
-                }
-            )
-        return Router(
-            model_list=model_list,
-            fallbacks=[],
-            num_retries=0,
-            timeout=120,
-            set_verbose=False,
-        )
-
-    # ------------------------------------------------------------------
-    # Voting
-    # ------------------------------------------------------------------
-
-    def evaluate(
-        self, instructions: str, payload: str, **kwargs
-    ) -> tuple[dict, dict]:
-        """Run every judge on the same payload and majority-aggregate.
-
-        ``instructions`` carries ONLY the static judge instructions; they are
-        combined with the (equally static) schema constraint into the system
-        message, so each judge model sees a byte-identical prefix on every
-        call and its provider prompt cache is hit. ``payload`` is the per-item
-        user message.
-
-        Returns ``(judgment, usage_total)`` where ``judgment`` is the
-        aggregated verdict dict — schema fields merged from the majority side,
-        plus a ``panel`` sub-dict holding every per-judge vote — and is never
-        empty (an all-judges-failed panel yields a rejection with the reason).
-        """
-        usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        if not self.is_configured:
-            return (
-                {"approved": False, "feedback": f"Judge panel {self.panel!r} is not configured.", "suggestions": ""},
-                usage_total,
-            )
-
-        system_prompt = self.reform_prompt_constraint(instructions)
-        votes: List[dict] = []
-        with ThreadPoolExecutor(max_workers=len(self.judges)) as pool:
-            future_to_judge = {
-                pool.submit(self._judge_once, judge, system_prompt, payload, **kwargs): judge
-                for judge in self.judges
-            }
-            for future in as_completed(future_to_judge):
-                judge = future_to_judge[future]
-                try:
-                    judgment, usage = future.result()
-                except Exception as exc:  # noqa: BLE001 — one judge must not sink the panel
-                    logger.warning(
-                        "Panel %s judge %s failed: %s", self.panel, judge["model"], exc
-                    )
-                    judgment, usage = {}, {}
-                for key in usage_total:
-                    usage_total[key] += (usage or {}).get(key, 0)
-                votes.append({"index": judge["index"], "judge": judge["model"], "judgment": judgment})
-
-        votes.sort(key=lambda v: v["index"])
-        return self._aggregate(votes), usage_total
-
-    native_schema: bool = True
-
     def _judge_response_format(self) -> dict:
         return self.response_format()
 
     def _judge_call(self, judge: dict, messages: list[dict], **kwargs) -> tuple[Any, bool]:
-        """One vote's router call on the panel router (no fallback chain,
-        throttle backoff shared with every other client). Returns
+        """One vote's call to its judge's own target (throttle backoff
+        shared with every other client). Returns
         ``(response, native_used)``."""
-        native = self.native_schema and self._native_ok_by_judge.get(judge["router_name"], True)
+        native = self.native_schema and self._native_ok_by_judge.get(judge["target"], True)
         args = {
-            "model": judge["router_name"],
+            "model": judge["target"],
             "messages": sanitize_messages(messages),
             **self._default_temperature_kwargs(judge["litellm_model"], judge["params"]),
             **kwargs,
@@ -269,15 +196,15 @@ class JudgePanel(LLMClientStructured):
         if native:
             try:
                 return self._completion_with_backoff(
-                    {**args, "response_format": self._judge_response_format()}, router=self.panel_router
+                    {**args, "response_format": self._judge_response_format()}
                 ), True
             except Exception as exc:  # noqa: BLE001
                 if not _looks_like_format_rejection(exc):
                     raise
                 logger.warning("Panel %s judge %s rejected response_format (%s); native schema off for it.",
                                self.panel, judge["model"], str(exc)[:160])
-                self._native_ok_by_judge[judge["router_name"]] = False
-        return self._completion_with_backoff(args, router=self.panel_router), False
+                self._native_ok_by_judge[judge["target"]] = False
+        return self._completion_with_backoff(args), False
 
     def _validate_vote(self, json_data: Any, record: dict) -> Optional[dict]:
         """Strict, then coerced; unwraps ``root_key`` to the judge's verdict."""

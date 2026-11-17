@@ -1,6 +1,6 @@
 """LiteLLM client base classes for the statement-generation agent.
 
-- ``LLMClient`` — YAML-configured LiteLLM/Router client with retry handling.
+- ``LLMClient`` — YAML-configured LiteLLM client with retry handling.
 - ``LLMClientStructured`` — adds Pydantic response-model loading, JSON repair,
   and structured-error retry loops on top of ``LLMClient``.
 - ``EmbeddingClient`` — YAML-configured LiteLLM embedding wrapper (batching,

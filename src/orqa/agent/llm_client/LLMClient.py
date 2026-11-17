@@ -7,7 +7,6 @@ from typing import Any, Optional
 
 import litellm
 import yaml
-from litellm import Router
 
 from orqa.agent.llm_client.messages import sanitize_messages
 
@@ -27,6 +26,12 @@ _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # string) any client or judge panel may resolve: a run pinned to one endpoint
 # stops at start instead of calling another model.
 ONLY_LLM_ENV = "ORQA_ONLY_LLM"
+# Seconds a request may take when neither the call nor the target's params
+# (provider_params / deployment) set a ``timeout``.
+DEFAULT_TIMEOUT = 60
+# LiteLLM model strings already announced by this process (see
+# LLMClient._register_target).
+_ANNOUNCED: set[str] = set()
 
 
 class DisallowedModelError(RuntimeError):
@@ -39,7 +44,7 @@ class LLMClient:
     """
     LiteLLM client with YAML configuration.
 
-    Model references (``model``, ``fallback_models[]``, ``judge_profiles.*[]``)
+    Model references (``model``, ``judge_profiles.*[]``)
     are resolved by :meth:`_resolve_model_spec`. Besides a plain LiteLLM model
     string, a reference can name an entry of the YAML's ``deployments``
     section — a LiteLLM model string plus the litellm params that pin it to a
@@ -77,17 +82,17 @@ class LLMClient:
         self.provider_params = self.config.get("provider_params", {}) or {}
         self.deployments = self._load_deployments()
         # The primary model, resolved once: ``primary_model`` is the LiteLLM
-        # model string the Router calls, ``primary_label`` how the pipeline
+        # model string that is called, ``primary_label`` how the pipeline
         # names it (the deployment name when one is configured).
         self._require_allowed(self.config["model"])
         self.primary = self._resolve_model_spec(self.config["model"])
         self.primary_model: str = self.primary["model"]
         self.primary_label: str = self.primary["label"]
         self.primary_max_output_tokens: Optional[int] = self.primary["max_output_tokens"]
-        self.fallback_names: list[str] = []
-        self._specs_by_router_name: dict[str, dict] = {}
-        # 3. Setup router LAST (depends on provider_params being set)
-        self.router = self._setup_router()
+        # 3. Call targets: the name a call passes as ``model`` -> what
+        # litellm.completion is called with (see _register_target).
+        self._targets: dict[str, dict] = {}
+        self._register_target("primary", self.primary)
 
     @staticmethod
     def is_throttled(exc: BaseException) -> bool:
@@ -111,12 +116,14 @@ class LLMClient:
             or "throttle" in text
         )
 
-    def _completion_with_backoff(self, completion_args: dict, router: Any = None) -> Any:
-        """Router call that absorbs provider throttling by backing off.
+    def _completion_with_backoff(self, completion_args: dict) -> Any:
+        """``litellm.completion`` call that absorbs provider throttling by
+        backing off.
 
-        ``router`` defaults to the primary/fallback router; a judge panel
-        passes its own fallback-free router so its votes get the same
-        throttle handling.
+        ``completion_args["model"]`` names a registered target (``"primary"``
+        or a judge panel's entry, :meth:`_register_target`); the request is
+        the target's params with the call's own arguments on top, so an
+        explicit call-time argument beats the target's default.
 
         OCI's on-demand limit is applied by DYNAMIC throttling: the ceiling
         is undocumented, moves with overall demand, and is steered partly by
@@ -130,16 +137,19 @@ class LLMClient:
         capacity dip would otherwise wake at the same instant and recreate
         the burst that caused it.
         """
-        target = router if router is not None else self.router
-        spec = self._specs_by_router_name.get(str(completion_args.get("model")))
-        if spec and spec.get("missing_env"):
+        name = str(completion_args.get("model"))
+        target = self._targets.get(name)
+        if target is None:
+            raise ValueError(f"unknown LLM target {name!r}; registered: {', '.join(sorted(self._targets))}")
+        if target["missing_env"]:
             raise ValueError(
-                f"deployment {spec['label']!r} cannot be called: unset environment variable(s) "
-                f"{', '.join(spec['missing_env'])} in its model string"
+                f"deployment {target['label']!r} cannot be called: unset environment variable(s) "
+                f"{', '.join(target['missing_env'])} in its model string"
             )
+        request = {**target["params"], **completion_args, "model": target["model"]}
         for attempt in range(self.throttle_max_retries + 1):
             try:
-                return target.completion(**completion_args)
+                return litellm.completion(**request)
             except Exception as exc:
                 if not self.is_throttled(exc) or attempt == self.throttle_max_retries:
                     raise
@@ -224,20 +234,19 @@ class LLMClient:
 
     @staticmethod
     def _require_allowed(spec: Any) -> None:
-        """Refuse a model reference of the LLM config (primary, fallback,
-        judge) other than ``$ORQA_ONLY_LLM``. Checked where the config's
-        references become Router entries, not in :meth:`_resolve_model_spec`,
+        """Refuse a model reference of the LLM config (primary, judge) other than ``$ORQA_ONLY_LLM``. Checked where the config's
+        references become call targets, not in :meth:`_resolve_model_spec`,
         which also looks up params of already-resolved model strings."""
         allowed = os.environ.get(ONLY_LLM_ENV, "").strip()
         name = str((spec.get("model") if isinstance(spec, dict) else spec) or "").strip()
         if allowed and name != allowed:
             raise DisallowedModelError(
                 f"{ONLY_LLM_ENV}={allowed}, but the LLM config also names {name!r}: remove it from "
-                "conf/llm/litellm.yaml (model, fallback_models, judge_profiles) or unset the variable"
+                "conf/llm/litellm.yaml (model, judge_profiles) or unset the variable"
             )
 
     def _resolve_model_spec(self, spec: Any) -> dict:
-        """Resolve one model reference into what a Router entry needs.
+        """Resolve one model reference into what a call target needs.
 
         ``spec`` is a LiteLLM model string, the name of a ``deployments``
         entry, or a mapping with a ``model`` key (either of the two) plus
@@ -292,10 +301,33 @@ class LLMClient:
             "missing_env": list(deployment["missing_env"]) if deployment is not None else [],
         }
 
-    def _register_router_entry(self, router_name: str, spec: dict) -> None:
-        """Remember what a Router entry resolves to, so a call to a
-        deployment whose ``${NAME}`` was unset is refused by name."""
-        self._specs_by_router_name[router_name] = spec
+    def _register_target(self, name: str, spec: dict, default_timeout: float = DEFAULT_TIMEOUT) -> None:
+        """Make a resolved model spec callable as ``model=name``
+        (:meth:`_completion_with_backoff`).
+
+        The target's params are the spec's, with LiteLLM's whole-value
+        ``os.environ/NAME`` indirections read from the environment (unset:
+        the param is left out), over two defaults: ``timeout`` and
+        ``max_retries: 0`` — retries are this client's own (throttle backoff
+        and the correction loop), never the provider SDK's hidden ones.
+        """
+        params: dict[str, Any] = {"timeout": default_timeout, "max_retries": 0}
+        for key, value in spec["params"].items():
+            if isinstance(value, str) and value.startswith("os.environ/"):
+                value = os.environ.get(value.split("/", 1)[1])
+            if value is not None:
+                params[key] = value
+        self._targets[name] = {
+            "label": spec["label"],
+            "model": spec["model"],
+            "params": params,
+            "missing_env": spec.get("missing_env") or [],
+        }
+        # One console line per model and process: the run monitor reads it
+        # to show which endpoints a run addresses (run_monitor._REGISTERED).
+        if spec["model"] not in _ANNOUNCED:
+            _ANNOUNCED.add(spec["model"])
+            logger.warning("LLM target: model=%s (%s)", spec["model"], spec["label"])
 
     def _get_provider_from_model(self, model: str) -> str:
         """Extract provider name from model string."""
@@ -334,8 +366,8 @@ class LLMClient:
         reasoning model that requires a fixed temperature while thinking
         (OCI's gpt-oss/gemini-2.5-flash, Anthropic's extended thinking).
 
-        litellm's Router always lets an explicit call-time kwarg beat a
-        deployment's own ``litellm_params`` default, so unconditionally
+        An explicit call-time kwarg always beats a target's own params
+        (:meth:`_completion_with_backoff`), so unconditionally
         passing ``temperature=self.temperature`` on every call — the
         previous behavior — silently clobbers any such override regardless
         of how it was configured. Returning `{}` here lets the deployment's
@@ -347,51 +379,6 @@ class LLMClient:
         if "temperature" in overrides:
             return {}
         return {"temperature": self.temperature}
-
-    def _setup_router(self) -> Router:
-        """Setup LiteLLM Router with primary and fallback models."""
-        model_list = []
-
-        # Primary model (a LiteLLM string or a named deployment, resolved in
-        # __init__). The explicit model_info id lets a response say which
-        # deployment answered it, independent of the model name the
-        # provider echoes back (an OCID for a dedicated OCI endpoint).
-        model_list.append(
-            {
-                "model_name": "primary",
-                "litellm_params": {"model": self.primary_model, **self.primary["params"]},
-                "model_info": {"id": "primary"},
-            }
-        )
-        self._register_router_entry("primary", self.primary)
-
-        # Fallback models
-        fallback_names = []
-        for idx, fallback_spec in enumerate(self.config.get("fallback_models") or []):
-            fallback_name = f"fallback_{idx}"
-            fallback_names.append(fallback_name)
-            self._require_allowed(fallback_spec)
-            fallback = self._resolve_model_spec(fallback_spec)
-            self._register_router_entry(fallback_name, fallback)
-            model_list.append(
-                {
-                    "model_name": fallback_name,
-                    "litellm_params": {"model": fallback["model"], **fallback["params"]},
-                    "model_info": {"id": fallback_name},
-                }
-            )
-        self.fallback_names = fallback_names
-
-        # Setup fallback chain: primary -> fallback_0 -> fallback_1 -> ...
-        fallbacks = [{"primary": fallback_names}] if fallback_names else []
-
-        return Router(
-            model_list=model_list,
-            fallbacks=fallbacks,
-            num_retries=0,  # Router handles retries per model
-            timeout=60,
-            set_verbose=False,  # Shows which model is being used
-        )
 
     def _load_config(self, config_path) -> dict[str, Any]:
         """Load configuration from YAML file"""

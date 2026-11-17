@@ -133,8 +133,7 @@ function renderTop(d) {
       <dt>Served as</dt><dd class="mono">${esc(llm.served_as)}</dd>
       <dt>Endpoint</dt><dd class="mono">${esc(llm.endpoint || "–")}</dd>
       <dt>Thinking</dt><dd>${llm.thinking == null ? "model default" : llm.thinking ? "on" : "off"}</dd>
-      <dt>Judges</dt><dd>${esc(judges || "–")}</dd>
-      <dt>Fallback</dt><dd>${esc((llm.fallback_models || []).join(", ") || "none")}</dd></dl></div>
+      <dt>Judges</dt><dd>${esc(judges || "–")}</dd></dl></div>
     <div class="card"><h2>Embeddings</h2><dl class="kv" style="margin-top:8px">
       <dt>Server</dt><dd>${status(emb.up ? "done" : "failed", emb.up ? "Up" : "Down")} <span class="mono muted">${esc(emb.url)}</span></dd>
       <dt>Loaded</dt><dd class="model">${esc(loaded)}</dd>

@@ -8,7 +8,7 @@ prompts.
 
 - ClientMessageBuilder: 2 blocks (system + generation prompt)
 - JudgeMessageBuilder: 2 blocks (system + single query evaluation)
-- sanitize_messages: last-line guard applied at every router call site.
+- sanitize_messages: last-line guard applied at every model call site.
 """
 
 # Substituted for any empty/whitespace-only message content. Some providers

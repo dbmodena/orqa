@@ -78,7 +78,7 @@ _OWN_LOGGERS = ("orqa", "solr", "conf")
 _LLM_OK = {"strict", "coerced", "salvaged", "passthrough", "invalid->repaired"}
 # Kept from every call record; the raw answer and the prompt only on failure.
 _LLM_FIELDS = (
-    "client", "kind", "judge", "attempt", "outcome", "model", "fallback_model",
+    "client", "kind", "judge", "attempt", "outcome", "model",
     "native_schema", "max_tokens", "finish_reason", "truncated", "usage", "elapsed_s",
     "raw_chars", "whitespace_ratio", "json_error", "strict_errors", "coerce_errors",
     "fixes", "salvage", "loop_unit", "error", "deployment",
@@ -198,8 +198,6 @@ def _render_llm_call(seq: Optional[int], record: dict, schema: Optional[str], ok
         model.append(f"deployment {record['deployment']}")
     if record.get("model") and record.get("model") != record.get("deployment"):
         model.append(f"served by {record['model']}")
-    if record.get("fallback_model"):
-        model.append("FALLBACK")
     if schema:
         model.append(f"schema {schema} ({'native' if record.get('native_schema') else 'in prompt'})")
     params = record.get("params") or {}

@@ -32,8 +32,8 @@ class EmbeddingClient:
 
         provider = self.model.split("/")[0] if "/" in self.model else ""
         provider_params = (config.get("provider_params") or {}).get(provider) or {}
-        # Router-only keys like drop_params are fine to pass to litellm.embedding;
-        # resolve os.environ/ indirections the same way litellm does for chat.
+        # Keys like drop_params are fine to pass to litellm.embedding;
+        # os.environ/ indirections are resolved as LLMClient does for chat.
         self.provider_params = {
             k: (
                 os.environ.get(v.split("/", 1)[1], "")

@@ -116,7 +116,7 @@ class TaskProposerLLMClient(LLMClientStructured):
             {"role": "user", "content": self.reform_prompt_constraint(prompt)},
         ]
         completion_args = {
-            "model": "primary",  # Router handles the actual model selection
+            "model": "primary",
             "messages": messages,
             **self._default_temperature_kwargs(self.config["model"]),
             # "response_format": {"type": "json_object"},
@@ -130,7 +130,7 @@ class TaskProposerLLMClient(LLMClientStructured):
                 logger.debug("Attempt %d/%d...", attempt + 1, self.max_retries)
 
                 completion_args["messages"] = sanitize_messages(messages)
-                response = self.router.completion(**completion_args)
+                response = self._completion_with_backoff(completion_args)
                 usage = response["usage"]
                 usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
                 usage_total["completion_tokens"] += usage.get("completion_tokens", 0)
@@ -328,7 +328,7 @@ class PairTaskSelectorLLMClient(LLMClientStructured):
                 logger.debug("Attempt %d/%d...", attempt + 1, self.max_retries)
 
                 completion_args["messages"] = sanitize_messages(messages)
-                response = self.router.completion(**completion_args)
+                response = self._completion_with_backoff(completion_args)
                 usage = response["usage"]
                 usage_total["prompt_tokens"] += usage.get("prompt_tokens", 0)
                 usage_total["completion_tokens"] += usage.get("completion_tokens", 0)

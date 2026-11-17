@@ -55,7 +55,7 @@ from `.env`). The dedicated OCI AI cluster is addressed through the `deployments
 OpenAI-compatible route with the Generative AI API key: each deployment names the endpoint OCID (`DEDICATE_OCI_MODEL` /
 `_MODEL_2` / `_MODEL_3` in `.env`), the base URL (`DEDICATE_OCI_BASE_URL`) and the key (`DEDICATED_API_KEY`), and may cap
 the answer length with `max_output_tokens`. A deployment name can be used wherever a model is referenced (`model`,
-`fallback_models`, `judge_profiles.*`). See `docs/structured-output.md`.
+`judge_profiles.*`). See `docs/structured-output.md`.
 
 ### Apache Solr
 

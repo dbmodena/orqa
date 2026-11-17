@@ -8,32 +8,18 @@
 #                                 answers hit the route's 300 s cut
 # On demand: "oci/openai.gpt-oss-120b" (dynamic throttling).
 model: "oci-dedicated/qwen3"
-# Fallback models (tried in order if primary fails). NONE for structured
-# calls on purpose: the Router falls back on ANY exception from the primary —
-# OCI's 429 throttle included — before the client's own throttle backoff sees
-# it, so a valid fallback would answer throttled structured calls with a
-# different, weaker model without anything in the pipeline saying so (the
-# client logs `served by fallback model` if that ever happens). The Groq key
-# in .env was also rejected as invalid, so the former entry only added a
-# dead call. Throttles are handled by the backoff below instead.
-fallback_models: []
-# - "groq/llama-3.3-70b-versatile"
-# - "ollama_chat/llama3.1:8b"
-#    - "groq/llama-3.3-70b-versatile"
-#   - "groq/llama-3.1-8b-instant"
-#  - "together_ai/togethercomputer/Llama-2-7B-32K-Instruct"
 
 # Embedding model for candidates discovery (metadata embeddings).
 # Must be multilingual: the portals include Italian, Spanish and French datasets.
 embedding_model: "oci/cohere.embed-v4.0"
 
 # Named deployments. A name below can be used anywhere a model is referenced
-# (model, fallback_models, judge_profiles.*): it expands to a LiteLLM model
+# (model, judge_profiles.*): it expands to a LiteLLM model
 # string plus the litellm params that pin the call to one serving endpoint,
 # merged over the provider_params of the model's prefix
 # (LLMClient._resolve_model_spec). `${NAME}` inside the model string is read
 # from the environment (.env); every other value may use LiteLLM's own
-# `os.environ/NAME` form, resolved when the Router is built.
+# `os.environ/NAME` form, resolved when the client is built.
 #
 # The dedicated OCI AI cluster is reached through OCI's OpenAI-compatible
 # route (DEDICATE_OCI_BASE_URL, ending in /20231130/actions/v1) with the
@@ -171,7 +157,7 @@ throttle_max_delay: 120.0
 # a LiteLLM model string, a name from `deployments` above (a dedicated OCI
 # endpoint), or a mapping with a "model" key plus per-judge overrides; its
 # provider params are fetched from provider_params above by the resolved
-# model's provider prefix, exactly like the primary/fallback models.
+# model's provider prefix, exactly like the primary model.
 # Prefer models from DIFFERENT families (votes only help when errors are
 # decorrelated) and different from the generation model (self-bias).
 # Remove/empty a panel to fall back to the single primary-model judge.

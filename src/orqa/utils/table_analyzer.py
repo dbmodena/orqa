@@ -435,9 +435,7 @@ class TableAnalyzer:
     def _cache_model(self) -> str:
         """The model id new cache entries are keyed under.
 
-        The configured PRIMARY model: the router may occasionally serve a call
-        from a fallback, but which model actually answered is not reported
-        back, so the primary is the honest stable key for a run's entries.
+        The configured primary model, the only one a client calls.
         """
         config = getattr(self._client, "config", None) or {}
         return str(config.get("model", "unknown"))
